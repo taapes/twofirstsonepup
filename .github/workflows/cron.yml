@@ -1,0 +1,17 @@
+name: Daily & 4h Sync
+
+on:
+  schedule:
+    - cron: "0 6 * * *"     # daily 06:00 UTC
+    - cron: "0 */4 * * *"   # every 4 hours
+  workflow_dispatch:
+
+jobs:
+  call-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger sync endpoint
+        run: |
+          curl -sS -X POST \
+            -H "X-Auth-Token: ${{ secrets.SYNC_AUTH_TOKEN }}" \
+            https://YOUR-RENDER-APP.onrender.com/admin/sync
