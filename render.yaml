@@ -1,58 +1,22 @@
-# render.yaml — Blueprint for twofirstsonepup + DB + cron jobs
-databases:
-  - name: twofirstsonepup-db
-    plan: free
-
 services:
   - type: web
     name: twofirstsonepup
-    env: python
+    runtime: python
     plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port 10000"
+    autoDeploy: true
+    region: oregon            # or "frankfurt" etc.; optional
+    healthCheckPath: /health  # FastAPI health endpoint
+
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+
+    startCommand: |
+      uvicorn main:app --host 0.0.0.0 --port 10000
+
     envVars:
+      # Set these in the Render dashboard after the service is created
       - key: DATABASE_URL
-        fromDatabase:
-          name: twofirstsonepup-db
-          property: connectionString
-      # This token protects your /admin/sync endpoint
-      - key: SYNC_AUTH_TOKEN
-        value: "REPLACE_WITH_A_LONG_RANDOM_SECRET"
-      # Optional: once the app is live, set this to your public URL (e.g., https://twofirstsonepup.onrender.com)
-      - key: SYNC_URL
-        value: "REPLACE_WITH_PUBLIC_BASE_URL"
-
-jobs:
-  # Runs once daily at 06:00 UTC
-  - type: cron
-    name: daily-sync
-    schedule: "0 6 * * *"
-    envVars:
+        sync: false
       - key: SYNC_AUTH_TOKEN
         sync: false
-      - key: SYNC_URL
-        sync: false
-    plan: free
-    runtime: python
-    buildCommand: "python -V"
-    startCommand: >
-      bash -lc 'curl -sS -X POST
-      -H "X-Auth-Token: ${SYNC_AUTH_TOKEN}"
-      "${SYNC_URL}/admin/sync"'
-
-  # Runs every 4 hours (00:00, 04:00, 08:00, …)
-  - type: cron
-    name: four-hour-sync
-    schedule: "0 */4 * * *"
-    envVars:
-      - key: SYNC_AUTH_TOKEN
-        sync: false
-      - key: SYNC_URL
-        sync: false
-    plan: free
-    runtime: python
-    buildCommand: "python -V"
-    startCommand: >
-      bash -lc 'curl -sS -X POST
-      -H "X-Auth-Token: ${SYNC_AUTH_TOKEN}"
-      "${SYNC_URL}/admin/sync"'
