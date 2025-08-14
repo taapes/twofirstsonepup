@@ -14,4 +14,4 @@ jobs:
         run: |
           curl -sS -X POST \
             -H "X-Auth-Token: ${{ secrets.SYNC_AUTH_TOKEN }}" \
-            https://YOUR-RENDER-APP.onrender.com/admin/sync
+            https://twofirstsonepup.onrender.com/admin/sync
