@@ -110,7 +110,11 @@ Write tests for these. They are custom and non-obvious:
   ineligible (`players.is_eligible = false`). Surface in the ineligible report.
 - **Injury list:** One IL player per manager. Minimum 4-GW stay. Replacement must
   be same position. Returns after GW38 or via waiver. Admin-managed.
-- **Anti-tanking:** Flag any manager with 3+ consecutive 0-minute players.
+- **Anti-tanking:** Flag a manager when >=3 of their ROSTERED players (the whole
+  15-man squad, not just the XI) record 0 minutes in each of >=3 CONSECUTIVE
+  gameweeks. Across-gameweek rule, players may differ week to week. Thresholds
+  are constants in `rules.py`. (Whole-squad scope was chosen deliberately even
+  though it flags most of the league — see [[anti-tanking-whole-squad-choice]].)
   Show infractions on homepage and admin panel.
 - **Trades:** Allowed only end of GW38 -> Jan 31. Player-for-player,
   pick-for-player, or pick-for-pick. Conditions free-text initially. Trades
