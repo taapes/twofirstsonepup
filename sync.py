@@ -40,6 +40,24 @@ def _upsert(session: Session, model, match: dict, values: dict):
     return row
 
 
+def _parse_iso(dt_str: str | None) -> datetime.datetime | None:
+    """Parse an FPL ISO timestamp (e.g. '2025-08-11T22:15:00Z') -> aware datetime."""
+    if not dt_str:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _season_start_year(dt: datetime.datetime | None) -> int:
+    """FPL seasons span Aug->May; the season is named by its STARTING year
+    (e.g. '25/26' -> 2025). Months Jan-Jun belong to the season that started the
+    previous August. Falls back to 'now' if no anchor date is available."""
+    dt = dt or datetime.datetime.now(datetime.timezone.utc)
+    return dt.year if dt.month >= 7 else dt.year - 1
+
+
 def _get_or_create_gameweek(session: Session, league_id, number: int) -> Gameweek:
     """Gameweeks are UUID-keyed rows scoped to (league, number). Sync only needs
     the row to exist so rosters/points can FK to it; dates/lock come later."""
@@ -114,13 +132,16 @@ async def sync_league_and_managers():
         async with httpx.AsyncClient() as client:
             data = await _get_json(client, f"{API_BASE}/league/{LEAGUE_ID}/details")
 
+        league_meta = data.get("league", {})
+        draft_dt = _parse_iso(league_meta.get("draft_dt"))
         league = _upsert(
             session,
             League,
             {"fpl_league_id": str(LEAGUE_ID)},
             {
-                "season_year": datetime.datetime.now(datetime.timezone.utc).year,
-                "name": data.get("league", {}).get("name", ""),
+                "season_year": _season_start_year(draft_dt),
+                "name": league_meta.get("name", ""),
+                "draft_date": draft_dt.date() if draft_dt else None,
             },
         )
         session.flush()

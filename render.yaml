@@ -10,6 +10,9 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
+      # Apply DB migrations once per deploy (DATABASE_URL is available at build
+      # time). Kept out of startCommand so free-tier cold starts aren't slowed.
+      alembic upgrade head
 
     startCommand: |
       uvicorn main:app --host 0.0.0.0 --port 10000
