@@ -14,7 +14,16 @@ import httpx
 from sqlalchemy.orm import Session
 
 from db import SessionLocal
-from models import Gameweek, League, Manager, Player, Roster, SyncLog
+from models import (
+    Gameweek,
+    GameweekPoints,
+    League,
+    Manager,
+    Player,
+    Roster,
+    Standing,
+    SyncLog,
+)
 from settings import API_BASE, LEAGUE_ID
 
 # FPL element_type id -> position short name. Stable in bootstrap-static, but we
@@ -146,8 +155,12 @@ async def sync_league_and_managers():
         )
         session.flush()
 
+        # league_entry id -> manager, so we can attach standings (which key off
+        # the league_entry id, not the entry_id).
+        entry_to_manager: dict[int, Manager] = {}
         for entry in data.get("league_entries", data.get("entries", [])):
             fpl_manager_id = str(entry.get("entry_id") or entry.get("id"))
+            league_entry_id = entry.get("id")
             display = (
                 entry.get("entry_name")
                 or " ".join(
@@ -160,11 +173,43 @@ async def sync_league_and_managers():
                 )
                 or ""
             )
-            _upsert(
+            manager = _upsert(
                 session,
                 Manager,
                 {"league_id": league.id, "fpl_manager_id": fpl_manager_id},
-                {"name": display},
+                {
+                    "name": display,
+                    "fpl_league_entry_id": str(league_entry_id)
+                    if league_entry_id is not None
+                    else None,
+                },
+            )
+            session.flush()
+            if league_entry_id is not None:
+                entry_to_manager[league_entry_id] = manager
+
+        # Standings snapshot (H2H). One upserted row per manager.
+        for s in data.get("standings", []):
+            manager = entry_to_manager.get(s.get("league_entry"))
+            if not manager:
+                continue
+            _upsert(
+                session,
+                Standing,
+                {"league_id": league.id, "manager_id": manager.id},
+                {
+                    "rank": s.get("rank"),
+                    "last_rank": s.get("last_rank"),
+                    "rank_sort": s.get("rank_sort"),
+                    "total": s.get("total"),
+                    "points_for": s.get("points_for"),
+                    "points_against": s.get("points_against"),
+                    "matches_played": s.get("matches_played"),
+                    "matches_won": s.get("matches_won"),
+                    "matches_drawn": s.get("matches_drawn"),
+                    "matches_lost": s.get("matches_lost"),
+                    "updated_at": datetime.datetime.now(datetime.timezone.utc),
+                },
             )
 
         log.ok = True
@@ -228,8 +273,81 @@ async def sync_rosters_current_gw():
         session.commit()
 
 
+# ---------- gameweek points + minutes (feeds anti-tanking) ----------
+async def sync_gameweek_points():
+    """Store per-manager points for the current GW, including each pick's minutes
+    and lineup position in `player_points` JSONB. The anti-tanking rule reads
+    minutes from here, so this is what makes infractions a precomputed query."""
+    if not LEAGUE_ID:
+        return
+    with SessionLocal() as session:
+        log = SyncLog(kind="gameweek_points")
+        session.add(log)
+        session.commit()
+
+        league = (
+            session.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one_or_none()
+        )
+        if not league:
+            log.notes = "league missing, run sync_league_and_managers first"
+            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+            session.commit()
+            return
+
+        gw_number = await get_current_gw()
+        gameweek = _get_or_create_gameweek(session, league.id, gw_number)
+        managers = session.query(Manager).filter_by(league_id=league.id).all()
+
+        async with httpx.AsyncClient() as client:
+            live = await _get_json(client, f"{API_BASE}/event/{gw_number}/live")
+            # elements is keyed by player id as a string.
+            live_stats = live.get("elements", {})
+
+            def _minutes(fpl_id: int) -> int:
+                return (live_stats.get(str(fpl_id), {}).get("stats", {}) or {}).get(
+                    "minutes", 0
+                )
+
+            def _points(fpl_id: int) -> int:
+                return (live_stats.get(str(fpl_id), {}).get("stats", {}) or {}).get(
+                    "total_points", 0
+                )
+
+            for m in managers:
+                data = await _get_json(
+                    client, f"{API_BASE}/entry/{m.fpl_manager_id}/event/{gw_number}"
+                )
+                picks = sorted(
+                    data.get("picks", []), key=lambda p: p.get("position", 99)
+                )
+                player_points = [
+                    {
+                        "fpl_id": p["element"],
+                        "position": p.get("position"),
+                        "is_starting": (p.get("position") or 99) <= 11,
+                        "minutes": _minutes(p["element"]),
+                        "points": _points(p["element"]),
+                    }
+                    for p in picks
+                ]
+                total = (data.get("entry_history") or {}).get("points")
+                if total is None:
+                    total = sum(pp["points"] for pp in player_points if pp["is_starting"])
+                _upsert(
+                    session,
+                    GameweekPoints,
+                    {"manager_id": m.id, "gameweek_id": gameweek.id},
+                    {"total_points": total, "player_points": player_points},
+                )
+
+        log.ok = True
+        log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+        session.commit()
+
+
 # ---------- orchestrator ----------
 async def sync_all():
     await sync_players()
     await sync_league_and_managers()
     await sync_rosters_current_gw()
+    await sync_gameweek_points()

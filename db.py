@@ -23,3 +23,12 @@ class Base(DeclarativeBase):
     """Declarative base shared by all models and Alembic's target_metadata."""
 
     pass
+
+
+def get_db():
+    """FastAPI dependency yielding a request-scoped session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()

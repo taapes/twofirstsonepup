@@ -1,0 +1,7 @@
+# Dev/test-only deps (not installed on Render). Install: uv pip install -r requirements-dev.txt
+-r requirements.txt
+
+pytest==8.3.4
+# truststore lets local httpx use the macOS keychain so FPL API calls work
+# behind the corporate TLS-inspecting proxy. Not needed in production.
+truststore==0.10.0

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ league.name if league else "FPL Draft Keeper League" }}</title>
+  <style>
+    :root { --bg:#0f1117; --card:#1a1d27; --line:#2b2f3a; --txt:#e6e8ee; --muted:#9aa0ad; --accent:#37d67a; --warn:#ff6b6b; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+    .wrap { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+    h1 { font-size:1.5rem; margin:.2em 0; }
+    h2 { font-size:1.05rem; margin:1.6em 0 .6em; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+    .sub { color:var(--muted); margin-top:0; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); }
+    th { font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+    tr:last-child td { border-bottom:0; }
+    td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
+    .rank { color:var(--muted); width:2.5em; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:.8rem; }
+    .pill.warn { background:rgba(255,107,107,.15); color:var(--warn); }
+    .empty { padding:14px; color:var(--muted); }
+    .infraction { padding:12px; border-bottom:1px solid var(--line); }
+    .infraction:last-child { border-bottom:0; }
+    footer { margin-top:40px; color:var(--muted); font-size:.8rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    {% if not league %}
+      <h1>FPL Draft Keeper League</h1>
+      <p class="sub">No league synced yet. Run a sync to populate data.</p>
+    {% else %}
+      <h1>{{ league.name }}</h1>
+      <p class="sub">Season {{ league.season_year }}/{{ (league.season_year + 1) % 100 }}</p>
+
+      <h2>Standings</h2>
+      <div class="card">
+        {% if standings %}
+        <table>
+          <thead>
+            <tr><th class="rank">#</th><th>Manager</th><th class="num">Pts</th><th class="num">W-D-L</th><th class="num">For</th><th class="num">Ag</th></tr>
+          </thead>
+          <tbody>
+            {% for s in standings %}
+            <tr>
+              <td class="rank">{{ s.rank }}</td>
+              <td>{{ s.manager }}</td>
+              <td class="num">{{ s.total }}</td>
+              <td class="num">{{ s.matches_won }}-{{ s.matches_drawn }}-{{ s.matches_lost }}</td>
+              <td class="num">{{ s.points_for }}</td>
+              <td class="num">{{ s.points_against }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}<div class="empty">No standings synced yet.</div>{% endif %}
+      </div>
+
+      <h2>Anti-Tanking Infractions</h2>
+      <div class="card">
+        {% if infractions %}
+          {% for i in infractions %}
+          <div class="infraction">
+            <span class="pill warn">GW{{ i.gameweek }}</span>
+            <strong>{{ i.manager }}</strong> — {{ i.consecutive_zero_minute }} consecutive 0-minute starters
+          </div>
+          {% endfor %}
+        {% else %}<div class="empty">No infractions flagged.</div>{% endif %}
+      </div>
+
+      <h2>Injury List</h2>
+      <div class="card">
+        {% if injury_list %}
+        <table>
+          <thead><tr><th>Manager</th><th>Player</th><th class="num">From</th><th class="num">To</th></tr></thead>
+          <tbody>
+            {% for il in injury_list %}
+            <tr><td>{{ il.manager }}</td><td>{{ il.player }}</td><td class="num">GW{{ il.start_gw }}</td><td class="num">{{ "GW" ~ il.end_gw if il.end_gw else "—" }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% else %}<div class="empty">No players on the injury list.</div>{% endif %}
+      </div>
+
+      <footer>Precomputed from the FPL Draft API · league {{ league.fpl_league_id }}</footer>
+    {% endif %}
+  </div>
+</body>
+</html>

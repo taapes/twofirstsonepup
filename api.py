@@ -1,0 +1,36 @@
+"""Read-only public API (v1). Serves precomputed data from our tables only."""
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+import services
+from db import get_db
+
+router = APIRouter(prefix="/v1")
+
+
+def _league(db: Session, league_key: str):
+    league = services.resolve_league(db, league_key)
+    if not league:
+        raise HTTPException(status_code=404, detail="league not found")
+    return league
+
+
+@router.get("/leagues/{league_key}/standings")
+def standings(league_key: str, db: Session = Depends(get_db)):
+    return services.get_standings(db, _league(db, league_key))
+
+
+@router.get("/leagues/{league_key}/rosters")
+def rosters(league_key: str, db: Session = Depends(get_db)):
+    return services.get_rosters(db, _league(db, league_key))
+
+
+@router.get("/leagues/{league_key}/injury-list")
+def injury_list(league_key: str, db: Session = Depends(get_db)):
+    return services.get_injury_list(db, _league(db, league_key))
+
+
+@router.get("/leagues/{league_key}/infractions")
+def infractions(league_key: str, db: Session = Depends(get_db)):
+    return services.get_infractions(db, _league(db, league_key))

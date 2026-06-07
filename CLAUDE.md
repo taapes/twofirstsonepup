@@ -23,9 +23,10 @@ before any non-trivial work.
 - **Hosting:** **Render** (auto-deploys from GitHub; runs `uvicorn main:app --host 0.0.0.0 --port $PORT`)
 - **Scheduled sync:** **GitHub Actions** cron → hits `POST /admin/sync` (we deliberately avoid paid Render cron)
 - **Repo:** GitHub (`twofirstsonepup`)
-- **Frontend:** NOT YET DECIDED. Options: FastAPI-served templates (simplest) or a
-  separate React/Next.js app calling the API. Do not assume one — flag and ask
-  before building UI.
+- **Frontend:** **FastAPI-served Jinja2 templates** (decided in step 3). Server-
+  rendered HTML from the same app (`templates/`), reading the same precomputed
+  query layer (`services.py`) as the JSON API. Revisit React only if the UI
+  outgrows server rendering.
 
 ## Commands
 
@@ -34,7 +35,8 @@ before any non-trivial work.
 - Dev server: `uvicorn main:app --reload`
 - New migration: `alembic revision --autogenerate -m "<message>"`
 - Apply migrations: `alembic upgrade head`
-- Tests: `<pytest command>`
+- Dev deps (tests + local proxy workaround): `uv pip install -r requirements-dev.txt`
+- Tests: `pytest` (rules engine unit tests in `tests/`)
 - Env vars: Neon DB URL + sync secret live in env (Render dashboard / local `.env`, never committed)
 
 ## Architecture: Pull -> Normalize -> Store -> Serve

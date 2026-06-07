@@ -53,7 +53,13 @@ class Manager(Base):
     league_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
     )
-    fpl_manager_id: Mapped[str] = mapped_column(String, index=True)
+    # FPL exposes two ids per member: the `entry_id` (the team entry, used for
+    # /entry/{id}/... fetches) and the `league_entry` id (used by the standings
+    # and matches blocks). We store both so standings can join back to a manager.
+    fpl_manager_id: Mapped[str] = mapped_column(String, index=True)  # entry_id
+    fpl_league_entry_id: Mapped[str | None] = mapped_column(
+        String, index=True, nullable=True
+    )
     name: Mapped[str] = mapped_column(String)
     email: Mapped[str | None] = mapped_column(String, nullable=True)
 
@@ -280,6 +286,39 @@ class CommissionerAlert(Base):
     )
     message: Mapped[str] = mapped_column(Text)  # markdown / HTML
     created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class Standing(Base):
+    """Precomputed standings snapshot from the FPL Draft league details payload.
+    This league uses head-to-head scoring: `total` is H2H league points, while
+    `points_for`/`points_against` are cumulative FPL points. One row per manager,
+    upserted each sync (the API only returns current standings)."""
+
+    __tablename__ = "standings"
+    __table_args__ = (
+        UniqueConstraint("league_id", "manager_id", name="uq_standing_league_manager"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rank_sort: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total: Mapped[int | None] = mapped_column(Integer, nullable=True)  # H2H points
+    points_for: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    points_against: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    matches_played: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    matches_won: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    matches_drawn: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    matches_lost: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
