@@ -4,7 +4,9 @@ from rules import (
     ANTI_TANKING_MIN_WEEKS,
     ANTI_TANKING_MIN_ZERO_PLAYERS,
     MIN_IL_STAY_GWS,
+    PAYOUT_STRUCTURE,
     SEASON_LAST_GW,
+    compute_payouts,
     h2h_standings,
     il_can_return,
     il_same_position,
@@ -133,3 +135,46 @@ def test_match_winner_tie_breaks_to_better_seed():
 
 def test_match_winner_missing_scores():
     assert match_winner(None, None, seed_a=1, seed_b=2) == "a"
+
+
+# ---- payouts ----
+def test_payout_amounts_match_stated_structure():
+    # 25/26: $125 entry x 10 = $1,250 base pot. Distinct managers per slot.
+    r = {
+        "league_1": "L1", "league_2": "L2", "league_3": "L3",
+        "cup_1": "C1", "cup_2": "C2", "cup_3": "C3",
+        "pup_cup": "PUP", "last_place": "LAST",
+    }
+    p = compute_payouts(r, num_managers=10)
+    assert p["L1"]["total"] == 625.0  # 40% (500) + 125 last-place fine
+    assert p["L2"]["total"] == 187.50
+    assert p["L3"]["total"] == 62.50
+    assert p["C1"]["total"] == 312.50
+    assert p["C2"]["total"] == 125.0
+    assert p["C3"]["total"] == 62.50
+    assert p["PUP"]["total"] == 150.0
+    assert p["LAST"]["total"] == -125.0  # owes the fine
+
+
+def test_payout_stacks_when_one_manager_wins_multiple():
+    # league winner also wins the Cup
+    r = {"league_1": "A", "cup_1": "A"}
+    p = compute_payouts(r, num_managers=10)
+    # 500 (40%) + 125 fine + 312.50 (cup) = 937.50
+    assert p["A"]["total"] == 937.50
+    assert len(p["A"]["breakdown"]) == 3
+
+
+def test_payout_other_fines_go_to_league_winner():
+    r = {"league_1": "A", "last_place": "B"}
+    p = compute_payouts(r, num_managers=10, other_fines=40.0)
+    assert p["A"]["total"] == 500.0 + 125.0 + 40.0  # 40% + fine + other fines
+
+
+def test_payout_skips_missing_slots():
+    p = compute_payouts({"league_1": "A"}, num_managers=10)
+    assert set(p.keys()) == {"A"}
+
+
+def test_payout_structure_percentages_sum_to_one():
+    assert round(sum(PAYOUT_STRUCTURE["pct"].values()), 4) == 1.0

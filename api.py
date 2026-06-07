@@ -39,3 +39,8 @@ def infractions(league_key: str, db: Session = Depends(get_db)):
 @router.get("/leagues/{league_key}/cups")
 def cups(league_key: str, db: Session = Depends(get_db)):
     return services.get_cups(db, _league(db, league_key))
+
+
+@router.get("/leagues/{league_key}/payouts")
+def payouts(league_key: str, db: Session = Depends(get_db)):
+    return services.get_payouts(db, _league(db, league_key))

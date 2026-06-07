@@ -26,7 +26,9 @@ from rules import (
     CUP_SEED_THROUGH_GW,
     CUP_SIZE,
     MIN_IL_STAY_GWS,
+    PAYOUT_STRUCTURE,
     RuleViolation,
+    compute_payouts,
     h2h_standings,
     il_can_return,
     il_same_position,
@@ -404,11 +406,26 @@ def score_cup_round(db: Session, league: League, round_no: int, gw1: int, gw2: i
         db.add(TournamentMatch(tournament_id=pup.id, round=2, manager_a=_loser(qf_45), manager_b=pi_89.winner_id))
         db.add(TournamentMatch(tournament_id=pup.id, round=2, manager_a=_loser(qf_36), manager_b=pi_710.winner_id))
     elif round_no == 2:
+        # Cup: final (SF winners) + 3rd-place playoff (SF losers).
         db.add(TournamentMatch(tournament_id=cup.id, round=3, manager_a=cup_r[0].winner_id, manager_b=cup_r[1].winner_id))
+        db.add(TournamentMatch(tournament_id=cup.id, round=3, manager_a=_loser(cup_r[0]), manager_b=_loser(cup_r[1])))
+        # Pup Cup: final only (only the winner is paid).
         db.add(TournamentMatch(tournament_id=pup.id, round=3, manager_a=pup_r[0].winner_id, manager_b=pup_r[1].winner_id))
 
     db.commit()
     return get_cups(db, league)
+
+
+def _cup_final_and_third(db: Session, cup: Tournament):
+    """Identify the Cup's final vs 3rd-place match: the final is between the two
+    semifinal winners; the other round-3 match is the 3rd-place playoff."""
+    sf_winners = {m.winner_id for m in _round_matches(db, cup, 2)}
+    r3 = _round_matches(db, cup, 3)
+    final = next(
+        (m for m in r3 if m.manager_a in sf_winners and m.manager_b in sf_winners), None
+    )
+    third = next((m for m in r3 if m is not final), None)
+    return final, third
 
 
 def get_cups(db: Session, league: League) -> list[dict]:
@@ -426,6 +443,10 @@ def get_cups(db: Session, league: League) -> list[dict]:
             2: "Semifinal",
             3: "Final",
         }
+        third_id = None
+        if t.name == "Cup":
+            _, third = _cup_final_and_third(db, t)
+            third_id = third.id if third else None
         matches = (
             db.query(TournamentMatch)
             .filter_by(tournament_id=t.id)
@@ -438,7 +459,9 @@ def get_cups(db: Session, league: League) -> list[dict]:
                 "matches": [
                     {
                         "round": m.round,
-                        "round_label": labels.get(m.round, f"Round {m.round}"),
+                        "round_label": "3rd-place"
+                        if m.id == third_id
+                        else labels.get(m.round, f"Round {m.round}"),
                         "home": names.get(m.manager_a),
                         "away": names.get(m.manager_b),
                         "home_score": m.score_a,
@@ -450,3 +473,56 @@ def get_cups(db: Session, league: League) -> list[dict]:
             }
         )
     return out
+
+
+def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
+    """Season-end payouts from final standings + cup results (precomputed read).
+
+    Resolves recipient slots (league 1/2/3 + last from standings; cup 1/2/3 and
+    pup champion from the brackets) and applies the configured payout structure.
+    """
+    by_rank = sorted(
+        db.query(Standing, Manager)
+        .join(Manager, Manager.id == Standing.manager_id)
+        .filter(Standing.league_id == league.id)
+        .all(),
+        key=lambda sm: sm[0].rank if sm[0].rank is not None else 999,
+    )
+    recipients: dict = {}
+    if len(by_rank) >= 1:
+        recipients["league_1"] = by_rank[0][1].id
+    if len(by_rank) >= 2:
+        recipients["league_2"] = by_rank[1][1].id
+    if len(by_rank) >= 3:
+        recipients["league_3"] = by_rank[2][1].id
+    if by_rank:
+        recipients["last_place"] = by_rank[-1][1].id
+
+    cup = _get_tournament(db, league, "Cup")
+    if cup:
+        final, third = _cup_final_and_third(db, cup)
+        if final and final.winner_id:
+            recipients["cup_1"] = final.winner_id
+            recipients["cup_2"] = _loser(final)
+        if third and third.winner_id:
+            recipients["cup_3"] = third.winner_id
+    pup = _get_tournament(db, league, "Pup Cup")
+    if pup:
+        pup_final = _round_matches(db, pup, 3)
+        if pup_final and pup_final[0].winner_id:
+            recipients["pup_cup"] = pup_final[0].winner_id
+
+    num_managers = db.query(Manager).filter_by(league_id=league.id).count()
+    raw = compute_payouts(recipients, num_managers, other_fines=other_fines)
+    names = {m.id: m.name for m in db.query(Manager).filter_by(league_id=league.id)}
+    payouts = sorted(
+        ({"manager": names.get(mid, str(mid)), **info} for mid, info in raw.items()),
+        key=lambda x: -x["total"],
+    )
+    return {
+        "entry_fee": PAYOUT_STRUCTURE["entry_fee"],
+        "num_managers": num_managers,
+        "base_pot": PAYOUT_STRUCTURE["entry_fee"] * num_managers,
+        "total_paid": round(sum(p["total"] for p in payouts), 2),
+        "payouts": payouts,
+    }

@@ -140,3 +140,65 @@ def match_winner(score_a, score_b, seed_a: int, seed_b: int):
     if a != b:
         return "a" if a > b else "b"
     return "a" if seed_a < seed_b else "b"
+
+
+# ---- Payouts ----
+# Percentages are of the base pot (entry_fee * num managers). Entry fee rises by
+# season (25/26 $125, 26/27 $150, 27/28 $175, 28/29 $200) — override per season.
+# The last-place fine and any other fines are added to the league winner.
+PAYOUT_STRUCTURE = {
+    "entry_fee": 125,
+    "last_place_fine": 125,
+    "pct": {
+        "league_1": 0.40,
+        "league_2": 0.15,
+        "league_3": 0.05,
+        "cup_1": 0.25,
+        "cup_2": 0.10,
+        "cup_3": 0.05,
+    },
+    "pup_cup_winner": 150,  # flat, not a percentage
+}
+
+_PAYOUT_LABELS = {
+    "league_1": "1st place — League",
+    "league_2": "2nd place — League",
+    "league_3": "3rd place — League",
+    "cup_1": "Cup winner",
+    "cup_2": "Cup runner-up",
+    "cup_3": "Cup 3rd place",
+}
+
+
+def compute_payouts(
+    recipients: dict,
+    num_managers: int,
+    structure: dict = PAYOUT_STRUCTURE,
+    other_fines: float = 0.0,
+) -> dict:
+    """Compute each manager's payout. `recipients` maps slot -> manager key
+    (league_1/2/3, cup_1/2/3, pup_cup, last_place); missing/None slots are
+    skipped. Percentage slots pay a share of the base pot; pup_cup is flat; the
+    last-place fine (+ other fines) is added to league_1, and last_place is shown
+    owing the fine. Returns {manager: {"total", "breakdown":[{label, amount}]}}.
+    """
+    pot = structure["entry_fee"] * num_managers
+    items: list[tuple] = []  # (manager, label, amount)
+    for slot, pct in structure["pct"].items():
+        items.append((recipients.get(slot), _PAYOUT_LABELS[slot], round(pot * pct, 2)))
+    items.append((recipients.get("pup_cup"), "Pup Cup winner", float(structure["pup_cup_winner"])))
+
+    bonus = structure["last_place_fine"] + other_fines
+    if recipients.get("league_1") is not None and bonus:
+        items.append((recipients["league_1"], "Last-place fine + other fines", round(bonus, 2)))
+    if recipients.get("last_place") is not None:
+        items.append((recipients["last_place"], "Last-place fine", -float(structure["last_place_fine"])))
+
+    out: dict = {}
+    for manager, label, amount in items:
+        if manager is None:
+            continue
+        entry = out.setdefault(manager, {"total": 0.0, "breakdown": []})
+        entry["total"] = round(entry["total"] + amount, 2)
+        entry["breakdown"].append({"label": label, "amount": amount})
+    return out

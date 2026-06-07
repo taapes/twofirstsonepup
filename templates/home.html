@@ -72,6 +72,25 @@
         {% else %}<div class="empty">No infractions flagged.</div>{% endif %}
       </div>
 
+      {% if payouts and payouts.payouts %}
+      <h2>Payouts</h2>
+      <div class="card">
+        <table>
+          <thead><tr><th>Manager</th><th>Winnings</th><th class="num">Amount</th></tr></thead>
+          <tbody>
+            {% for p in payouts.payouts %}
+            <tr>
+              <td>{{ p.manager }}</td>
+              <td class="sub">{{ p.breakdown | map(attribute='label') | join(', ') }}</td>
+              <td class="num">{{ "%.2f"|format(p.total) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="sub">Base pot ${{ payouts.base_pot }} ({{ payouts.num_managers }} × ${{ payouts.entry_fee }}); plus last-place fine + Pup Cup.</p>
+      {% endif %}
+
       {% if cups %}
       <h2>Cups</h2>
       {% for cup in cups %}

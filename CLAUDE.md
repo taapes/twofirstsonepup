@@ -145,8 +145,14 @@ Write tests for these. They are custom and non-obvious:
   to the better seed. Admin: `POST /admin/.../cups/generate` then
   `.../cups/score-round` per round (gw1, gw2). See `services.generate_cups` /
   `score_cup_round`.
-- **Payouts:** New structure from 25/26. Auto-calculate from standings + cup.
-  Last-place fine redistributed to 1st.
+- **Payouts:** Config-driven (`rules.PAYOUT_STRUCTURE`), auto-calculated from
+  final standings + cup results. Base pot = entry_fee × managers (25/26 $125;
+  rises 26/27 $150, 27/28 $175, 28/29 $200). Pct of pot: League 1st 40%, 2nd
+  15%, 3rd 5%; Cup 1st 25%, 2nd 10%, 3rd 5%. Pup Cup winner flat $150. Last-place
+  fine ($125) + other fines added to League 1st; last place shown owing it.
+  Cup 3rd place comes from a 3rd-place playoff (the two SF losers, scored in the
+  final's GWs). `GET /v1/.../payouts`, `services.get_payouts`. Weekly entry and
+  team-sale clause are separate pools, not in this calc yet.
 
 ## Working style
 
