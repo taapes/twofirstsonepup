@@ -17,7 +17,12 @@ from models import (
     Roster,
     Standing,
 )
-from rules import longest_zero_minute_run, ANTI_TANKING_MIN_RUN
+from rules import (
+    ANTI_TANKING_MIN_WEEKS,
+    ANTI_TANKING_MIN_ZERO_PLAYERS,
+    tanking_windows,
+    zero_minute_count,
+)
 
 
 def resolve_league(db: Session, league_key: str) -> League | None:
@@ -108,27 +113,42 @@ def get_injury_list(db: Session, league: League) -> list[dict]:
     ]
 
 
+def _window_label(window: list[int]) -> str:
+    """[10, 11, 12] -> 'GW10–12'."""
+    return f"GW{window[0]}–{window[-1]}"
+
+
 def get_infractions(db: Session, league: League) -> list[dict]:
-    """Anti-tanking infractions for the latest synced gameweek (precomputed read)."""
-    gw = latest_gameweek(db, league)
-    if gw is None:
-        return []
+    """Anti-tanking infractions across all synced gameweeks (precomputed read).
+
+    Flags a manager when >=3 of their rostered players posted 0 minutes in each
+    of >=3 consecutive gameweeks. Reads minutes from gameweek_points.player_points.
+    """
     rows = (
-        db.query(GameweekPoints, Manager)
+        db.query(GameweekPoints, Gameweek, Manager)
+        .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
         .join(Manager, Manager.id == GameweekPoints.manager_id)
-        .filter(Manager.league_id == league.id, GameweekPoints.gameweek_id == gw.id)
+        .filter(Manager.league_id == league.id)
         .all()
     )
+    # manager id -> {"name": str, "counts": {gw_number: zero_minute_count}}
+    per_manager: dict = {}
+    for gp, gw, m in rows:
+        entry = per_manager.setdefault(m.id, {"name": m.name, "counts": {}})
+        entry["counts"][gw.number] = zero_minute_count(gp.player_points or [])
+
     infractions = []
-    for gp, m in rows:
-        run = longest_zero_minute_run(gp.player_points or [])
-        if run >= ANTI_TANKING_MIN_RUN:
+    for info in per_manager.values():
+        windows = tanking_windows(info["counts"])
+        if windows:
             infractions.append(
                 {
-                    "manager": m.name,
-                    "gameweek": gw.number,
-                    "consecutive_zero_minute": run,
-                    "rule": f"{ANTI_TANKING_MIN_RUN}+ consecutive 0-minute starters",
+                    "manager": info["name"],
+                    "windows": [_window_label(w) for w in windows],
+                    "rule": (
+                        f"{ANTI_TANKING_MIN_ZERO_PLAYERS}+ rostered players with "
+                        f"0 minutes for {ANTI_TANKING_MIN_WEEKS}+ straight GWs"
+                    ),
                 }
             )
-    return infractions
+    return sorted(infractions, key=lambda i: i["manager"])

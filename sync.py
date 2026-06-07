@@ -274,10 +274,11 @@ async def sync_rosters_current_gw():
 
 
 # ---------- gameweek points + minutes (feeds anti-tanking) ----------
-async def sync_gameweek_points():
-    """Store per-manager points for the current GW, including each pick's minutes
-    and lineup position in `player_points` JSONB. The anti-tanking rule reads
-    minutes from here, so this is what makes infractions a precomputed query."""
+async def sync_gameweek_points(gw_number: int | None = None):
+    """Store per-manager points for a gameweek, including each pick's minutes and
+    lineup position in `player_points` JSONB. The anti-tanking rule reads minutes
+    from here across gameweeks, so this is what makes infractions a precomputed
+    query. Defaults to the current GW; pass a number to (re)sync a specific GW."""
     if not LEAGUE_ID:
         return
     with SessionLocal() as session:
@@ -294,7 +295,8 @@ async def sync_gameweek_points():
             session.commit()
             return
 
-        gw_number = await get_current_gw()
+        if gw_number is None:
+            gw_number = await get_current_gw()
         gameweek = _get_or_create_gameweek(session, league.id, gw_number)
         managers = session.query(Manager).filter_by(league_id=league.id).all()
 
@@ -343,6 +345,14 @@ async def sync_gameweek_points():
         log.ok = True
         log.finished_at = datetime.datetime.now(datetime.timezone.utc)
         session.commit()
+
+
+async def backfill_gameweek_points(start: int = 1, end: int = 38):
+    """One-off: populate gameweek_points history so the across-gameweeks
+    anti-tanking rule has data. During a live season the cron accumulates this
+    one GW at a time; this backfills a completed season's range."""
+    for gw in range(start, end + 1):
+        await sync_gameweek_points(gw)
 
 
 # ---------- orchestrator ----------

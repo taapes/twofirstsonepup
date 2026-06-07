@@ -64,8 +64,9 @@
         {% if infractions %}
           {% for i in infractions %}
           <div class="infraction">
-            <span class="pill warn">GW{{ i.gameweek }}</span>
-            <strong>{{ i.manager }}</strong> — {{ i.consecutive_zero_minute }} consecutive 0-minute starters
+            <strong>{{ i.manager }}</strong>
+            {% for w in i.windows %}<span class="pill warn">{{ w }}</span>{% endfor %}
+            <div class="sub" style="margin:.3em 0 0">{{ i.rule }}</div>
           </div>
           {% endfor %}
         {% else %}<div class="empty">No infractions flagged.</div>{% endif %}
