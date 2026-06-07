@@ -323,6 +323,45 @@ class Standing(Base):
     )
 
 
+class Match(Base):
+    """Regular-season head-to-head match (one per manager-pairing per gameweek),
+    from the league details `matches` block. Lets standings be reconstructed
+    historically. `winner_id` is computed from points (the API leaves
+    winning_league_entry null). Distinct from `tournament_matches` (cups)."""
+
+    __tablename__ = "matches"
+    __table_args__ = (
+        UniqueConstraint(
+            "gameweek_id",
+            "home_manager_id",
+            "away_manager_id",
+            name="uq_match_gw_home_away",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    gameweek_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("gameweeks.id"), index=True
+    )
+    home_manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    away_manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    home_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    winner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), nullable=True
+    )
+    finished: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
+
 class SyncLog(Base):
     """Audit trail for /admin/sync runs. Not FPL-canonical and not league-custom
     truth — operational metadata so we can see when a sync ran and whether it

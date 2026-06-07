@@ -19,6 +19,7 @@ from models import (
     GameweekPoints,
     League,
     Manager,
+    Match,
     Player,
     Roster,
     Standing,
@@ -212,13 +213,88 @@ async def sync_league_and_managers():
                 },
             )
 
+        # Regular-season H2H matches (one per pairing per GW). winning_league_entry
+        # is left null by the API, so derive the winner from points.
+        for mt in data.get("matches", []):
+            home = entry_to_manager.get(mt.get("league_entry_1"))
+            away = entry_to_manager.get(mt.get("league_entry_2"))
+            if not home or not away:
+                continue
+            gw = _get_or_create_gameweek(session, league.id, mt.get("event"))
+            hp, ap = mt.get("league_entry_1_points"), mt.get("league_entry_2_points")
+            winner_id = None
+            if mt.get("finished") and hp is not None and ap is not None and hp != ap:
+                winner_id = home.id if hp > ap else away.id
+            _upsert(
+                session,
+                Match,
+                {
+                    "gameweek_id": gw.id,
+                    "home_manager_id": home.id,
+                    "away_manager_id": away.id,
+                },
+                {
+                    "league_id": league.id,
+                    "home_points": hp,
+                    "away_points": ap,
+                    "winner_id": winner_id,
+                    "finished": bool(mt.get("finished")),
+                },
+            )
+
         log.ok = True
         log.finished_at = datetime.datetime.now(datetime.timezone.utc)
         session.commit()
 
 
-# ---------- rosters (snapshot current gw) ----------
-async def sync_rosters_current_gw():
+# ---------- gameweek dates (from bootstrap events) ----------
+async def sync_gameweek_dates():
+    """Populate gameweeks.start_date/end_date from the bootstrap event deadlines.
+    A GW spans from its own deadline to the next GW's deadline."""
+    if not LEAGUE_ID:
+        return
+    with SessionLocal() as session:
+        log = SyncLog(kind="gameweek_dates")
+        session.add(log)
+        session.commit()
+
+        league = (
+            session.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one_or_none()
+        )
+        if not league:
+            log.notes = "league missing, run sync_league_and_managers first"
+            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+            session.commit()
+            return
+
+        async with httpx.AsyncClient() as client:
+            data = await _get_json(client, f"{API_BASE}/bootstrap-static")
+        events_payload = data.get("events", {})
+        events = (
+            events_payload.get("data", [])
+            if isinstance(events_payload, dict)
+            else events_payload
+        )
+        events = sorted(events, key=lambda e: e.get("id", 0))
+        deadlines = {e["id"]: _parse_iso(e.get("deadline_time")) for e in events}
+
+        for e in events:
+            num = e["id"]
+            start = deadlines.get(num)
+            end = deadlines.get(num + 1)  # next GW's deadline; None for the last GW
+            gw = _get_or_create_gameweek(session, league.id, num)
+            gw.start_date = start.date() if start else None
+            gw.end_date = end.date() if end else None
+
+        log.ok = True
+        log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+        session.commit()
+
+
+# ---------- rosters (snapshot a gw) ----------
+async def sync_rosters(gw_number: int | None = None):
+    """Snapshot each manager's roster for a gameweek. Defaults to the current GW;
+    pass a number to (re)sync a specific GW (used by backfill)."""
     if not LEAGUE_ID:
         return
     with SessionLocal() as session:
@@ -235,7 +311,8 @@ async def sync_rosters_current_gw():
             session.commit()
             return
 
-        gw_number = await get_current_gw()
+        if gw_number is None:
+            gw_number = await get_current_gw()
         gameweek = _get_or_create_gameweek(session, league.id, gw_number)
         managers = session.query(Manager).filter_by(league_id=league.id).all()
 
@@ -355,9 +432,26 @@ async def backfill_gameweek_points(start: int = 1, end: int = 38):
         await sync_gameweek_points(gw)
 
 
+async def backfill_rosters(start: int = 1, end: int = 38):
+    """One-off: populate per-GW roster snapshots for a completed season's range."""
+    for gw in range(start, end + 1):
+        await sync_rosters(gw)
+
+
+async def backfill_history(start: int = 1, end: int = 38):
+    """Full historical backfill: league/standings/matches, gameweek dates, and
+    per-GW rosters + points. Run once for a completed season."""
+    await sync_players()
+    await sync_league_and_managers()  # standings + matches
+    await sync_gameweek_dates()
+    await backfill_rosters(start, end)
+    await backfill_gameweek_points(start, end)
+
+
 # ---------- orchestrator ----------
 async def sync_all():
     await sync_players()
-    await sync_league_and_managers()
-    await sync_rosters_current_gw()
+    await sync_league_and_managers()  # also standings + matches
+    await sync_gameweek_dates()
+    await sync_rosters()
     await sync_gameweek_points()
