@@ -1,19 +1,21 @@
 import asyncio
-import os
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 import services
+from admin import router as admin_router
 from api import router as v1_router
+from auth import require_admin
 from db import get_db
 from settings import LEAGUE_ID
 from sync import sync_all
 
 app = FastAPI()
 app.include_router(v1_router)
+app.include_router(admin_router)
 templates = Jinja2Templates(directory="templates")
 
 
@@ -36,9 +38,7 @@ def home(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse("home.html", ctx)
 
 
-@app.post("/admin/sync")
-def admin_sync(x_auth_token: str | None = Header(default=None)):
-    if x_auth_token != os.getenv("SYNC_AUTH_TOKEN"):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+@app.post("/admin/sync", dependencies=[Depends(require_admin)])
+def admin_sync():
     asyncio.run(sync_all())
     return {"ok": True}

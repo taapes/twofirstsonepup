@@ -5,6 +5,11 @@ so the league's non-obvious rules are independently testable and never mutate
 FPL-sourced rows. See CLAUDE.md for the rule definitions.
 """
 
+
+class RuleViolation(Exception):
+    """Raised when an admin action would break a league rule. Endpoints map this
+    to HTTP 400 with the message."""
+
 # Anti-tanking (across gameweeks): a manager is flagged when, for >= MIN_WEEKS
 # consecutive gameweeks, each of those gameweeks has >= MIN_ZERO_PLAYERS rostered
 # players (the entire 15-man squad, not just the XI) who recorded 0 real-match
@@ -56,3 +61,35 @@ def is_anti_tanking_infraction(
     min_weeks: int = ANTI_TANKING_MIN_WEEKS,
 ) -> bool:
     return bool(tanking_windows(gw_zero_counts, min_players, min_weeks))
+
+
+# ---- Injury list ----
+# An IL'd player must stay on the IL for at least this many gameweeks before
+# returning; SEASON_LAST_GW forces an automatic return at season end regardless.
+MIN_IL_STAY_GWS = 4
+SEASON_LAST_GW = 38
+
+
+def il_same_position(injured_position, replacement_position) -> bool:
+    """The IL replacement must play the same position as the injured player."""
+    return (
+        injured_position is not None
+        and replacement_position is not None
+        and injured_position == replacement_position
+    )
+
+
+def il_can_return(
+    start_gw: int,
+    return_gw: int,
+    min_stay: int = MIN_IL_STAY_GWS,
+    last_gw: int = SEASON_LAST_GW,
+) -> bool:
+    """Whether a player IL'd at `start_gw` may return at `return_gw`.
+
+    Normal/waiver returns require the minimum stay (>= min_stay GWs elapsed);
+    a return at or after the season's last GW is automatic and overrides it.
+    """
+    if return_gw >= last_gw:
+        return True
+    return (return_gw - start_gw) >= min_stay

@@ -3,6 +3,10 @@
 from rules import (
     ANTI_TANKING_MIN_WEEKS,
     ANTI_TANKING_MIN_ZERO_PLAYERS,
+    MIN_IL_STAY_GWS,
+    SEASON_LAST_GW,
+    il_can_return,
+    il_same_position,
     is_anti_tanking_infraction,
     tanking_windows,
     zero_minute_count,
@@ -68,3 +72,31 @@ def test_multiple_separate_windows():
 def test_thresholds_are_three():
     assert ANTI_TANKING_MIN_ZERO_PLAYERS == 3
     assert ANTI_TANKING_MIN_WEEKS == 3
+
+
+# ---- injury list ----
+def test_il_same_position():
+    assert il_same_position("DEF", "DEF")
+    assert not il_same_position("DEF", "MID")
+    assert not il_same_position(None, "DEF")
+    assert not il_same_position("DEF", None)
+
+
+def test_il_min_stay_enforced():
+    # placed GW10, min stay 4 -> earliest return GW14
+    assert not il_can_return(10, 13)  # only 3 GWs
+    assert il_can_return(10, 14)  # exactly 4 GWs
+    assert il_can_return(10, 20)
+
+
+def test_il_season_end_forces_return():
+    # placed GW36: only 2 GWs by GW38, so the min-stay alone would block it...
+    assert il_can_return(36, 38, min_stay=4, last_gw=99) is False
+    # ...but the real season-end (GW38) override allows the automatic return.
+    assert il_can_return(36, 38)
+    assert il_can_return(36, 39)
+
+
+def test_il_min_stay_constant():
+    assert MIN_IL_STAY_GWS == 4
+    assert SEASON_LAST_GW == 38

@@ -54,6 +54,19 @@ Why: fast frontend, historical reconstruction, rule enforcement, easier
 debugging, resilience to FPL API outages. Preserve this pattern — don't add
 live FPL calls into request handlers.
 
+## Code layout & admin-write pattern
+
+- `services.py` — read query helpers + rule-enforcing write ops, shared by the
+  API and homepage (never call the FPL API here).
+- `rules.py` — pure, testable rule functions; raises `RuleViolation` on illegal
+  admin actions.
+- `api.py` — public read-only `/v1` router. `admin.py` — commissioner write
+  router under `/admin`, guarded by `require_admin` (`auth.py`).
+- **Admin writes** (e.g. injury list place/return) require the `X-Auth-Token`
+  header == `SYNC_AUTH_TOKEN`. Endpoints resolve the league, call a `services`
+  function that enforces rules, and map `RuleViolation` -> HTTP 400. Reuse this
+  pattern for keepers/trades/cups.
+
 ## The two-truths boundary (keep sacred)
 
 - **FPL canonical truth** (from the official API, treat as source of truth):
