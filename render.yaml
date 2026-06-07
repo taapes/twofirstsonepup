@@ -20,3 +20,7 @@ services:
         sync: false
       - key: SYNC_AUTH_TOKEN
         sync: false
+      # FPL Draft league id — needed by sync.py; not secret, but set in
+      # dashboard alongside the others for one place to manage env.
+      - key: FPL_DRAFT_LEAGUE_ID
+        sync: false
