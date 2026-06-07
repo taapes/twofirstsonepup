@@ -93,3 +93,50 @@ def il_can_return(
     if return_gw >= last_gw:
         return True
     return (return_gw - start_gw) >= min_stay
+
+
+# ---- Cups ----
+# Seeding is fixed by H2H standings through this gameweek (cups start after it).
+CUP_SEED_THROUGH_GW = 28
+CUP_SIZE = 6  # top 6 -> Cup; remaining bottom 4 -> Pup Cup
+
+
+def h2h_standings(results: list[tuple]) -> list:
+    """Rank managers by head-to-head record. `results` is a list of finished
+    matches as (home, away, home_points, away_points). Returns manager keys
+    ordered best-first by (3*wins + draws) desc, then points-for desc.
+
+    Used to seed cups from standings as of a cutoff gameweek.
+    """
+    from collections import defaultdict
+
+    tbl: dict = defaultdict(lambda: {"w": 0, "d": 0, "l": 0, "pf": 0})
+    for home, away, hp, ap in results:
+        tbl[home]["pf"] += hp
+        tbl[away]["pf"] += ap
+        if hp > ap:
+            tbl[home]["w"] += 1
+            tbl[away]["l"] += 1
+        elif ap > hp:
+            tbl[away]["w"] += 1
+            tbl[home]["l"] += 1
+        else:
+            tbl[home]["d"] += 1
+            tbl[away]["d"] += 1
+
+    def points(r: dict) -> int:
+        return 3 * r["w"] + r["d"]
+
+    return sorted(
+        tbl.keys(),
+        key=lambda k: (-points(tbl[k]), -tbl[k]["pf"], str(k)),
+    )
+
+
+def match_winner(score_a, score_b, seed_a: int, seed_b: int):
+    """Knockout winner: higher 2-GW total wins; ties break to the better (lower)
+    seed. Returns "a" or "b". Treats missing scores as 0."""
+    a, b = score_a or 0, score_b or 0
+    if a != b:
+        return "a" if a > b else "b"
+    return "a" if seed_a < seed_b else "b"

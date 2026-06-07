@@ -72,6 +72,28 @@
         {% else %}<div class="empty">No infractions flagged.</div>{% endif %}
       </div>
 
+      {% if cups %}
+      <h2>Cups</h2>
+      {% for cup in cups %}
+        {% if cup.matches %}
+        <div class="card" style="margin-bottom:12px">
+          <table>
+            <thead><tr><th colspan="4">{{ cup.name }}</th></tr></thead>
+            <tbody>
+              {% for m in cup.matches %}
+              <tr>
+                <td class="rank">{{ m.round_label }}</td>
+                <td>{{ m.home }}{% if m.winner == m.home %} ✓{% endif %} v {{ m.away }}{% if m.winner == m.away %} ✓{% endif %}</td>
+                <td class="num">{% if m.home_score is not none %}{{ m.home_score }}–{{ m.away_score }}{% else %}—{% endif %}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endif %}
+      {% endfor %}
+      {% endif %}
+
       <h2>Injury List</h2>
       <div class="card">
         {% if injury_list %}

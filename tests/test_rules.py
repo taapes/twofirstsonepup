@@ -5,9 +5,11 @@ from rules import (
     ANTI_TANKING_MIN_ZERO_PLAYERS,
     MIN_IL_STAY_GWS,
     SEASON_LAST_GW,
+    h2h_standings,
     il_can_return,
     il_same_position,
     is_anti_tanking_infraction,
+    match_winner,
     tanking_windows,
     zero_minute_count,
 )
@@ -100,3 +102,34 @@ def test_il_season_end_forces_return():
 def test_il_min_stay_constant():
     assert MIN_IL_STAY_GWS == 4
     assert SEASON_LAST_GW == 38
+
+
+# ---- cups: seeding + knockout winner ----
+def test_h2h_standings_orders_by_points_then_pf():
+    # A beats B and C; B beats C; C loses both. A=6pts, B=3, C=0.
+    results = [
+        ("A", "B", 50, 40),  # A win
+        ("A", "C", 60, 30),  # A win
+        ("B", "C", 45, 20),  # B win
+    ]
+    assert h2h_standings(results) == ["A", "B", "C"]
+
+
+def test_h2h_standings_draw_and_pf_tiebreak():
+    # A vs B draw (1pt each, equal pf 50 -> alphabetical A first); C beats D (3pts).
+    results = [("A", "B", 50, 50), ("C", "D", 10, 9)]
+    assert h2h_standings(results) == ["C", "A", "B", "D"]
+
+
+def test_match_winner_by_score():
+    assert match_winner(80, 75, seed_a=3, seed_b=6) == "a"
+    assert match_winner(70, 75, seed_a=3, seed_b=6) == "b"
+
+
+def test_match_winner_tie_breaks_to_better_seed():
+    assert match_winner(70, 70, seed_a=3, seed_b=6) == "a"  # seed 3 better
+    assert match_winner(70, 70, seed_a=6, seed_b=3) == "b"
+
+
+def test_match_winner_missing_scores():
+    assert match_winner(None, None, seed_a=1, seed_b=2) == "a"

@@ -13,17 +13,24 @@ from models import (
     InjuryList,
     League,
     Manager,
+    Match,
+    Standing,
     Player,
     Roster,
-    Standing,
+    Tournament,
+    TournamentMatch,
 )
 from rules import (
     ANTI_TANKING_MIN_WEEKS,
     ANTI_TANKING_MIN_ZERO_PLAYERS,
+    CUP_SEED_THROUGH_GW,
+    CUP_SIZE,
     MIN_IL_STAY_GWS,
     RuleViolation,
+    h2h_standings,
     il_can_return,
     il_same_position,
+    match_winner,
     tanking_windows,
     zero_minute_count,
 )
@@ -256,3 +263,190 @@ def return_from_il(
     injured = db.get(Player, entry.player_id)
     replacement = db.get(Player, entry.replacement_id) if entry.replacement_id else None
     return _il_to_dict(entry, injured, replacement)
+
+
+# ---- cups (auto-bracket from GW28 standings, auto-scored 2-GW totals) ----
+def seed_managers(db: Session, league: League, through_gw: int = CUP_SEED_THROUGH_GW):
+    """Managers ranked 1..N by H2H standings through `through_gw` (cup seeding)."""
+    rows = (
+        db.query(Match)
+        .join(Gameweek, Gameweek.id == Match.gameweek_id)
+        .filter(
+            Match.league_id == league.id,
+            Match.finished.is_(True),
+            Gameweek.number <= through_gw,
+        )
+        .all()
+    )
+    results = [
+        (m.home_manager_id, m.away_manager_id, m.home_points or 0, m.away_points or 0)
+        for m in rows
+    ]
+    order = h2h_standings(results)
+    by_id = {m.id: m for m in db.query(Manager).filter_by(league_id=league.id).all()}
+    seeded = [by_id[mid] for mid in order if mid in by_id]
+    seeded += [m for m in by_id.values() if m not in seeded]  # any with no matches
+    return seeded
+
+
+def _two_gw_total(db: Session, league: League, manager_id, gw_numbers) -> int:
+    rows = (
+        db.query(GameweekPoints.total_points)
+        .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
+        .filter(
+            GameweekPoints.manager_id == manager_id,
+            Gameweek.league_id == league.id,
+            Gameweek.number.in_(gw_numbers),
+        )
+        .all()
+    )
+    return sum((r[0] or 0) for r in rows)
+
+
+def _get_tournament(db: Session, league: League, name: str):
+    return (
+        db.query(Tournament)
+        .filter_by(league_id=league.id, name=name)
+        .one_or_none()
+    )
+
+
+def _round_matches(db: Session, tournament, round_no: int):
+    return (
+        db.query(TournamentMatch)
+        .filter_by(tournament_id=tournament.id, round=round_no)
+        .all()
+    )
+
+
+def _loser(m: TournamentMatch):
+    return m.manager_a if m.winner_id == m.manager_b else m.manager_b
+
+
+def _find_by_seeds(matches, seed_map, seeds: set):
+    for m in matches:
+        if {seed_map.get(m.manager_a), seed_map.get(m.manager_b)} == seeds:
+            return m
+    return None
+
+
+def generate_cups(db: Session, league: League, through_gw: int = CUP_SEED_THROUGH_GW):
+    """Seed from GW`through_gw` standings and create Cup (top 6) + Pup Cup
+    (bottom 4) with their first-round matches. Regenerates if cups already exist."""
+    seeds = seed_managers(db, league, through_gw)
+    if len(seeds) < 10:
+        raise RuleViolation(f"need 10 seeded managers, found {len(seeds)}")
+
+    for t in (
+        db.query(Tournament)
+        .filter(Tournament.league_id == league.id, Tournament.name.in_(["Cup", "Pup Cup"]))
+        .all()
+    ):
+        db.query(TournamentMatch).filter_by(tournament_id=t.id).delete()
+        db.delete(t)
+    db.flush()
+
+    cup = Tournament(name="Cup", league_id=league.id)
+    pup = Tournament(name="Pup Cup", league_id=league.id)
+    db.add_all([cup, pup])
+    db.flush()
+
+    def add(t, rnd, a, b):
+        db.add(
+            TournamentMatch(
+                tournament_id=t.id, round=rnd, manager_a=a.id, manager_b=b.id
+            )
+        )
+
+    # seeds[0]=seed1. Cup QF: 3v6, 4v5 (seeds 1,2 bye). Pup play-in: 7v10, 8v9.
+    add(cup, 1, seeds[2], seeds[5])
+    add(cup, 1, seeds[3], seeds[4])
+    add(pup, 1, seeds[6], seeds[9])
+    add(pup, 1, seeds[7], seeds[8])
+    db.commit()
+    return get_cups(db, league)
+
+
+def score_cup_round(db: Session, league: League, round_no: int, gw1: int, gw2: int):
+    """Auto-score every match in `round_no` from 2-GW totals, set winners, then
+    generate the next round (with Cup QF losers feeding the Pup Cup)."""
+    seeds = seed_managers(db, league)
+    seed_map = {m.id: i + 1 for i, m in enumerate(seeds)}
+    cup = _get_tournament(db, league, "Cup")
+    pup = _get_tournament(db, league, "Pup Cup")
+    if not cup or not pup:
+        raise RuleViolation("cups not generated yet")
+
+    cup_r = _round_matches(db, cup, round_no)
+    pup_r = _round_matches(db, pup, round_no)
+    if not (cup_r or pup_r):
+        raise RuleViolation(f"no round {round_no} matches to score")
+
+    gws = [gw1, gw2]
+    for m in cup_r + pup_r:
+        m.score_a = _two_gw_total(db, league, m.manager_a, gws)
+        m.score_b = _two_gw_total(db, league, m.manager_b, gws)
+        side = match_winner(
+            m.score_a, m.score_b, seed_map.get(m.manager_a, 99), seed_map.get(m.manager_b, 99)
+        )
+        m.winner_id = m.manager_a if side == "a" else m.manager_b
+    db.flush()
+
+    if round_no == 1:
+        qf_36 = _find_by_seeds(cup_r, seed_map, {3, 6})
+        qf_45 = _find_by_seeds(cup_r, seed_map, {4, 5})
+        pi_710 = _find_by_seeds(pup_r, seed_map, {7, 10})
+        pi_89 = _find_by_seeds(pup_r, seed_map, {8, 9})
+        # Cup SF: seed1 vs W(4v5), seed2 vs W(3v6)
+        db.add(TournamentMatch(tournament_id=cup.id, round=2, manager_a=seeds[0].id, manager_b=qf_45.winner_id))
+        db.add(TournamentMatch(tournament_id=cup.id, round=2, manager_a=seeds[1].id, manager_b=qf_36.winner_id))
+        # Pup SF: Cup QF losers vs play-in winners
+        db.add(TournamentMatch(tournament_id=pup.id, round=2, manager_a=_loser(qf_45), manager_b=pi_89.winner_id))
+        db.add(TournamentMatch(tournament_id=pup.id, round=2, manager_a=_loser(qf_36), manager_b=pi_710.winner_id))
+    elif round_no == 2:
+        db.add(TournamentMatch(tournament_id=cup.id, round=3, manager_a=cup_r[0].winner_id, manager_b=cup_r[1].winner_id))
+        db.add(TournamentMatch(tournament_id=pup.id, round=3, manager_a=pup_r[0].winner_id, manager_b=pup_r[1].winner_id))
+
+    db.commit()
+    return get_cups(db, league)
+
+
+def get_cups(db: Session, league: League) -> list[dict]:
+    """Read both cup brackets (matches grouped by round) for API/homepage."""
+    names = {m.id: m.name for m in db.query(Manager).filter_by(league_id=league.id)}
+    out = []
+    for t in (
+        db.query(Tournament)
+        .filter(Tournament.league_id == league.id, Tournament.name.in_(["Cup", "Pup Cup"]))
+        .order_by(Tournament.name)  # "Cup" before "Pup Cup"
+        .all()
+    ):
+        labels = {
+            1: "Quarterfinal" if t.name == "Cup" else "Play-in",
+            2: "Semifinal",
+            3: "Final",
+        }
+        matches = (
+            db.query(TournamentMatch)
+            .filter_by(tournament_id=t.id)
+            .order_by(TournamentMatch.round)
+            .all()
+        )
+        out.append(
+            {
+                "name": t.name,
+                "matches": [
+                    {
+                        "round": m.round,
+                        "round_label": labels.get(m.round, f"Round {m.round}"),
+                        "home": names.get(m.manager_a),
+                        "away": names.get(m.manager_b),
+                        "home_score": m.score_a,
+                        "away_score": m.score_b,
+                        "winner": names.get(m.winner_id) if m.winner_id else None,
+                    }
+                    for m in matches
+                ],
+            }
+        )
+    return out

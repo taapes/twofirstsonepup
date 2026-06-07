@@ -139,6 +139,12 @@ Write tests for these. They are custom and non-obvious:
   reverse standings. Keepers submitted pre-draft.
 - **Cups:** Cup (top 6) and Pup Cup (bottom 4 + Cup losers), start after GW28,
   each round spans 2 GWs, admin sets GWs per round. Auto-score 2-week totals.
+  Implemented as auto-generated single-elim brackets seeded from H2H standings
+  through GW28: Cup = top-2 byes (QF 3v6/4v5 -> SF vs seeds 1,2 -> Final); the
+  two Cup QF losers feed the Pup Cup SFs (Pup play-in 7v10/8v9 first). Ties break
+  to the better seed. Admin: `POST /admin/.../cups/generate` then
+  `.../cups/score-round` per round (gw1, gw2). See `services.generate_cups` /
+  `score_cup_round`.
 - **Payouts:** New structure from 25/26. Auto-calculate from standings + cup.
   Last-place fine redistributed to 1st.
 
