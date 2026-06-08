@@ -788,6 +788,35 @@ def admin_cups_score_round(
     return RedirectResponse("/admin/cups", status_code=303)
 
 
+@router.post("/admin/cups/override")
+def admin_cups_override(
+    request: Request, db: Session = Depends(get_db),
+    match_id: str = Form(...), score_a: str = Form(...), score_b: str = Form(...),
+):
+    """Hand-set a cup match's two scores (e.g. DGW 'first game only') + recompute winner."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/cups", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.override_cup_match(
+            db, league, match_id,
+            _safe_int(score_a, 0, 100000, field="home score"),
+            _safe_int(score_b, 0, 100000, field="away score"),
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/cups", status_code=303)
+
+
+@router.get("/cups", response_class=HTMLResponse)
+def cups_page(request: Request, db: Session = Depends(get_db)):
+    """Public, read-only cup brackets."""
+    league = _league_or_404(db)
+    return templates.TemplateResponse("cups.html", {
+        "request": request, "league": league, "cups": services.get_cups(db, league),
+    })
+
+
 @router.get("/history", response_class=HTMLResponse)
 def history_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)

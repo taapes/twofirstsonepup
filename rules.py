@@ -229,8 +229,9 @@ def il_can_return(
 
 
 # ---- Cups ----
-# Seeding is fixed by H2H standings through this gameweek (cups start after it).
-CUP_SEED_THROUGH_GW = 28
+# Seeding is fixed by H2H standings through this gameweek; the cup itself starts the
+# following gameweek (GW28). Qualification: top 6 -> Cup, bottom 4 -> Pup Cup.
+CUP_SEED_THROUGH_GW = 27
 CUP_SIZE = 6  # top 6 -> Cup; remaining bottom 4 -> Pup Cup
 
 
@@ -266,12 +267,19 @@ def h2h_standings(results: list[tuple]) -> list:
     )
 
 
-def match_winner(score_a, score_b, seed_a: int, seed_b: int):
-    """Knockout winner: higher 2-GW total wins; ties break to the better (lower)
-    seed. Returns "a" or "b". Treats missing scores as 0."""
+def match_winner(score_a, score_b, seed_a: int, seed_b: int,
+                 tiebreak_a=None, tiebreak_b=None):
+    """Knockout winner: higher 2-GW total wins. Ties break by the league's cup
+    tiebreakers in order — total goals, then assists, then clean sheets (team totals
+    over the match, passed as `tiebreak_*` = (goals, assists, clean_sheets)) — and
+    finally the better (lower) seed. Returns "a" or "b"; missing values treated as 0."""
     a, b = score_a or 0, score_b or 0
     if a != b:
         return "a" if a > b else "b"
+    if tiebreak_a is not None and tiebreak_b is not None:
+        for ta, tb in zip(tiebreak_a, tiebreak_b):
+            if (ta or 0) != (tb or 0):
+                return "a" if (ta or 0) > (tb or 0) else "b"
     return "a" if seed_a < seed_b else "b"
 
 

@@ -408,6 +408,11 @@ class GameweekPoints(Base):
     )
     total_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
     player_points: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Team totals for the GW (sum over the manager's squad), used as cup tiebreakers
+    # (goals, then assists, then clean sheets) over a match's two gameweeks.
+    team_goals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    team_assists: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    team_clean_sheets: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Tournament(Base):

@@ -490,6 +490,9 @@ async def sync_gameweek_points(gw_number: int | None = None, fpl_league_id: str 
                     "total_points", 0
                 )
 
+            def _stat(fpl_id: int, key: str) -> int:
+                return (live_stats.get(str(fpl_id), {}).get("stats", {}) or {}).get(key, 0) or 0
+
             for m in managers:
                 data = await _get_json(
                     client, f"{API_BASE}/entry/{m.fpl_manager_id}/event/{gw_number}"
@@ -510,11 +513,18 @@ async def sync_gameweek_points(gw_number: int | None = None, fpl_league_id: str 
                 total = (data.get("entry_history") or {}).get("points")
                 if total is None:
                     total = sum(pp["points"] for pp in player_points if pp["is_starting"])
+                # team tiebreak totals over the STARTING XI (cup tiebreakers)
+                starters = [pp["fpl_id"] for pp in player_points if pp["is_starting"]]
+                team_goals = sum(_stat(fid, "goals_scored") for fid in starters)
+                team_assists = sum(_stat(fid, "assists") for fid in starters)
+                team_cs = sum(_stat(fid, "clean_sheets") for fid in starters)
                 _upsert(
                     session,
                     GameweekPoints,
                     {"manager_id": m.id, "gameweek_id": gameweek.id},
-                    {"total_points": total, "player_points": player_points},
+                    {"total_points": total, "player_points": player_points,
+                     "team_goals": team_goals, "team_assists": team_assists,
+                     "team_clean_sheets": team_cs},
                 )
 
         log.ok = True

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Cups{% endblock %}
+{% block content %}
+<h1>Cups</h1>
+<p class="sub">The Cup (top 6 after GW27) and Pup Cup (bottom 4 + the two Cup
+  first-round losers). Each round spans two gameweeks; ties break on total goals, then
+  assists, then clean sheets, then seed.</p>
+{% for cup in cups %}
+  {% if cup.matches %}
+  <h2>{{ cup.name }}</h2>
+  <div class="card" style="margin-bottom:12px">
+    <table>
+      <tbody>
+        {% for m in cup.matches %}
+        <tr>
+          <td class="rank">{{ m.round_label }}</td>
+          <td>{{ m.home or "TBD" }}{% if m.winner == m.home %} ✓{% endif %}
+            v {{ m.away or "TBD" }}{% if m.winner == m.away %} ✓{% endif %}</td>
+          <td class="num">{% if m.home_score is not none %}{{ m.home_score }}–{{ m.away_score }}{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+{% else %}
+<div class="empty">Cups haven't been set up yet.</div>
+{% endfor %}
+{% endblock %}

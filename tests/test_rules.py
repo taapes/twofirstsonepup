@@ -109,6 +109,29 @@ def test_streak_empty():
     assert current_tanking_streak({}) == 0
 
 
+# ---- cup match_winner + tiebreakers ----
+def test_match_winner_points_decide():
+    assert match_winner(10, 8, 3, 4) == "a"
+    assert match_winner(8, 10, 3, 4) == "b"
+
+
+def test_match_winner_tie_breaks_on_goals():
+    # equal points; A has more goals despite the worse (higher) seed
+    assert match_winner(8, 8, 5, 2, (3, 0, 0), (1, 9, 9)) == "a"
+
+
+def test_match_winner_tie_then_assists_then_cs():
+    # equal points + goals -> assists
+    assert match_winner(8, 8, 2, 5, (1, 2, 0), (1, 1, 5)) == "a"
+    # equal points + goals + assists -> clean sheets
+    assert match_winner(8, 8, 2, 5, (1, 1, 2), (1, 1, 1)) == "a"
+
+
+def test_match_winner_all_tied_falls_back_to_seed():
+    assert match_winner(8, 8, 2, 5, (1, 1, 1), (1, 1, 1)) == "a"   # better seed
+    assert match_winner(8, 8, 5, 2) == "b"                          # no tiebreak data
+
+
 # ---- injury list ----
 def test_il_same_position():
     assert il_same_position("DEF", "DEF")

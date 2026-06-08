@@ -36,7 +36,7 @@
 {% for cup in cups %}
 <div class="card" style="margin-bottom:12px">
   <table>
-    <thead><tr><th colspan="3">{{ cup.name }}</th></tr></thead>
+    <thead><tr><th>Round</th><th>Match</th><th class="num">Score</th><th>Override (DGW/manual)</th></tr></thead>
     <tbody>
       {% for m in cup.matches %}
       <tr>
@@ -44,6 +44,16 @@
         <td>{{ m.home or "TBD" }}{% if m.winner == m.home %} ✓{% endif %}
           v {{ m.away or "TBD" }}{% if m.winner == m.away %} ✓{% endif %}</td>
         <td class="num">{% if m.home_score is not none %}{{ m.home_score }}–{{ m.away_score }}{% else %}—{% endif %}</td>
+        <td>
+          {% if m.home and m.away %}
+          <form method="post" action="/admin/cups/override" style="display:flex;gap:4px;align-items:center">
+            <input type="hidden" name="match_id" value="{{ m.id }}">
+            <input name="score_a" type="number" min="0" value="{{ m.home_score if m.home_score is not none else '' }}" style="width:64px" title="home score">
+            <input name="score_b" type="number" min="0" value="{{ m.away_score if m.away_score is not none else '' }}" style="width:64px" title="away score">
+            <button type="submit" class="mini">set</button>
+          </form>
+          {% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>

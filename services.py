@@ -1103,6 +1103,29 @@ def _two_gw_total(db: Session, league: League, manager_id, gw_numbers) -> int:
     return sum((r[0] or 0) for r in rows)
 
 
+def _two_gw_tiebreak(db: Session, league: League, manager_id, gw_numbers) -> tuple:
+    """Team (goals, assists, clean_sheets) totals over a cup match's gameweeks —
+    the cup tiebreakers, in priority order."""
+    rows = (
+        db.query(
+            GameweekPoints.team_goals,
+            GameweekPoints.team_assists,
+            GameweekPoints.team_clean_sheets,
+        )
+        .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
+        .filter(
+            GameweekPoints.manager_id == manager_id,
+            Gameweek.league_id == league.id,
+            Gameweek.number.in_(gw_numbers),
+        )
+        .all()
+    )
+    g = sum((r[0] or 0) for r in rows)
+    a = sum((r[1] or 0) for r in rows)
+    cs = sum((r[2] or 0) for r in rows)
+    return (g, a, cs)
+
+
 def _get_tournament(db: Session, league: League, name: str):
     return (
         db.query(Tournament)
@@ -1187,7 +1210,10 @@ def score_cup_round(db: Session, league: League, round_no: int, gw1: int, gw2: i
         m.score_a = _two_gw_total(db, league, m.manager_a, gws)
         m.score_b = _two_gw_total(db, league, m.manager_b, gws)
         side = match_winner(
-            m.score_a, m.score_b, seed_map.get(m.manager_a, 99), seed_map.get(m.manager_b, 99)
+            m.score_a, m.score_b,
+            seed_map.get(m.manager_a, 99), seed_map.get(m.manager_b, 99),
+            _two_gw_tiebreak(db, league, m.manager_a, gws),
+            _two_gw_tiebreak(db, league, m.manager_b, gws),
         )
         m.winner_id = m.manager_a if side == "a" else m.manager_b
     db.flush()
@@ -1197,9 +1223,12 @@ def score_cup_round(db: Session, league: League, round_no: int, gw1: int, gw2: i
         qf_45 = _find_by_seeds(cup_r, seed_map, {4, 5})
         pi_710 = _find_by_seeds(pup_r, seed_map, {7, 10})
         pi_89 = _find_by_seeds(pup_r, seed_map, {8, 9})
-        # Cup SF: seed1 vs W(4v5), seed2 vs W(3v6)
-        db.add(TournamentMatch(tournament_id=cup.id, round=2, manager_a=seeds[0].id, manager_b=qf_45.winner_id))
-        db.add(TournamentMatch(tournament_id=cup.id, round=2, manager_a=seeds[1].id, manager_b=qf_36.winner_id))
+        # Cup SF re-seeds: seed 1 plays the LOWEST remaining seed (worst surviving
+        # winner), seed 2 plays the HIGHEST remaining seed (best surviving winner).
+        winners = sorted([qf_36.winner_id, qf_45.winner_id], key=lambda mid: seed_map.get(mid, 99))
+        best_remaining, worst_remaining = winners[0], winners[1]
+        db.add(TournamentMatch(tournament_id=cup.id, round=2, manager_a=seeds[0].id, manager_b=worst_remaining))
+        db.add(TournamentMatch(tournament_id=cup.id, round=2, manager_a=seeds[1].id, manager_b=best_remaining))
         # Pup SF: Cup QF losers vs play-in winners
         db.add(TournamentMatch(tournament_id=pup.id, round=2, manager_a=_loser(qf_45), manager_b=pi_89.winner_id))
         db.add(TournamentMatch(tournament_id=pup.id, round=2, manager_a=_loser(qf_36), manager_b=pi_710.winner_id))
@@ -1212,6 +1241,22 @@ def score_cup_round(db: Session, league: League, round_no: int, gw1: int, gw2: i
 
     db.commit()
     return get_cups(db, league)
+
+
+def override_cup_match(db: Session, league: League, match_id: str, score_a: int, score_b: int) -> dict:
+    """Admin: hand-set a cup match's two scores and recompute its winner. Used for the
+    DGW 'first game only' case (and any manual correction), since per-fixture splitting
+    isn't auto. Does NOT regenerate later rounds — score the round normally to advance."""
+    m = db.get(TournamentMatch, match_id)
+    if not m:
+        raise RuleViolation("cup match not found")
+    seeds = seed_managers(db, league)
+    seed_map = {mm.id: i + 1 for i, mm in enumerate(seeds)}
+    m.score_a, m.score_b = score_a, score_b
+    side = match_winner(score_a, score_b, seed_map.get(m.manager_a, 99), seed_map.get(m.manager_b, 99))
+    m.winner_id = m.manager_a if side == "a" else m.manager_b
+    db.commit()
+    return {"match": match_id, "score_a": score_a, "score_b": score_b}
 
 
 def _cup_final_and_third(db: Session, cup: Tournament):
@@ -1256,6 +1301,7 @@ def get_cups(db: Session, league: League) -> list[dict]:
                 "name": t.name,
                 "matches": [
                     {
+                        "id": str(m.id),
                         "round": m.round,
                         "round_label": "3rd-place"
                         if m.id == third_id

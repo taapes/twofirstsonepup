@@ -76,7 +76,8 @@
       <a href="/picks">Picks</a>
       {% if (phase and phase.keepers_editable) or is_admin %}<a href="/keepers">Keepers</a>{% endif %}
       {% if (phase and phase.draft_available) or is_admin %}<a href="/draft/{{ league.season_year + 1 }}">Draft {{ league.season_year + 1 }}</a>{% endif %}
-      {% if (phase and phase.discovery_available) or is_admin %}<a href="/discovery/{{ league.season_year }}">Discovery</a>{% endif %}{% endif %}
+      {% if (phase and phase.discovery_available) or is_admin %}<a href="/discovery/{{ league.season_year }}">Discovery</a>{% endif %}
+      {% if (phase and phase.cups_available) or is_admin %}<a href="/cups">Cups</a>{% endif %}{% endif %}
       <span class="spacer"></span>
       {% if phase and phase.label %}<span class="tag">{{ phase.label }}</span> {% endif %}
       {% if current_name %}<span class="tag">{{ current_name }}</span> {% endif %}
