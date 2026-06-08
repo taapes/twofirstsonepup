@@ -5,6 +5,8 @@ synced/normalized rows. Shared by the JSON API (api.py) and the homepage
 (main.py) so both render the same data.
 """
 
+import os
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -96,7 +98,10 @@ def latest_gameweek(db: Session, league: League) -> Gameweek | None:
     )
 
 
-def current_gameweek(db: Session, league: League) -> int | None:
+DEMO_DEFAULT_GW = 19  # demo: a mid-season GW so Upcoming/Scores have data to show
+
+
+def _derived_current_gameweek(db: Session, league: League) -> int | None:
     """The GW we're 'on' — derived from stored data only (no live FPL call, per
     the two-truths boundary): the latest GW whose window has started (start_date <=
     today), else the latest GW that has points data, else None."""
@@ -117,6 +122,23 @@ def current_gameweek(db: Session, league: League) -> int | None:
         .all()
     )
     return max((gw.number for _p, gw in gp), default=None)
+
+
+def current_gameweek(db: Session, league: League) -> int | None:
+    """Current GW (see `_derived_current_gameweek`). In the demo sandbox, if the data
+    has no upcoming GWs (e.g. a copy of a finished season), pretend we're mid-season so
+    Upcoming/Scores populate from the real matches + fixtures already in the copy —
+    overridable with DEMO_CURRENT_GW. Live/prod is unaffected."""
+    real = _derived_current_gameweek(db, league)
+    from auth import is_demo
+
+    if is_demo():
+        env = os.getenv("DEMO_CURRENT_GW")
+        if env and env.isdigit():
+            return int(env)
+        if real is None or real >= SEASON_LAST_GW - 3:
+            return DEMO_DEFAULT_GW
+    return real
 
 
 def waiver_window(db: Session, league: League) -> dict | None:
