@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Future Picks{% endblock %}
+{% block content %}
+<h1>Future Pick Ownership</h1>
+<p class="sub">Picks that have changed hands. Computed from pick trades — recording a
+   trade updates this automatically. Unlisted picks stay with their original owner.</p>
+{% if future_picks %}
+  {% for season in future_picks %}
+  <h2>{{ season.year }}</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th class="num">Round</th><th>Original owner</th><th>Now owned by</th></tr></thead>
+      <tbody>
+        {% for p in season.picks %}
+        <tr>
+          <td class="num">{{ p.round }}</td>
+          <td>{{ p.original_owner }}</td>
+          <td>{{ p.owner }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="card empty">No traded future picks.</div>
+{% endif %}
+{% endblock %}

@@ -461,6 +461,31 @@ class SeasonHistory(Base):
     pup_winner: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class FuturePick(Base):
+    """Future draft-pick ownership imported from the Future Picks sheet (left grid
+    only). One row per pick that has changed hands: original owner -> current
+    owner, by person name. 'Own' (kept) cells are not stored."""
+
+    __tablename__ = "future_picks"
+    __table_args__ = (
+        UniqueConstraint(
+            "league_id", "season_year", "draft_type", "round", "original_owner",
+            name="uq_future_pick",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    season_year: Mapped[int] = mapped_column(Integer, index=True)
+    draft_type: Mapped[str] = mapped_column(String, server_default="main")
+    round: Mapped[int] = mapped_column(Integer)
+    original_owner: Mapped[str] = mapped_column(String)  # person name
+    owner: Mapped[str] = mapped_column(String)  # person who now owns it
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class HistoricalStanding(Base):
     """Per-season final standings imported from the sheet. Team/stats may be
     absent for older seasons (manager-only rows). Manager stored as person text."""

@@ -801,13 +801,49 @@ def record_pick(
     return {"pick": pick_number, "owner": owner.name, "player": player.name}
 
 
+def pick_ownership(
+    db: Session, league: League, season_year: int, draft_type: str = "main"
+) -> dict:
+    """SINGLE SOURCE OF TRUTH for who owns each pick in a draft year. Returns
+    {(round, original_owner_person): current_owner_person} for picks that have
+    changed hands. Built from the imported baseline (future_picks) + recorded
+    pick trades (trades table), applied in order (latest reassignment wins).
+    Shared by the draft board and the future-picks grid so they never disagree.
+    """
+    from models import FuturePick
+
+    person_by_id = {
+        m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)
+    }
+    reassigned: dict = {}
+    # baseline (imported net ownership from the sheet)
+    for fp in db.query(FuturePick).filter_by(
+        league_id=league.id, season_year=season_year, draft_type=draft_type
+    ):
+        reassigned[(fp.round, fp.original_owner)] = fp.owner
+    # then live pick trades, in entry order (latest wins)
+    for t in (
+        db.query(Trade)
+        .filter(Trade.league_id == league.id, Trade.pick_round.isnot(None),
+                Trade.pick_season_year == season_year, Trade.pick_draft_type == draft_type)
+        .order_by(Trade.id)
+        .all()
+    ):
+        orig, to = person_by_id.get(t.pick_original_manager), person_by_id.get(t.to_manager)
+        if orig and to:
+            reassigned[(t.pick_round, orig)] = to
+    return reassigned
+
+
 def get_draft_board(
     db: Session, league: League, season_year: int, draft_type: str = "main"
 ) -> list[dict]:
     """The draft board: slots in pick order with current owner (after pick trades)
     and any recorded selection. Computed from the R1 order + reverse standings +
     free-keeper counts, so it reflects trades the moment they're entered."""
-    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    managers = db.query(Manager).filter_by(league_id=league.id).all()
+    names = {m.id: m.display for m in managers}
+    id_by_person = {m.display: m.id for m in managers}
     r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
     rev = _reverse_standings_managers(db, league)
 
@@ -822,19 +858,13 @@ def get_draft_board(
         {"pick": i, "round": s["round"], "original_owner_id": s["manager"], "owner_id": s["manager"]}
         for i, s in enumerate(slots, start=1)
     ]
-    by_slot = {(b["round"], b["original_owner_id"]): b for b in board}
 
-    # apply pick trades in entry order (latest move of a slot wins)
-    for t in (
-        db.query(Trade)
-        .filter(Trade.league_id == league.id, Trade.pick_round.isnot(None),
-                Trade.pick_season_year == season_year, Trade.pick_draft_type == draft_type)
-        .order_by(Trade.id)
-        .all()
-    ):
-        slot = by_slot.get((t.pick_round, t.pick_original_manager))
-        if slot:
-            slot["owner_id"] = t.to_manager
+    # apply the unified pick ownership (baseline + trades)
+    own = pick_ownership(db, league, season_year, draft_type)
+    for b in board:
+        orig_person = names.get(b["original_owner_id"])
+        cur_person = own.get((b["round"], orig_person), orig_person)
+        b["owner_id"] = id_by_person.get(cur_person, b["original_owner_id"])
 
     # overlay recorded picks by pick number
     picks = {
@@ -857,6 +887,29 @@ def get_draft_board(
             "traded": b["owner_id"] != b["original_owner_id"],
             "player": pnames.get(dp.player_id) if dp and dp.player_id else None,
         })
+    return out
+
+
+def get_future_picks(db: Session, league: League) -> list[dict]:
+    """Future pick ownership by year — only picks that have changed hands —
+    computed from the same pick_ownership source as the draft board, so a newly
+    entered pick trade shows up here automatically."""
+    from models import FuturePick
+
+    years = {y for (y,) in db.query(FuturePick.season_year).filter_by(league_id=league.id).distinct()}
+    years |= {
+        y for (y,) in db.query(Trade.pick_season_year)
+        .filter(Trade.league_id == league.id, Trade.pick_season_year.isnot(None)).distinct()
+    }
+    out = []
+    for y in sorted(years):
+        own = pick_ownership(db, league, y)
+        picks = [
+            {"round": rnd, "original_owner": orig, "owner": owner}
+            for (rnd, orig), owner in sorted(own.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+        ]
+        if picks:
+            out.append({"year": y, "picks": picks})
     return out
 
 

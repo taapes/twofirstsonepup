@@ -12,6 +12,7 @@ import unicodedata
 
 from db import SessionLocal
 from models import (
+    FuturePick,
     HistoricalStanding,
     KeeperSeed,
     League,
@@ -26,6 +27,7 @@ HISTORY_DIR = "history"
 CURRENT_TEAMS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Current Teams.csv"
 LEAGUE_HISTORY = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - League History.csv"
 STANDINGS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - League History - Standings.csv"
+FUTURE_PICKS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Future Picks.csv"
 
 # Sheet player name -> our players.name (web_name). For accents/typos/abbrev that
 # normalized matching can't bridge. Confirmed against the DB + the commissioner.
@@ -203,10 +205,49 @@ def import_standings_history(commit: bool = False) -> None:
     db.close()
 
 
+def import_future_picks(commit: bool = False) -> None:
+    """Future Picks CSV -> future_picks. LEFT grid only (cols 1-10): row=round,
+    column header=original owner, cell=current owner ('Own' = kept, skipped).
+    The right grid and free-text note rows are ignored."""
+    db = SessionLocal()
+    league = db.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
+    rows = [r + [""] * 22 for r in csv.reader(open(FUTURE_PICKS))]
+
+    picks = []  # (year, round, original_owner, owner)
+    headers = None  # cols 1-10 manager names for the current year block
+    year = None
+    for r in rows:
+        if r[0].strip().isdigit() and len(r[0].strip()) == 4:  # year header (e.g. 2026)
+            year = int(r[0].strip())
+            headers = [r[c].strip() for c in range(1, 11)]
+        elif year and r[0].strip().isdigit():  # round row
+            rnd = int(r[0].strip())
+            for i, c in enumerate(range(1, 11)):
+                cell = r[c].strip()
+                orig = headers[i] if headers else None
+                if orig and cell and cell.lower() != "own":
+                    picks.append((year, rnd, orig, cell))
+
+    if commit:
+        db.query(FuturePick).filter_by(league_id=league.id, draft_type="main").delete()
+        for year, rnd, orig, owner in picks:
+            db.add(FuturePick(league_id=league.id, season_year=year, draft_type="main",
+                              round=rnd, original_owner=orig, owner=owner))
+        db.commit()
+        print(f"COMMITTED: {len(picks)} traded future picks across "
+              f"{len(set(p[0] for p in picks))} seasons")
+    else:
+        for p in picks:
+            print("   ", p)
+        print(f"({len(picks)} traded picks; preview only — pass commit=True to write)")
+    db.close()
+
+
 _IMPORTERS = {
     "keepers": import_keeper_seeds,
     "history": import_league_history,
     "standings": import_standings_history,
+    "futurepicks": import_future_picks,
 }
 
 if __name__ == "__main__":
