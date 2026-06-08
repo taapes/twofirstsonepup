@@ -53,6 +53,29 @@ class League(Base):
     keepers_locked: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # League lifecycle phase (drives feature availability + sync cadence). Macro
+    # phase only: offseason | draft | preseason | in_season. In-season sub-states
+    # (discovery / post-deadline / cup) are the `discovery_open` flag + values
+    # derived from date/GW so they can't contradict the calendar.
+    phase: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="offseason"
+    )
+    phase_set_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # When true, the admin has pinned the phase: auto-advance during sync is skipped.
+    phase_manual: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    # In-season toggle for the discovery draft window (auto-on Oct 1; admin-off).
+    discovery_open: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    # The active season's league row (one True per franchise). Rollover flips it so
+    # no env redeploy is needed; resolve_league falls back to the env when unset.
+    is_current: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
 
 
 class Manager(Base):

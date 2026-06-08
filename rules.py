@@ -10,6 +10,63 @@ class RuleViolation(Exception):
     """Raised when an admin action would break a league rule. Endpoints map this
     to HTTP 400 with the message."""
 
+
+# ---- League phase lifecycle ----
+# Macro phases stored on the league row. In-season sub-states (discovery /
+# post-trade-deadline / cup) are NOT separate macro values — they're the
+# `discovery_open` flag plus values derived from the date/GW (see phase_features),
+# so a stored phase can never contradict the calendar.
+PHASE_OFFSEASON = "offseason"
+PHASE_DRAFT = "draft"
+PHASE_PRESEASON = "preseason"
+PHASE_IN_SEASON = "in_season"
+PHASES = (PHASE_OFFSEASON, PHASE_DRAFT, PHASE_PRESEASON, PHASE_IN_SEASON)
+
+# Calendar anchors for in-season derived sub-states.
+TRADE_DEADLINE_MONTH, TRADE_DEADLINE_DAY = 2, 1   # Feb 1: trades close
+DISCOVERY_OPEN_MONTH, DISCOVERY_OPEN_DAY = 10, 1  # Oct 1: discovery window opens
+CUP_START_GW = 28  # cups become available once GW28 has finished
+
+
+def phase_features(
+    macro: str,
+    *,
+    trades_off: bool = False,
+    cups_available: bool = False,
+    discovery_open: bool = False,
+    gw_logic: bool = False,
+) -> dict:
+    """Pure map of a league phase -> which features are available. `macro` is one of
+    PHASES; the keyword flags are the in-season derived sub-state (computed from the
+    calendar/GW by services.phase_context). Returns booleans consumed by routes/nav.
+    """
+    if macro == PHASE_OFFSEASON:
+        return {
+            "trades_allowed": True, "keepers_editable": True, "draft_available": False,
+            "discovery_available": False, "my_team_available": False,
+            "cups_available": False, "prior_locked": True, "gw_logic_active": False,
+        }
+    if macro == PHASE_DRAFT:
+        return {
+            "trades_allowed": True, "keepers_editable": False, "draft_available": True,
+            "discovery_available": False, "my_team_available": False,
+            "cups_available": False, "prior_locked": True, "gw_logic_active": False,
+        }
+    if macro == PHASE_PRESEASON:
+        return {
+            "trades_allowed": True, "keepers_editable": False, "draft_available": False,
+            "discovery_available": False, "my_team_available": True,
+            "cups_available": False, "prior_locked": False, "gw_logic_active": False,
+        }
+    if macro == PHASE_IN_SEASON:
+        return {
+            "trades_allowed": not trades_off, "keepers_editable": False,
+            "draft_available": False, "discovery_available": discovery_open,
+            "my_team_available": True, "cups_available": cups_available,
+            "prior_locked": False, "gw_logic_active": True,
+        }
+    raise ValueError(f"unknown phase {macro!r}")
+
 # Anti-tanking (across gameweeks): a manager is flagged when, for >= MIN_WEEKS
 # consecutive gameweeks, each of those gameweeks has >= MIN_ZERO_PLAYERS rostered
 # players (the entire 15-man squad, not just the XI) who recorded 0 real-match

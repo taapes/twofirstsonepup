@@ -31,13 +31,21 @@ from rules import (
     ANTI_TANKING_MIN_ZERO_PLAYERS,
     CUP_SEED_THROUGH_GW,
     CUP_SIZE,
+    CUP_START_GW,
+    DISCOVERY_OPEN_DAY,
+    DISCOVERY_OPEN_MONTH,
     KEEPER_FRESH_REMAINING,
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
+    PHASE_IN_SEASON,
+    PHASE_OFFSEASON,
     RuleViolation,
     SEASON_LAST_GW,
+    TRADE_DEADLINE_DAY,
+    TRADE_DEADLINE_MONTH,
     compute_payouts,
     current_tanking_streak,
+    phase_features,
     h2h_standings,
     il_can_return,
     il_same_position,
@@ -87,6 +95,68 @@ def current_gameweek(db: Session, league: League) -> int | None:
         .all()
     )
     return max((gw.number for _p, gw in gp), default=None)
+
+
+def gw_finished(db: Session, league: League, number: int) -> bool:
+    """Has gameweek `number` finished? (any finished H2H match in that GW)."""
+    return (
+        db.query(Match)
+        .join(Gameweek, Gameweek.id == Match.gameweek_id)
+        .filter(
+            Gameweek.league_id == league.id,
+            Gameweek.number == number,
+            Match.finished.is_(True),
+        )
+        .first()
+        is not None
+    )
+
+
+def _phase_label(macro: str, discovery_open: bool, trades_off: bool, cups: bool) -> str:
+    if macro == "offseason":
+        return "Off-season"
+    if macro == "draft":
+        return "Draft"
+    if macro == "preseason":
+        return "Pre-season"
+    # in_season sub-states (stack)
+    if discovery_open:
+        return "In season — discovery draft"
+    if cups:
+        return "Cup season"
+    if trades_off:
+        return "In season — post trade deadline"
+    return "In season"
+
+
+def phase_context(db: Session, league: League) -> dict:
+    """The league's current phase + derived feature flags (the single source the
+    UI/routes consult). Macro phase is stored on the league; the in-season
+    sub-state (trades-off after Feb 1, cups after GW28, discovery window) is derived
+    from the calendar/GW so it can't drift from reality."""
+    import datetime as _dt
+
+    macro = league.phase or PHASE_OFFSEASON
+    today = _dt.date.today()
+    sy = league.season_year or today.year
+    # Trade deadline is Feb 1 of the year the season ENDS (season_year + 1).
+    trades_off = today >= _dt.date(sy + 1, TRADE_DEADLINE_MONTH, TRADE_DEADLINE_DAY)
+    cups_available = gw_finished(db, league, CUP_START_GW)
+    feats = phase_features(
+        macro,
+        trades_off=trades_off,
+        cups_available=cups_available,
+        discovery_open=bool(league.discovery_open),
+        gw_logic=(macro == PHASE_IN_SEASON),
+    )
+    return {
+        "macro": macro,
+        "label": _phase_label(macro, bool(league.discovery_open), trades_off, cups_available),
+        "current_gw": current_gameweek(db, league),
+        "discovery_open": bool(league.discovery_open),
+        "phase_manual": bool(league.phase_manual),
+        **feats,
+    }
 
 
 def fixtures_for_gws(db: Session, league: League, gw_numbers: list[int]) -> dict:
