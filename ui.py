@@ -216,8 +216,8 @@ def admin_standings(request: Request, db: Session = Depends(get_db)):
 @router.post("/admin/standings/adjust")
 def admin_standings_adjust(
     request: Request, db: Session = Depends(get_db),
-    fpl_manager_id: str = Form(...), total: str = Form(""),
-    points_for: str = Form(""), note: str = Form(""),
+    fpl_manager_id: str = Form(...), total_delta: str = Form(""),
+    points_for_delta: str = Form(""), gameweek: str = Form(""), note: str = Form(""),
 ):
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/standings", status_code=303)
@@ -225,8 +225,9 @@ def admin_standings_adjust(
     try:
         services.adjust_standing(
             db, league, fpl_manager_id=fpl_manager_id,
-            total=int(total) if total.strip() else None,
-            points_for=int(points_for) if points_for.strip() else None,
+            total_delta=int(total_delta) if total_delta.strip() else 0,
+            points_for_delta=int(points_for_delta) if points_for_delta.strip() else 0,
+            gameweek=int(gameweek) if gameweek.strip() else None,
             note=note or None,
         )
     except (RuleViolation, ValueError) as e:

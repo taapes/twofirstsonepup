@@ -600,9 +600,10 @@ class ManagerHonors(Base):
 
 
 class StandingAdjustment(Base):
-    """Audit log of commissioner manual edits to a manager's standings (H2H points
-    `total` or season `points_for`). Provides the evidence trail; the standings
-    view flags managers that have any adjustment."""
+    """Commissioner standings adjustment, stored as a RELATIVE delta (e.g. a -3
+    H2H / -10 total deduction). Deltas accumulate and are applied on top of the
+    live synced standings at read time, so they persist as standings update. Also
+    the evidence trail."""
 
     __tablename__ = "standing_adjustments"
 
@@ -613,9 +614,9 @@ class StandingAdjustment(Base):
     manager_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("managers.id"), index=True
     )
-    field: Mapped[str] = mapped_column(String)  # "total" | "points_for"
-    old_value: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    new_value: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_delta: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    points_for_delta: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    gameweek: Mapped[int | None] = mapped_column(Integer, nullable=True)  # when applied
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

@@ -64,67 +64,65 @@ def latest_gameweek(db: Session, league: League) -> Gameweek | None:
 
 
 def get_standings(db: Session, league: League) -> list[dict]:
+    """Live standings with commissioner adjustments applied as accumulating deltas
+    on top of the synced totals, then re-ranked."""
     from models import StandingAdjustment
 
     rows = (
         db.query(Standing, Manager)
         .join(Manager, Manager.id == Standing.manager_id)
         .filter(Standing.league_id == league.id)
-        .order_by(Standing.rank_sort.asc().nulls_last(), Standing.rank.asc())
         .all()
     )
-    adjusted = {
-        mid for (mid,) in db.query(StandingAdjustment.manager_id)
-        .filter_by(league_id=league.id).distinct()
-    }
-    return [
-        {
-            "rank": s.rank,
-            "last_rank": s.last_rank,
+    dt: dict = {}   # manager_id -> summed H2H (total) delta
+    dpf: dict = {}  # manager_id -> summed points_for delta
+    for a in db.query(StandingAdjustment).filter_by(league_id=league.id):
+        dt[a.manager_id] = dt.get(a.manager_id, 0) + a.total_delta
+        dpf[a.manager_id] = dpf.get(a.manager_id, 0) + a.points_for_delta
+
+    out = []
+    for s, m in rows:
+        out.append({
             "manager": m.display,
-            "total": s.total,
-            "points_for": s.points_for,
+            "total": (s.total or 0) + dt.get(m.id, 0),
+            "points_for": (s.points_for or 0) + dpf.get(m.id, 0),
             "points_against": s.points_against,
             "matches_won": s.matches_won,
             "matches_drawn": s.matches_drawn,
             "matches_lost": s.matches_lost,
-            "adjusted": m.id in adjusted,  # commissioner manually edited
-        }
-        for s, m in rows
-    ]
+            "total_delta": dt.get(m.id, 0),
+            "points_for_delta": dpf.get(m.id, 0),
+            "adjusted": bool(dt.get(m.id) or dpf.get(m.id)),
+        })
+    out.sort(key=lambda x: (-(x["total"] or 0), -(x["points_for"] or 0), x["manager"]))
+    for i, row in enumerate(out, start=1):
+        row["rank"] = i
+    return out
 
 
 def adjust_standing(
     db: Session, league: League, *, fpl_manager_id: str,
-    total: int | None = None, points_for: int | None = None, note: str | None = None,
+    total_delta: int = 0, points_for_delta: int = 0,
+    gameweek: int | None = None, note: str | None = None,
 ) -> dict:
-    """Commissioner manual edit of a manager's H2H points (`total`) and/or season
-    `points_for`. Logs each changed field to standing_adjustments (the evidence)."""
+    """Apply a RELATIVE standings adjustment (delta) for a manager — e.g. a -3 H2H
+    / -10 total deduction. Deltas accumulate and apply on top of live standings."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    if not total_delta and not points_for_delta:
+        raise RuleViolation("enter a non-zero H2H and/or total points change")
     from models import StandingAdjustment
 
-    manager = _resolve_manager(db, league, fpl_manager_id)
-    standing = (
-        db.query(Standing).filter_by(league_id=league.id, manager_id=manager.id).one_or_none()
-    )
-    if not standing:
-        raise RuleViolation(f"no standings row for {manager.display}")
-    changes = []
-    for field, new in (("total", total), ("points_for", points_for)):
-        if new is None:
-            continue
-        old = getattr(standing, field)
-        if old == new:
-            continue
-        db.add(StandingAdjustment(league_id=league.id, manager_id=manager.id,
-                                  field=field, old_value=old, new_value=new, note=note))
-        setattr(standing, field, new)
-        changes.append({"field": field, "old": old, "new": new})
+    db.add(StandingAdjustment(
+        league_id=league.id, manager_id=manager.id,
+        total_delta=total_delta, points_for_delta=points_for_delta,
+        gameweek=gameweek, note=note,
+    ))
     db.commit()
-    return {"manager": manager.display, "changes": changes}
+    return {"manager": manager.display, "total_delta": total_delta, "points_for_delta": points_for_delta}
 
 
 def get_standing_adjustments(db: Session, league: League) -> list[dict]:
-    """The audit trail of manual standings edits (evidence)."""
+    """The log of standings adjustments (deltas) — the evidence trail."""
     from models import StandingAdjustment
 
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
@@ -136,9 +134,9 @@ def get_standing_adjustments(db: Session, league: League) -> list[dict]:
     )
     return [
         {
-            "manager": names.get(a.manager_id), "field": a.field,
-            "old": a.old_value, "new": a.new_value, "note": a.note,
-            "when": a.created_at.isoformat() if a.created_at else None,
+            "manager": names.get(a.manager_id), "total_delta": a.total_delta,
+            "points_for_delta": a.points_for_delta, "gameweek": a.gameweek,
+            "note": a.note, "when": a.created_at.isoformat() if a.created_at else None,
         }
         for a in rows
     ]

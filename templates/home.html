@@ -32,7 +32,7 @@
   </div>
   {% if adjustments %}
   <p class="sub">✎ = commissioner-adjusted.
-    {% for a in adjustments %}{{ a.manager }} {{ a.field }} {{ a.old }}→{{ a.new }}{% if a.note %} ({{ a.note }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}</p>
+    {% for a in adjustments %}{{ a.manager }}{% if a.total_delta %} {{ "%+d"|format(a.total_delta) }} H2H{% endif %}{% if a.points_for_delta %} {{ "%+d"|format(a.points_for_delta) }} total{% endif %}{% if a.gameweek %} (from GW{{ a.gameweek }}){% endif %}{% if a.note %} — {{ a.note }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}</p>
   {% endif %}
 
   <h2>Anti-Tanking Infractions</h2>
