@@ -165,11 +165,12 @@ async def sync_players():
 
 
 # ---------- real-life PL fixtures ----------
-async def sync_fixtures():
+async def sync_fixtures(fpl_league_id: str | None = None):
     """Pull the PL fixture list + difficulty from the classic FPL feed so we can
     show each rostered player's upcoming opponent. Best-effort (same host already
     used for prices); skips quietly if unreachable. Teams stored as short names."""
-    if not LEAGUE_ID:
+    fpl_league_id = fpl_league_id or LEAGUE_ID
+    if not fpl_league_id:
         return
     with SessionLocal() as session:
         log = SyncLog(kind="fixtures")
@@ -177,7 +178,7 @@ async def sync_fixtures():
         session.commit()
 
         league = (
-            session.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one_or_none()
+            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
         )
         if not league:
             log.notes = "league missing, run sync_league_and_managers first"
@@ -225,22 +226,23 @@ async def sync_fixtures():
 
 
 # ---------- league & managers ----------
-async def sync_league_and_managers():
-    if not LEAGUE_ID:
+async def sync_league_and_managers(fpl_league_id: str | None = None):
+    fpl_league_id = fpl_league_id or LEAGUE_ID
+    if not fpl_league_id:
         return
     with SessionLocal() as session:
         log = SyncLog(kind="league")
         session.add(log)
         session.commit()
         async with httpx.AsyncClient() as client:
-            data = await _get_json(client, f"{API_BASE}/league/{LEAGUE_ID}/details")
+            data = await _get_json(client, f"{API_BASE}/league/{fpl_league_id}/details")
 
         league_meta = data.get("league", {})
         draft_dt = _parse_iso(league_meta.get("draft_dt"))
         league = _upsert(
             session,
             League,
-            {"fpl_league_id": str(LEAGUE_ID)},
+            {"fpl_league_id": str(fpl_league_id)},
             {
                 "season_year": _season_start_year(draft_dt),
                 "name": league_meta.get("name", ""),
@@ -341,10 +343,11 @@ async def sync_league_and_managers():
 
 
 # ---------- gameweek dates (from bootstrap events) ----------
-async def sync_gameweek_dates():
+async def sync_gameweek_dates(fpl_league_id: str | None = None):
     """Populate gameweeks.start_date/end_date from the bootstrap event deadlines.
     A GW spans from its own deadline to the next GW's deadline."""
-    if not LEAGUE_ID:
+    fpl_league_id = fpl_league_id or LEAGUE_ID
+    if not fpl_league_id:
         return
     with SessionLocal() as session:
         log = SyncLog(kind="gameweek_dates")
@@ -352,7 +355,7 @@ async def sync_gameweek_dates():
         session.commit()
 
         league = (
-            session.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one_or_none()
+            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
         )
         if not league:
             log.notes = "league missing, run sync_league_and_managers first"
@@ -385,10 +388,11 @@ async def sync_gameweek_dates():
 
 
 # ---------- rosters (snapshot a gw) ----------
-async def sync_rosters(gw_number: int | None = None):
+async def sync_rosters(gw_number: int | None = None, fpl_league_id: str | None = None):
     """Snapshot each manager's roster for a gameweek. Defaults to the current GW;
     pass a number to (re)sync a specific GW (used by backfill)."""
-    if not LEAGUE_ID:
+    fpl_league_id = fpl_league_id or LEAGUE_ID
+    if not fpl_league_id:
         return
     with SessionLocal() as session:
         log = SyncLog(kind="rosters")
@@ -396,7 +400,7 @@ async def sync_rosters(gw_number: int | None = None):
         session.commit()
 
         league = (
-            session.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one_or_none()
+            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
         )
         if not league:
             log.notes = "league missing, run sync_league_and_managers first"
@@ -444,12 +448,13 @@ async def sync_rosters(gw_number: int | None = None):
 
 
 # ---------- gameweek points + minutes (feeds anti-tanking) ----------
-async def sync_gameweek_points(gw_number: int | None = None):
+async def sync_gameweek_points(gw_number: int | None = None, fpl_league_id: str | None = None):
     """Store per-manager points for a gameweek, including each pick's minutes and
     lineup position in `player_points` JSONB. The anti-tanking rule reads minutes
     from here across gameweeks, so this is what makes infractions a precomputed
     query. Defaults to the current GW; pass a number to (re)sync a specific GW."""
-    if not LEAGUE_ID:
+    fpl_league_id = fpl_league_id or LEAGUE_ID
+    if not fpl_league_id:
         return
     with SessionLocal() as session:
         log = SyncLog(kind="gameweek_points")
@@ -457,7 +462,7 @@ async def sync_gameweek_points(gw_number: int | None = None):
         session.commit()
 
         league = (
-            session.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one_or_none()
+            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
         )
         if not league:
             log.notes = "league missing, run sync_league_and_managers first"
@@ -543,11 +548,12 @@ async def backfill_history(start: int = 1, end: int = 38):
 
 
 # ---------- trades (canonical, from FPL draft trades feed) ----------
-async def sync_trades():
+async def sync_trades(fpl_league_id: str | None = None):
     """Pull accepted trades from the FPL Draft trades feed into `trades` — one row
     per moved player (from_manager -> to_manager, at the trade's GW). Keeper
     derivation uses these so a traded-away player isn't counted as a drop."""
-    if not LEAGUE_ID:
+    fpl_league_id = fpl_league_id or LEAGUE_ID
+    if not fpl_league_id:
         return
     with SessionLocal() as session:
         log = SyncLog(kind="trades")
@@ -555,7 +561,7 @@ async def sync_trades():
         session.commit()
 
         league = (
-            session.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one_or_none()
+            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
         )
         if not league:
             log.notes = "league missing, run sync_league_and_managers first"
@@ -565,7 +571,7 @@ async def sync_trades():
 
         async with httpx.AsyncClient() as client:
             data = await _get_json(
-                client, f"{API_BASE}/draft/league/{LEAGUE_ID}/trades"
+                client, f"{API_BASE}/draft/league/{fpl_league_id}/trades"
             )
 
         mgr_by_entry = {
@@ -625,11 +631,12 @@ async def sync_trades():
 
 
 # ---------- orchestrator ----------
-async def sync_all():
+async def sync_all(fpl_league_id: str | None = None):
+    fpl_league_id = fpl_league_id or LEAGUE_ID
     await sync_players()
-    await sync_league_and_managers()  # also standings + matches
-    await sync_gameweek_dates()
-    await sync_fixtures()
-    await sync_rosters()
-    await sync_gameweek_points()
-    await sync_trades()
+    await sync_league_and_managers(fpl_league_id=fpl_league_id)  # also standings + matches
+    await sync_gameweek_dates(fpl_league_id=fpl_league_id)
+    await sync_fixtures(fpl_league_id=fpl_league_id)
+    await sync_rosters(fpl_league_id=fpl_league_id)
+    await sync_gameweek_points(fpl_league_id=fpl_league_id)
+    await sync_trades(fpl_league_id=fpl_league_id)
