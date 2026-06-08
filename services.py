@@ -5,6 +5,7 @@ synced/normalized rows. Shared by the JSON API (api.py) and the homepage
 (main.py) so both render the same data.
 """
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from models import (
@@ -1679,6 +1680,121 @@ def record_pick(
         ))
     db.commit()
     return {"pick": pick_number, "owner": owner.name, "player": player.name}
+
+
+def get_draft_queue(
+    db: Session, league: League, fpl_manager_id: str, season_year: int, draft_type: str = "main"
+) -> list[dict]:
+    """A manager's ranked autodraft queue (player name/fpl_id in rank order)."""
+    from models import DraftQueue
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    rows = (
+        db.query(DraftQueue, Player)
+        .join(Player, Player.id == DraftQueue.player_id)
+        .filter(
+            DraftQueue.league_id == league.id, DraftQueue.season_year == season_year,
+            DraftQueue.draft_type == draft_type, DraftQueue.manager_id == manager.id,
+        )
+        .order_by(DraftQueue.rank)
+        .all()
+    )
+    return [{"fpl_id": p.fpl_id, "name": p.name, "position": p.position} for _q, p in rows]
+
+
+def add_to_queue(
+    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int,
+    season_year: int, draft_type: str = "main",
+) -> None:
+    """Append a player to the manager's queue (idempotent; no-op if already queued)."""
+    from models import DraftQueue
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    player = _resolve_player(db, player_fpl_id)
+    exists = (
+        db.query(DraftQueue).filter_by(
+            league_id=league.id, season_year=season_year, draft_type=draft_type,
+            manager_id=manager.id, player_id=player.id,
+        ).one_or_none()
+    )
+    if exists:
+        return
+    next_rank = (
+        db.query(func.coalesce(func.max(DraftQueue.rank), -1)).filter_by(
+            league_id=league.id, season_year=season_year, draft_type=draft_type,
+            manager_id=manager.id,
+        ).scalar()
+    ) + 1
+    db.add(DraftQueue(
+        league_id=league.id, season_year=season_year, draft_type=draft_type,
+        manager_id=manager.id, player_id=player.id, rank=next_rank,
+    ))
+    db.commit()
+
+
+def remove_from_queue(
+    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int,
+    season_year: int, draft_type: str = "main",
+) -> None:
+    from models import DraftQueue
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    player = _resolve_player(db, player_fpl_id)
+    db.query(DraftQueue).filter_by(
+        league_id=league.id, season_year=season_year, draft_type=draft_type,
+        manager_id=manager.id, player_id=player.id,
+    ).delete(synchronize_session=False)
+    db.commit()
+
+
+def approve_queued_pick(
+    db: Session, league: League, *, season_year: int, draft_type: str = "main"
+) -> dict:
+    """Admin: fill the on-the-clock slot from its owner's queue — picks their top
+    still-available, eligible queued player. Raises RuleViolation if the draft is
+    complete or the on-the-clock manager has no usable queued player."""
+    from models import DraftQueue
+
+    board = (
+        get_discovery_board(db, league, season_year)
+        if draft_type == "discovery"
+        else get_draft_board(db, league, season_year)
+    )
+    slot = next_open_pick(board)
+    if not slot or not slot.get("owner_fpl"):
+        raise RuleViolation("the draft is complete")
+    owner = _resolve_manager(db, league, slot["owner_fpl"])
+    queued = (
+        db.query(DraftQueue, Player)
+        .join(Player, Player.id == DraftQueue.player_id)
+        .filter(
+            DraftQueue.league_id == league.id, DraftQueue.season_year == season_year,
+            DraftQueue.draft_type == draft_type, DraftQueue.manager_id == owner.id,
+        )
+        .order_by(DraftQueue.rank)
+        .all()
+    )
+    if not queued:
+        raise RuleViolation(f"{owner.display} has no queued picks")
+    # exclude already-taken (kept/drafted) + ineligible players
+    available = search_players(
+        db, league, available_year=season_year, draft_type=draft_type,
+        include_taken=False, limit=10_000,
+    )
+    available_ids = {r["fpl_id"] for r in available}
+    for _q, p in queued:
+        if p.fpl_id in available_ids:
+            record_pick(
+                db, league, season_year=season_year, pick_number=slot["pick"],
+                owner_fpl=owner.fpl_manager_id, player_fpl_id=p.fpl_id,
+                draft_type=draft_type, round=slot["round"],
+            )
+            remove_from_queue(
+                db, league, fpl_manager_id=owner.fpl_manager_id, player_fpl_id=p.fpl_id,
+                season_year=season_year, draft_type=draft_type,
+            )
+            return {"pick": slot["pick"], "owner": owner.display, "player": p.name}
+    raise RuleViolation(f"{owner.display}'s queued players are all unavailable")
 
 
 def pick_ownership(

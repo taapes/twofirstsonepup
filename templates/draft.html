@@ -31,6 +31,22 @@
       <div id="search-results" style="margin-top:10px"><p class="empty">Search, filter by position, or sort to browse players.</p></div>
     </div>
 
+    {% if current_fpl or is_admin %}
+    <h2>Autodraft queue</h2>
+    <div class="card" style="padding:12px">
+      <p class="sub">Queue players (+Q in search) as a fallback if you're away on the clock.
+        {% if is_admin %}<br>Admin: approve the on-the-clock manager's top queued player to advance.{% endif %}</p>
+      <div hx-get="/draft/{{ year }}/queue" hx-trigger="load, draftChanged from:body">
+        <div id="queue"><p class="sub">Loading queue…</p></div>
+      </div>
+      {% if is_admin %}
+      <form hx-post="/draft/{{ year }}/approve-queued" hx-target="#board" hx-swap="outerHTML" style="margin-top:8px">
+        <button type="submit">Approve on-the-clock queued pick</button>
+      </form>
+      {% endif %}
+    </div>
+    {% endif %}
+
     <h2>Draft controls</h2>
     <div class="card" style="padding:12px">
       <details>

@@ -743,6 +743,34 @@ class TankingFlagClear(Base):
     )
 
 
+class DraftQueue(Base):
+    """A manager's ranked autodraft queue for a draft (main or discovery). If they're
+    absent on the clock, the admin approves the queue → the top still-available player
+    is picked. One row per queued player; `rank` is the order (lower = higher priority)."""
+
+    __tablename__ = "draft_queue"
+    __table_args__ = (
+        UniqueConstraint(
+            "league_id", "season_year", "draft_type", "manager_id", "player_id",
+            name="uq_draftqueue_entry",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    season_year: Mapped[int] = mapped_column(Integer, index=True)
+    draft_type: Mapped[str] = mapped_column(String, server_default="main")  # main/discovery
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id")
+    )
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
 class PlayerPoolSnapshot(Base):
     """The set of player fpl_ids that existed in the pool at a season's draft (captured
     at the Preseason rollover). FPL has no reliable 'added date', so this snapshot is

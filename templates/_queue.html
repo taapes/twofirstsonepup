@@ -1,0 +1,27 @@
+<div id="queue">
+  {% set base = ("/discovery/" ~ year) if draft_type == "discovery" else ("/draft/" ~ year) %}
+  {% if not current_fpl %}
+  <p class="sub">Log in to build an autodraft queue.</p>
+  {% elif queue %}
+  <ol class="reorder" style="counter-reset:none">
+    {% for p in queue %}
+    <li data-fpl="{{ p.fpl_id }}">
+      <span class="grip">{{ loop.index }}.</span>
+      <span class="oname">{{ p.name }} <span class="sub">{{ p.position }}</span></span>
+      <span class="movers">
+        <form method="post" action="{{ base }}/queue/remove" hx-post="{{ base }}/queue/remove"
+              hx-target="#queue" hx-swap="outerHTML" style="display:inline">
+          <input type="hidden" name="player_fpl_id" value="{{ p.fpl_id }}">
+          {% if draft_type != "discovery" %}<input type="hidden" name="draft_type" value="{{ draft_type }}">{% endif %}
+          <button type="submit" title="remove">✕</button>
+        </form>
+      </span>
+    </li>
+    {% endfor %}
+  </ol>
+  <p class="sub">If you're away when on the clock, the commissioner can approve your top
+    available queued player.</p>
+  {% else %}
+  <p class="sub">Your queue is empty — add players from the search results.</p>
+  {% endif %}
+</div>

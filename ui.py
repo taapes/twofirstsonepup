@@ -907,6 +907,65 @@ def draft_board_partial(year: int, request: Request, draft_type: str = "main", d
     return templates.TemplateResponse("_board.html", _board_ctx(request, db, league, year, draft_type))
 
 
+# ---- draft autodraft queue (manager) + admin approve ----
+def _queue_ctx(request: Request, db: Session, league, year: int, draft_type: str) -> dict:
+    fpl = current_manager_id(request)
+    queue = (
+        services.get_draft_queue(db, league, fpl, year, draft_type) if fpl else []
+    )
+    return {"request": request, "year": year, "draft_type": draft_type, "queue": queue,
+            "current_fpl": fpl}
+
+
+@router.get("/draft/{year}/queue", response_class=HTMLResponse)
+def draft_queue_partial(year: int, request: Request, draft_type: str = "main", db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
+
+
+@router.post("/draft/{year}/queue/add", response_class=HTMLResponse)
+def draft_queue_add(
+    year: int, request: Request, player_fpl_id: int = Form(...),
+    draft_type: str = Form("main"), db: Session = Depends(get_db),
+):
+    league = _league_or_404(db)
+    fpl = current_manager_id(request)
+    if not fpl:
+        return _forbidden(request, "Log in to queue picks.")
+    try:
+        services.add_to_queue(db, league, fpl_manager_id=fpl, player_fpl_id=player_fpl_id,
+                              season_year=year, draft_type=draft_type)
+    except RuleViolation as e:
+        return _err(e)
+    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
+
+
+@router.post("/draft/{year}/queue/remove", response_class=HTMLResponse)
+def draft_queue_remove(
+    year: int, request: Request, player_fpl_id: int = Form(...),
+    draft_type: str = Form("main"), db: Session = Depends(get_db),
+):
+    league = _league_or_404(db)
+    fpl = current_manager_id(request)
+    if not fpl:
+        return _forbidden(request, "Log in to manage your queue.")
+    services.remove_from_queue(db, league, fpl_manager_id=fpl, player_fpl_id=player_fpl_id,
+                              season_year=year, draft_type=draft_type)
+    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
+
+
+@router.post("/draft/{year}/approve-queued", response_class=HTMLResponse)
+def draft_approve_queued(year: int, request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    if not is_admin(request):
+        return _forbidden(request, "Only the commissioner can approve a queued pick.")
+    try:
+        services.approve_queued_pick(db, league, season_year=year, draft_type="main")
+    except RuleViolation as e:
+        return _err(e)
+    return _board_response(request, db, league, year)
+
+
 @router.get("/draft/{year}/search", response_class=HTMLResponse)
 def draft_search(
     year: int, request: Request, q: str = "", position: str = "", sort: str = "",
@@ -1050,6 +1109,53 @@ def discovery_board_partial(year: int, request: Request, db: Session = Depends(g
     """Discovery board partial for the every-7s poll (live multi-device)."""
     league = _league_or_404(db)
     return templates.TemplateResponse("_discovery_board.html", _discovery_ctx(request, db, league, year))
+
+
+@router.get("/discovery/{year}/queue", response_class=HTMLResponse)
+def discovery_queue_partial(year: int, request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, "discovery"))
+
+
+@router.post("/discovery/{year}/queue/add", response_class=HTMLResponse)
+def discovery_queue_add(
+    year: int, request: Request, player_fpl_id: int = Form(...), db: Session = Depends(get_db),
+):
+    league = _league_or_404(db)
+    fpl = current_manager_id(request)
+    if not fpl:
+        return _forbidden(request, "Log in to queue picks.")
+    try:
+        services.add_to_queue(db, league, fpl_manager_id=fpl, player_fpl_id=player_fpl_id,
+                              season_year=year, draft_type="discovery")
+    except RuleViolation as e:
+        return _err(e)
+    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, "discovery"))
+
+
+@router.post("/discovery/{year}/queue/remove", response_class=HTMLResponse)
+def discovery_queue_remove(
+    year: int, request: Request, player_fpl_id: int = Form(...), db: Session = Depends(get_db),
+):
+    league = _league_or_404(db)
+    fpl = current_manager_id(request)
+    if not fpl:
+        return _forbidden(request, "Log in to manage your queue.")
+    services.remove_from_queue(db, league, fpl_manager_id=fpl, player_fpl_id=player_fpl_id,
+                              season_year=year, draft_type="discovery")
+    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, "discovery"))
+
+
+@router.post("/discovery/{year}/approve-queued", response_class=HTMLResponse)
+def discovery_approve_queued(year: int, request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    if not is_admin(request):
+        return _forbidden(request, "Only the commissioner can approve a queued pick.")
+    try:
+        services.approve_queued_pick(db, league, season_year=year, draft_type="discovery")
+    except RuleViolation as e:
+        return _err(e)
+    return _discovery_board_response(request, db, league, year)
 
 
 @router.get("/discovery/{year}/search", response_class=HTMLResponse)
