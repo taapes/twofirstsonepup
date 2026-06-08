@@ -2,38 +2,31 @@
 {% block title %}Discovery Draft {{ year }}{% endblock %}
 {% block content %}
 <h1>Discovery Draft <span class="tag">{{ year }}/{{ (year + 1) % 100 }}</span></h1>
-<p class="sub">Snake draft, 2 picks per manager (reverse-standings order). A picked player
-  who later joins the Premier League becomes that manager's bonus 6th keeper.</p>
+<p class="sub">Snake draft, 2 picks per manager (reverse-standings order). You're drafting
+  players <strong>not yet in the league</strong> — type any name. If your pick later joins
+  the Premier League, they become your bonus 6th keeper.</p>
 <div class="grid2">
   <div>{% include "_discovery_board.html" %}</div>
   <div>
-    <h2>Players</h2>
+    <h2>Make a pick</h2>
     <div class="card" style="padding:12px">
       {% if discovery_available %}
-      <input type="search" name="q" placeholder="Search players…" autocomplete="off"
-        hx-get="/discovery/{{ year }}/search" hx-trigger="keyup changed delay:300ms, discoveryChanged from:body"
-        hx-target="#discovery-results" style="width:100%">
-      <div id="discovery-results" style="margin-top:10px"><p class="empty">Search for a player to discovery-draft.</p></div>
+        {% if can_pick %}
+        <p class="sub">You're on the clock — enter the player you want to discover.</p>
+        <form hx-post="/discovery/{{ year }}/pick" hx-target="#discovery-board" hx-swap="outerHTML"
+              hx-on::after-request="this.reset()">
+          <input name="player_name" placeholder="Player name (any player)" autocomplete="off"
+                 required style="width:100%">
+          <button type="submit" style="margin-top:8px">Submit pick</button>
+        </form>
+        {% else %}
+        <p class="sub">Waiting for the manager on the clock to pick.
+          {% if is_admin %}As admin you can enter a pick for them once it's their turn.{% endif %}</p>
+        {% endif %}
       {% else %}
       <p class="sub">The discovery draft isn't open right now.</p>
       {% endif %}
     </div>
-
-    {% if current_fpl or is_admin %}
-    <h2>Autodraft queue</h2>
-    <div class="card" style="padding:12px">
-      <p class="sub">Queue players (+Q in search) as a fallback if you're away on the clock.
-        {% if is_admin %}<br>Admin: approve the on-the-clock manager's top queued player.{% endif %}</p>
-      <div hx-get="/discovery/{{ year }}/queue" hx-trigger="load, discoveryChanged from:body">
-        <div id="queue"><p class="sub">Loading queue…</p></div>
-      </div>
-      {% if is_admin %}
-      <form hx-post="/discovery/{{ year }}/approve-queued" hx-target="#discovery-board" hx-swap="outerHTML" style="margin-top:8px">
-        <button type="submit">Approve on-the-clock queued pick</button>
-      </form>
-      {% endif %}
-    </div>
-    {% endif %}
   </div>
 </div>
 {% endblock %}

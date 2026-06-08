@@ -2568,12 +2568,45 @@ def get_discovery_board(db: Session, league: League, season_year: int) -> list[d
     out = []
     for i, (rnd, mid) in enumerate(slots, start=1):
         dp = picks.get(i)
+        player = None
+        if dp:
+            player = dp.player_label or (pnames.get(dp.player_id) if dp.player_id else None)
         out.append({
             "pick": i, "round": rnd,
             "owner": names.get(mid), "owner_fpl": fpl_by_id.get(mid),
-            "player": pnames.get(dp.player_id) if dp and dp.player_id else None,
+            "player": player,
         })
     return out
+
+
+def record_discovery_pick(
+    db: Session, league: League, *, season_year: int, pick_number: int,
+    owner_fpl: str, player_name: str, round: int = 0, overwrite: bool = False,
+) -> dict:
+    """Record a discovery-draft selection as a FREE-TEXT name (the player isn't in the
+    league pool — they're a possible future PL arrival). Same slot/race guard as
+    record_pick."""
+    owner = _resolve_manager(db, league, owner_fpl)
+    name = (player_name or "").strip()
+    if not name:
+        raise RuleViolation("enter a player name")
+    existing = (
+        db.query(DraftPick)
+        .filter_by(league_id=league.id, season_year=season_year, draft_type="discovery", pick_number=pick_number)
+        .one_or_none()
+    )
+    if existing:
+        if (existing.player_label or existing.player_id) is not None and not overwrite:
+            raise RuleViolation(f"pick {pick_number} has already been made")
+        existing.manager_id, existing.player_id, existing.player_label = owner.id, None, name
+    else:
+        db.add(DraftPick(
+            league_id=league.id, season_year=season_year, draft_type="discovery",
+            pick_number=pick_number, round=round, manager_id=owner.id,
+            player_id=None, player_label=name, source="discovery",
+        ))
+    db.commit()
+    return {"pick": pick_number, "owner": owner.display, "player": name}
 
 
 def next_open_pick(board: list[dict]) -> dict | None:

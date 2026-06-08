@@ -1303,76 +1303,13 @@ def discovery_board_partial(year: int, request: Request, db: Session = Depends(g
     return templates.TemplateResponse("_discovery_board.html", _discovery_ctx(request, db, league, year))
 
 
-@router.get("/discovery/{year}/queue", response_class=HTMLResponse)
-def discovery_queue_partial(year: int, request: Request, db: Session = Depends(get_db)):
-    league = _league_or_404(db)
-    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, "discovery"))
-
-
-@router.post("/discovery/{year}/queue/add", response_class=HTMLResponse)
-def discovery_queue_add(
-    year: int, request: Request, player_fpl_id: int = Form(...), db: Session = Depends(get_db),
-):
-    league = _league_or_404(db)
-    fpl = current_manager_id(request)
-    if not fpl:
-        return _forbidden(request, "Log in to queue picks.")
-    try:
-        services.add_to_queue(db, league, fpl_manager_id=fpl, player_fpl_id=player_fpl_id,
-                              season_year=year, draft_type="discovery")
-    except RuleViolation as e:
-        return _err(e)
-    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, "discovery"))
-
-
-@router.post("/discovery/{year}/queue/remove", response_class=HTMLResponse)
-def discovery_queue_remove(
-    year: int, request: Request, player_fpl_id: int = Form(...), db: Session = Depends(get_db),
-):
-    league = _league_or_404(db)
-    fpl = current_manager_id(request)
-    if not fpl:
-        return _forbidden(request, "Log in to manage your queue.")
-    services.remove_from_queue(db, league, fpl_manager_id=fpl, player_fpl_id=player_fpl_id,
-                              season_year=year, draft_type="discovery")
-    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, "discovery"))
-
-
-@router.post("/discovery/{year}/approve-queued", response_class=HTMLResponse)
-def discovery_approve_queued(year: int, request: Request, db: Session = Depends(get_db)):
-    league = _league_or_404(db)
-    if not is_admin(request):
-        return _forbidden(request, "Only the commissioner can approve a queued pick.")
-    try:
-        services.approve_queued_pick(db, league, season_year=year, draft_type="discovery")
-    except RuleViolation as e:
-        return _err(e)
-    return _discovery_board_response(request, db, league, year)
-
-
-@router.get("/discovery/{year}/search", response_class=HTMLResponse)
-def discovery_search(year: int, request: Request, q: str = "", db: Session = Depends(get_db)):
-    league = _league_or_404(db)
-    results = (
-        services.search_players(
-            db, league, q=q.strip() or None, available_year=year,
-            include_taken=True, draft_type="discovery", sort="points", limit=50,
-        )
-        if q.strip() else []
-    )
-    on_clock = services.next_open_pick(services.get_discovery_board(db, league, year))
-    can_pick = bool(on_clock) and can_act_as(request, on_clock.get("owner_fpl"))
-    return templates.TemplateResponse(
-        "_discovery_results.html",
-        {"request": request, "results": results, "year": year, "can_pick": can_pick},
-    )
-
-
 @router.post("/discovery/{year}/pick", response_class=HTMLResponse)
 def discovery_pick(
-    year: int, request: Request, player_fpl_id: int = Form(...),
+    year: int, request: Request, player_name: str = Form(...),
     db: Session = Depends(get_db),
 ):
+    """Discovery picks are players NOT in the league (future PL arrivals) — recorded as
+    a free-text name, not a player search."""
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "discovery_available"):
         return _locked_response("The discovery draft")
@@ -1382,11 +1319,10 @@ def discovery_pick(
         if not can_act_as(request, slot["owner_fpl"]):
             return _forbidden(request, "It's not your discovery pick to make.")
         try:
-            services.record_pick(
+            services.record_discovery_pick(
                 db, league, season_year=year, pick_number=slot["pick"],
-                owner_fpl=slot["owner_fpl"], player_fpl_id=player_fpl_id,
-                draft_type="discovery", round=slot["round"],
+                owner_fpl=slot["owner_fpl"], player_name=player_name, round=slot["round"],
             )
-        except RuleViolation:
-            pass
+        except RuleViolation as e:
+            return _err(e)
     return _discovery_board_response(request, db, league, year)

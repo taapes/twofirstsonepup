@@ -398,6 +398,9 @@ class DraftPick(Base):
     player_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
     )
+    # Discovery-draft picks are players NOT yet in the league (future PL arrivals), so
+    # they're recorded as a free-text name rather than a players FK.
+    player_label: Mapped[str | None] = mapped_column(String, nullable=True)
     league_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
     )
