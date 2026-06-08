@@ -1,26 +1,46 @@
 {% extends "base.html" %}
 {% block title %}Cups{% endblock %}
+
+{% macro mbox(m) %}
+<div class="mbox">
+  <div class="team {% if m and m.winner and m.winner == m.home %}win{% endif %}">
+    <span class="nm">{{ m.home if m and m.home else "TBD" }}</span>
+    <span class="sc">{{ m.home_score if m and m.home_score is not none else "" }}</span>
+  </div>
+  <div class="team {% if m and m.winner and m.winner == m.away %}win{% endif %}">
+    <span class="nm">{{ m.away if m and m.away else "TBD" }}</span>
+    <span class="sc">{{ m.away_score if m and m.away_score is not none else "" }}</span>
+  </div>
+</div>
+{% endmacro %}
+
 {% block content %}
 <h1>Cups</h1>
-<p class="sub">The Cup (top 6 after GW27) and Pup Cup (bottom 4 + the two Cup
-  first-round losers). Each round spans two gameweeks; ties break on total goals, then
-  assists, then clean sheets, then seed.</p>
+<p class="sub">The Cup (top 6 after GW27) and Pup Cup (bottom 4 + the two Cup first-round
+  losers). Each round spans two gameweeks; ✓ marks the winner.</p>
+
 {% for cup in cups %}
   {% if cup.matches %}
+  {% set r1 = cup.matches | selectattr("round", "equalto", 1) | list %}
+  {% set r2 = cup.matches | selectattr("round", "equalto", 2) | list %}
+  {% set r3 = cup.matches | selectattr("round", "equalto", 3) | list %}
+  {% set final = (r3 | rejectattr("round_label", "equalto", "3rd-place") | list | first) %}
+  {% set third = (r3 | selectattr("round_label", "equalto", "3rd-place") | list | first) %}
   <h2>{{ cup.name }}</h2>
-  <div class="card" style="margin-bottom:12px">
-    <table>
-      <tbody>
-        {% for m in cup.matches %}
-        <tr>
-          <td class="rank">{{ m.round_label }}</td>
-          <td>{{ m.home or "TBD" }}{% if m.winner == m.home %} ✓{% endif %}
-            v {{ m.away or "TBD" }}{% if m.winner == m.away %} ✓{% endif %}</td>
-          <td class="num">{% if m.home_score is not none %}{{ m.home_score }}–{{ m.away_score }}{% else %}—{% endif %}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+  <div class="bracket">
+    <div class="round">
+      <div class="round-h">{{ "Quarterfinal" if cup.name == "Cup" else "Play-in" }}</div>
+      {% for m in r1 %}{{ mbox(m) }}{% endfor %}
+    </div>
+    <div class="round">
+      <div class="round-h">Semifinal</div>
+      {% for m in r2 %}{{ mbox(m) }}{% endfor %}
+    </div>
+    <div class="round">
+      <div class="round-h">Final</div>
+      {{ mbox(final) }}
+      {% if third %}<div class="round-h" style="margin-top:14px">3rd place</div>{{ mbox(third) }}{% endif %}
+    </div>
   </div>
   {% endif %}
 {% else %}
@@ -29,11 +49,25 @@
 
 {% if shield %}
 <h2>Pupmunity Shield</h2>
-<div class="card">
-  <p>{{ shield.cup_winner }}{% if shield.winner == shield.cup_winner %} ✓{% endif %}
-    v {{ shield.pup_winner }}{% if shield.winner == shield.pup_winner %} ✓{% endif %}
-    {% if shield.score_a is not none %}<span class="num">— {{ shield.score_a }}–{{ shield.score_b }}</span>{% endif %}</p>
-  <p class="sub">Last season's Cup winner vs Pup winner (GW1).</p>
-</div>
+<p class="sub">Last season's Cup winner vs Pup winner (GW1).</p>
+<div class="bracket"><div class="round"><div class="round-h">Shield</div>
+  {{ mbox({"home": shield.cup_winner, "away": shield.pup_winner,
+           "home_score": shield.score_a, "away_score": shield.score_b, "winner": shield.winner}) }}
+</div></div>
 {% endif %}
+
+<style>
+  .bracket { display:flex; gap:36px; align-items:stretch; overflow-x:auto; padding:8px 2px 4px; }
+  .round { display:flex; flex-direction:column; justify-content:space-around; gap:14px; min-width:180px; }
+  .round-h { font-size:.72rem; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .mbox { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#0f1117; position:relative; }
+  .mbox .team { display:flex; justify-content:space-between; gap:10px; padding:7px 10px; }
+  .mbox .team + .team { border-top:1px solid var(--line); }
+  .mbox .team.win { color:var(--accent); font-weight:700; }
+  .mbox .team.win .nm::after { content:" ✓"; }
+  .mbox .sc { font-variant-numeric:tabular-nums; color:var(--muted); }
+  /* connector stubs so it reads like a bracket */
+  .round + .round .mbox::before { content:""; position:absolute; left:-18px; top:50%;
+    width:18px; border-top:1px solid var(--line); }
+</style>
 {% endblock %}
