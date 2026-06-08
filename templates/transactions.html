@@ -4,6 +4,13 @@
 <h1>Transactions</h1>
 <p class="sub">Weekly roster moves (adds/drops), derived from each gameweek's squad
   snapshot — covers waivers, free agency, and trades.</p>
+{% if window and window.state != "between" %}
+<div class="card" style="padding:10px 12px">
+  <strong>{{ window.label }}</strong>
+  <span class="sub">— {% if window.state == "waivers" %}waiver claims process until 24h before{% else %}open until{% endif %}
+    GW{{ window.next_gw }} (deadline {{ window.next_deadline }}). Add/drops are made in FPL.</span>
+</div>
+{% endif %}
 {% for w in weeks %}
 <h2>GW{{ w.gameweek }}</h2>
 <div class="card" style="margin-bottom:12px">

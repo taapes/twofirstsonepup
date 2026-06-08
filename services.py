@@ -119,6 +119,33 @@ def current_gameweek(db: Session, league: League) -> int | None:
     return max((gw.number for _p, gw in gp), default=None)
 
 
+def waiver_window(db: Session, league: League) -> dict | None:
+    """Current add/drop window: waivers run from a GW's start until 24h before the next
+    GW's deadline; the final 24h before that deadline is free agency. Derived from the
+    stored GW deadline dates (date-granular). None outside the in-season window.
+    (Add/drops happen in FPL itself; this surfaces which window the league is in.)"""
+    import datetime as _dt
+
+    cur = current_gameweek(db, league)
+    if cur is None:
+        return None
+    nxt = (
+        db.query(Gameweek).filter_by(league_id=league.id, number=cur + 1).one_or_none()
+    )
+    next_deadline = nxt.start_date if nxt else None
+    if not next_deadline:
+        return {"state": "between", "next_deadline": None, "next_gw": None}
+    today = _dt.date.today()
+    fa_from = next_deadline - _dt.timedelta(days=1)
+    state = "free_agency" if today >= fa_from else "waivers"
+    return {
+        "state": state,
+        "label": "Free agency (final 24h)" if state == "free_agency" else "Waivers open",
+        "next_deadline": next_deadline.isoformat(),
+        "next_gw": cur + 1,
+    }
+
+
 def get_scoreboard(db: Session, league: League, gw_number: int | None = None) -> dict:
     """Current-GW H2H scoreboard: each matchup with live scores (from gameweek_points,
     falling back to the match's stored points) and whether it's finished."""

@@ -1015,7 +1015,8 @@ def transactions_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     return templates.TemplateResponse(
         "transactions.html",
-        {"request": request, "league": league, "weeks": services.get_transactions(db, league)},
+        {"request": request, "league": league, "weeks": services.get_transactions(db, league),
+         "window": services.waiver_window(db, league)},
     )
 
 
