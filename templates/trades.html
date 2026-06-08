@@ -22,4 +22,25 @@
   </table>
   {% else %}<div class="empty">No trades recorded.</div>{% endif %}
 </div>
+
+{% if trade_notes %}
+<h2>Historical Trades (unstructured)</h2>
+<p class="sub">Older trades from the league sheet, as written (picks, players, and conditions).</p>
+{% for season in trade_notes %}
+<details class="card" style="padding:8px 12px">
+  <summary>{{ season.year }} ({{ season.trades|length }})</summary>
+  <table style="margin-top:8px">
+    <tbody>
+      {% for t in season.trades %}
+      <tr>
+        <td><strong>{{ t.a }}</strong> gives {{ t.gives_a or "—" }}</td>
+        <td class="sub">⇄</td>
+        <td><strong>{{ t.b }}</strong> gives {{ t.gives_b or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endfor %}
+{% endif %}
 {% endblock %}

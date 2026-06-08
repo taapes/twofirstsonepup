@@ -298,7 +298,8 @@ def trades_page(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(
         "trades.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
-         "trades": services.get_trades(db, league)},
+         "trades": services.get_trades(db, league),
+         "trade_notes": services.get_trade_notes(db, league)},
     )
 
 

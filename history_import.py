@@ -30,6 +30,7 @@ STANDINGS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - League 
 FUTURE_PICKS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Future Picks.csv"
 DISCOVERY = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Discovery Draft.csv"
 CUP = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - The Cup.csv"
+TRADES = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Trades.csv"
 
 # Person-name abbreviations used in the discovery grid.
 _PERSON_ALIAS = {"KF": "Kevin F", "KT": "Kevin T", "KS": "Kevin S"}
@@ -384,6 +385,41 @@ def import_cups(commit: bool = False) -> None:
     db.close()
 
 
+def import_trades_text(commit: bool = False) -> None:
+    """Trades CSV -> trade_notes (free-text historical trades, as written). Year
+    rows set the season; noise rows are skipped."""
+    db = SessionLocal()
+    league = db.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
+    from models import TradeNote
+
+    rows = [r + [""] * 8 for r in csv.reader(open(TRADES))]
+    notes = []  # (season, mgr_a, gives_a, mgr_b, gives_b)
+    season = None
+    for r in rows:
+        c0 = r[0].strip()
+        if re.match(r"\d\d/\d\d", c0):
+            season = c0
+            continue
+        a, gives_a, b, gives_b = r[1].strip(), r[2].strip(), r[3].strip(), r[4].strip()
+        if not season or not a or not b or a.lower() == "start here":
+            continue
+        notes.append((season, a, gives_a, b, gives_b))
+
+    if commit:
+        db.query(TradeNote).filter_by(league_id=league.id).delete()
+        for season, a, ga, b, gb in notes:
+            db.add(TradeNote(league_id=league.id, season=season,
+                             manager_a=a, gives_a=ga, manager_b=b, gives_b=gb))
+        db.commit()
+        print(f"COMMITTED: {len(notes)} trade notes across "
+              f"{len(set(n[0] for n in notes))} seasons")
+    else:
+        for n in notes[:8]:
+            print("   ", n)
+        print(f"... ({len(notes)} trade notes; preview)")
+    db.close()
+
+
 _IMPORTERS = {
     "keepers": import_keeper_seeds,
     "history": import_league_history,
@@ -392,6 +428,7 @@ _IMPORTERS = {
     "discovery": import_discovery_picks,
     "discoveryresults": import_discovery_results,
     "cups": import_cups,
+    "tradestext": import_trades_text,
 }
 
 if __name__ == "__main__":

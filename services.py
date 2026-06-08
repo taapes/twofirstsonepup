@@ -1324,3 +1324,18 @@ def keeper_candidates(db: Session, league: League, fpl_manager_id: str) -> dict:
         it["is_discovery"] = sel_fpl.get(it["fpl_id"], False)
     return {"manager": manager.display, "fpl": manager.fpl_manager_id,
             "season": upcoming, "players": items}
+
+
+def get_trade_notes(db: Session, league: League) -> list[dict]:
+    """Historical free-text trades (couldn't be normalized), grouped by season."""
+    from models import TradeNote
+
+    by_season: dict = {}
+    for t in (
+        db.query(TradeNote).filter_by(league_id=league.id)
+        .order_by(TradeNote.season.desc(), TradeNote.id).all()
+    ):
+        by_season.setdefault(t.season, []).append(
+            {"a": t.manager_a, "gives_a": t.gives_a, "b": t.manager_b, "gives_b": t.gives_b}
+        )
+    return [{"year": y, "trades": v} for y, v in by_season.items()]

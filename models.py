@@ -472,6 +472,24 @@ class SeasonHistory(Base):
     pup_winner: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class TradeNote(Base):
+    """Free-text historical trade (from the Trades sheet) that can't be normalized
+    — picks, players, and conditionals as written. Shown as text beneath the
+    structured trades."""
+
+    __tablename__ = "trade_notes"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    season: Mapped[str] = mapped_column(String, index=True)  # "25/26"
+    manager_a: Mapped[str | None] = mapped_column(String, nullable=True)
+    gives_a: Mapped[str | None] = mapped_column(Text, nullable=True)
+    manager_b: Mapped[str | None] = mapped_column(String, nullable=True)
+    gives_b: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class CupMatch(Base):
     """Historical cup/pup-cup bracket entries (one row per team per round), parsed
     from the (inconsistent, free-text) Cup sheet. Manager kept as a text label;
