@@ -161,7 +161,9 @@ Write tests for these. They are custom and non-obvious:
   update keeper clocks and the draft board.
 - **Discovery draft:** Snake, 2 picks/manager, held in September. If a picked
   player joins the PL during the year they become a bonus (6th) keeper — only
-  one bonus keeper allowed.
+  one bonus keeper allowed. *Built:* `services.get_discovery_board` (2-round snake
+  over reverse standings), `GET /discovery/{year}` + `/search` + `POST .../pick`
+  (draft_type='discovery'), gated by the `discovery_open` phase flag.
 - **Main draft:** Lottery mechanics are OUT of the app — the commissioner sets
   the round-1 order (`POST /admin/.../draft/order`, stored in `draft_lottery`).
   Rounds 2+ = reverse standings. Keepers are FREE: a manager makes 15−keepers
@@ -171,8 +173,7 @@ Write tests for these. They are custom and non-obvious:
   discovery picks) and ad-hoc player trades are commissioner-entered (not in the
   FPL feed): `POST /admin/.../draft/trade-pick|trade-player`; a pick trade
   reassigns the (season, type, round, original-owner) slot's owner. Selections
-  recorded live via `.../draft/record-pick`. *TODO:* discovery draft order
-  (snake) + homepage board view.
+  recorded live via `.../draft/record-pick`.
 - **Cups:** Cup (top 6) and Pup Cup (bottom 4 + Cup losers), start after GW28,
   each round spans 2 GWs, admin sets GWs per round. Auto-score 2-week totals.
   Implemented as auto-generated single-elim brackets seeded from H2H standings
@@ -212,6 +213,48 @@ Three layers protect the live data when testing before the draft:
 overwrites custom data); trade reconciliation (site+FPL dedupe); the standings
 audit log; `GET /admin/health` runs integrity checks (roster sizes, standings
 coverage, unseeded keepers, malformed pick trades).
+
+## League phase lifecycle & multi-season (the season state machine)
+
+**Multi-season = one league row per season.** Each FPL Draft season is a new
+`fpl_league_id` → a new `leagues` row; every child table FKs `league_id`, so seasons
+are physically separate (no `season_year` columns, no clobbering). The **current**
+season is the row with `leagues.is_current=True` (`services.current_league`, falling
+back to the `FPL_DRAFT_LEAGUE_ID` env). Past seasons are older rows, browsable
+read-only at `/seasons` + `/season/{fpl_league_id}` (reusing the league-arg read
+services). The login session stores the stable FPL **entry_id**, so identity resolves
+to whichever season's manager row is current.
+
+**Phase** (`leagues.phase`): macro enum `offseason | draft | preseason | in_season`
+(+ stored `discovery_open`, `discovery_done`, `phase_manual`). In-season sub-states
+(post-trade-deadline Feb 1, cups GW28, discovery window) are **derived from the
+date/GW**, never stored, so they can't drift. `rules.phase_features(...)` is the pure
+phase→feature-flag map; `services.phase_context(db, league)` computes it (the single
+source the routes + nav consult via `ui._feature_allowed` and the `_phase` template
+context processor). Manual locks (`writes_locked`/`keepers_locked`) remain hard
+overrides; admin always bypasses.
+
+**Transitions:** time/GW ones auto-advance during `/admin/sync`
+(`services.advance_phase_if_due` → pure `rules.next_phase`: GW38→offseason,
+GW1→in_season, Oct 1→discovery) unless `phase_manual` pins it. Admin-confirmed ones
+(on `/admin/health`): **Start draft** (`enter_draft_phase` — locks keepers),
+**Close discovery** (`close_discovery`), manual set/pin. **Season rollover** at
+`/admin/season` → `services.advance_season`: syncs the new FPL league id (sync is
+parameterized by league id), carries identity (display_name + password_hash by
+entry_id) + keeper seeds (years−1) forward, snapshots the player pool, flips
+`is_current`, sets preseason.
+
+**Sync cadence** is fixture-aligned + code-gated: `/admin/sync` runs
+`services.sync_plan` (pure `rules.decide_sync`) → `full | live | skip` from
+{a full sync today?, a PL fixture live now?, a GW deadline today?}. The cron
+(`.github/workflows/cron.yml`) fires often within a window; the endpoint no-ops when
+nothing's live. `?force=1` forces a full sync.
+
+**Ineligible players:** a non-DEF added to FPL after the draft (i.e. not in the
+season's `player_pool_snapshot`, captured at rollover) is flagged in
+`player_ineligibility` (`services.flag_ineligible`, run after each full sync) — never
+mutating the global `Player` row — surfaced on the homepage and excluded from
+draft/keeper search.
 
 ## Auth & authorization (per-manager identity)
 
