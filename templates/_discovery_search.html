@@ -1,0 +1,18 @@
+<div id="discoveryResults">
+  {% if results %}
+  <table>
+    <tbody>
+      {% for p in results %}
+      <tr>
+        <td>{{ p.name }} <span class="tag">{{ p.position }}{% if p.team %} · {{ p.team }}{% endif %}</span></td>
+        <td class="num sub">{% if p.points is not none %}{{ p.points }} pts{% endif %}</td>
+        <td><button type="button"
+              onclick="setDiscovery({{ p.fpl_id }}, '{{ p.name|replace("'", "\\'") }}')">Pick</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="sub">Type a name to search all players.</p>
+  {% endif %}
+</div>

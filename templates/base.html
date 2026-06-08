@@ -73,6 +73,15 @@
         if (n > 2) { cb.checked = false; alert('At most 2 FA/waiver-acquired keepers allowed.'); }
       }
     }
+    // Discovery keeper: choose any player from the search results.
+    function setDiscovery(fplId, name) {
+      document.getElementById('discoveryId').value = fplId;
+      document.getElementById('discoveryName').textContent = name;
+    }
+    function clearDiscovery() {
+      document.getElementById('discoveryId').value = '';
+      document.getElementById('discoveryName').textContent = '— none —';
+    }
   </script>
 </body>
 </html>

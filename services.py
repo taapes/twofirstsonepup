@@ -732,16 +732,32 @@ def submit_keepers(
     status = _derive_keeper_status(db, league).get(manager.id, {})
     by_fpl = {p.fpl_id: p for p in db.query(Player)}
 
+    # the discovery keeper can be any player (off-roster), so the roster
+    # checkboxes won't include it — make sure it's part of the set to persist
+    all_fids = list(keeper_fpl_ids)
+    if discovery_fpl_id is not None and discovery_fpl_id not in all_fids:
+        all_fids.append(discovery_fpl_id)
+
     selections = []
-    for fid in keeper_fpl_ids:
+    for fid in all_fids:
         player = by_fpl.get(fid)
         if not player:
             raise RuleViolation(f"player {fid} not found")
+        is_discovery = fid == discovery_fpl_id
         st = status.get(player.id)
         if not st:
-            raise RuleViolation(f"{player.name} is not on {manager.name}'s final roster")
+            # The discovery (bonus 6th) keeper comes from the discovery draft and
+            # may be ANY available player, not just the manager's final roster.
+            if is_discovery:
+                st = {"player": player.name, "eligible": True,
+                      "acquisition": "discovery",
+                      "years_remaining": KEEPER_FRESH_REMAINING}
+            else:
+                raise RuleViolation(
+                    f"{player.name} is not on {manager.name}'s final roster"
+                )
         selections.append({**st, "fpl_id": fid, "player_id": player.id,
-                           "is_discovery": fid == discovery_fpl_id})
+                           "is_discovery": is_discovery})
 
     errors = validate_keeper_selection(
         selections, has_discovery_keeper=discovery_fpl_id is not None
@@ -1320,8 +1336,16 @@ def keeper_candidates(db: Session, league: League, fpl_manager_id: str) -> dict:
     for it in items:
         it["selected"] = it["fpl_id"] in sel_fpl
         it["is_discovery"] = sel_fpl.get(it["fpl_id"], False)
+    # the saved discovery keeper may be off-roster (it can be any player), so
+    # surface it independently for the search UI to pre-fill
+    discovery = None
+    disc_pid = next((pid for pid, d in selected.items() if d), None)
+    if disc_pid is not None:
+        p = db.get(Player, disc_pid)
+        if p:
+            discovery = {"fpl_id": p.fpl_id, "player": p.name}
     return {"manager": manager.display, "fpl": manager.fpl_manager_id,
-            "season": upcoming, "players": items}
+            "season": upcoming, "players": items, "discovery": discovery}
 
 
 def get_trade_notes(db: Session, league: League) -> list[dict]:

@@ -140,6 +140,18 @@ def keepers_candidates(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/keepers/discovery-search", response_class=HTMLResponse)
+def keepers_discovery_search(request: Request, db: Session = Depends(get_db)):
+    """Search ALL players for the discovery (bonus 6th) keeper slot — not limited
+    to the manager's roster."""
+    league = _league_or_404(db)
+    q = (request.query_params.get("q") or "").strip()
+    results = services.search_players(db, league, q=q, sort="points", limit=25) if q else []
+    return templates.TemplateResponse(
+        "_discovery_search.html", {"request": request, "results": results}
+    )
+
+
 @router.post("/keepers")
 def keepers_submit(
     request: Request, db: Session = Depends(get_db),
