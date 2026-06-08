@@ -171,6 +171,7 @@ def home(request: Request, db: Session = Depends(get_db)):
             standings=services.get_standings(db, league),
             flags=services.get_flags(db, league),
             injury_list=services.get_injury_list(db, league),
+            international_list=services.get_international_list(db, league),
             cups=services.get_cups(db, league),
             payouts=services.get_payouts(db, league),
             adjustments=services.get_standing_adjustments(db, league),

@@ -128,6 +128,22 @@
     {% else %}<div class="empty">No players on the injury list.</div>{% endif %}
   </div>
 
+  <h2>International Duty</h2>
+  <div class="card">
+    {% if international_list %}
+    <table>
+      <thead><tr><th>Manager</th><th>Player</th><th>Cup</th><th class="num">Since</th></tr></thead>
+      <tbody>
+        {% for il in international_list %}
+        <tr><td>{{ il.manager }}</td><td>{{ il.player }}</td>
+          <td class="sub">{{ il.tournament or "—" }}</td>
+          <td class="num">GW{{ il.start_gw }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<div class="empty">No players away on international duty.</div>{% endif %}
+  </div>
+
   {% if ineligible %}
   <h2>Ineligible Players</h2>
   <div class="card">
