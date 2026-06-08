@@ -22,6 +22,9 @@ def _identity(request: Request) -> dict:
 
 
 templates = Jinja2Templates(directory="templates", context_processors=[_identity])
+# Escape HTML by default (defense-in-depth against XSS; explicit so a config change
+# can't silently disable it).
+templates.env.autoescape = True
 # APP_ENV (e.g. "test" on a Neon test branch) drives a banner in base.html so a
 # test environment is never mistaken for production.
 templates.env.globals["app_env"] = os.getenv("APP_ENV", "prod")

@@ -27,13 +27,13 @@ _PBKDF2_ITERATIONS = 240_000
 
 def require_admin(x_auth_token: str | None = Header(default=None)) -> None:
     expected = os.getenv("SYNC_AUTH_TOKEN")
-    if not expected or x_auth_token != expected:
+    if not expected or not x_auth_token or not hmac.compare_digest(x_auth_token, expected):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 def check_admin_password(password: str) -> bool:
     expected = os.getenv("ADMIN_PASSWORD") or os.getenv("SYNC_AUTH_TOKEN")
-    return bool(expected) and password == expected
+    return bool(expected) and hmac.compare_digest(password, expected)
 
 
 def is_admin(request: Request) -> bool:

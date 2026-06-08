@@ -2,7 +2,7 @@
 commissioner session login. Renders HTML and calls services.py directly."""
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 import services
@@ -88,7 +88,25 @@ def _writes_allowed(request: Request, league) -> bool:
 
 
 def _locked_response(what="Editing"):
-    return HTMLResponse(f"{what} is locked by the commissioner.", status_code=423)
+    return PlainTextResponse(f"{what} is locked by the commissioner.", status_code=423)
+
+
+def _err(msg, status_code: int = 400):
+    """Error response as plain text (text/plain ⇒ never rendered as HTML, so an
+    error message can't carry markup into the page)."""
+    return PlainTextResponse(f"error: {msg}", status_code=status_code)
+
+
+def _safe_int(value, lo: int, hi: int, *, field: str = "value") -> int:
+    """Parse a bounded integer from form input; raise RuleViolation (→ 400) on
+    non-numeric or out-of-range, instead of letting int() throw a 500."""
+    try:
+        n = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise RuleViolation(f"{field} must be a whole number")
+    if n < lo or n > hi:
+        raise RuleViolation(f"{field} must be between {lo} and {hi}")
+    return n
 
 
 def _keepers_allowed(request: Request, league) -> bool:
@@ -329,7 +347,7 @@ def keepers_submit(
             discovery_fpl_id=int(discovery_fpl_id) if discovery_fpl_id.strip() else None,
         )
     except RuleViolation as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return RedirectResponse("/teams", status_code=303)
 
 
@@ -435,13 +453,13 @@ def admin_standings_adjust(
     try:
         services.adjust_standing(
             db, league, fpl_manager_id=fpl_manager_id,
-            total_delta=int(total_delta) if total_delta.strip() else 0,
-            points_for_delta=int(points_for_delta) if points_for_delta.strip() else 0,
-            gameweek=int(gameweek) if gameweek.strip() else None,
+            total_delta=_safe_int(total_delta, -10000, 10000, field="H2H change") if total_delta.strip() else 0,
+            points_for_delta=_safe_int(points_for_delta, -10000, 10000, field="total change") if points_for_delta.strip() else 0,
+            gameweek=_safe_int(gameweek, 1, 38, field="gameweek") if gameweek.strip() else None,
             note=note or None,
         )
     except (RuleViolation, ValueError) as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return RedirectResponse("/admin/standings", status_code=303)
 
 
@@ -455,7 +473,7 @@ def admin_standings_delete(
     try:
         services.delete_standing_adjustment(db, league, adjustment_id)
     except RuleViolation as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return RedirectResponse("/admin/standings", status_code=303)
 
 
@@ -482,7 +500,7 @@ def admin_clear_flag(
     try:
         services.clear_flag(db, league, fpl_manager_id, window)
     except RuleViolation as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return RedirectResponse("/", status_code=303)
 
 
@@ -497,7 +515,7 @@ def admin_restore_flag(
     try:
         services.restore_flag(db, league, fpl_manager_id, window)
     except RuleViolation as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return RedirectResponse("/", status_code=303)
 
 
@@ -513,11 +531,13 @@ def admin_add_fine(
     league = _league_or_404(db)
     try:
         services.add_fine(
-            db, league, fpl_manager_id=fpl_manager_id, amount=int(amount),
-            reason=reason or None, gameweek=int(gameweek) if gameweek.strip() else None,
+            db, league, fpl_manager_id=fpl_manager_id,
+            amount=_safe_int(amount, 1, 100000, field="amount"),
+            reason=reason or None,
+            gameweek=_safe_int(gameweek, 1, 38, field="gameweek") if gameweek.strip() else None,
         )
     except (RuleViolation, ValueError) as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return RedirectResponse("/admin/standings", status_code=303)
 
 
@@ -531,7 +551,7 @@ def admin_delete_fine(
     try:
         services.delete_fine(db, league, fine_id)
     except RuleViolation as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return RedirectResponse("/admin/standings", status_code=303)
 
 
@@ -591,7 +611,7 @@ def trade_submit(
             a_players=a_players, a_picks=a_picks, b_players=b_players, b_picks=b_picks,
         )
     except RuleViolation as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return RedirectResponse("/trades", status_code=303)
 
 
@@ -691,7 +711,7 @@ def draft_trade_pick(
             round=round, season_year=year, draft_type=draft_type,
         )
     except RuleViolation as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return _board_response(request, db, league, year, draft_type)
 
 
@@ -708,7 +728,7 @@ def draft_trade_player(
     try:
         services.trade_player(db, league, from_fpl=from_fpl, to_fpl=to_fpl, player_fpl_id=player_fpl_id)
     except RuleViolation as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return _board_response(request, db, league, year)
 
 
@@ -722,5 +742,5 @@ def draft_set_order(year: int, request: Request, order: str = Form(...), db: Ses
     try:
         services.set_draft_order(db, league, ids)
     except RuleViolation as e:
-        return HTMLResponse(f"error: {e}", status_code=400)
+        return _err(e)
     return _board_response(request, db, league, year)

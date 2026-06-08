@@ -48,15 +48,55 @@ class GateMiddleware(BaseHTTPMiddleware):
         return RedirectResponse("/who", status_code=303)
 
 
+_DEV_SECRET = "dev-insecure-change-me"
+SECRET_KEY = os.getenv("SECRET_KEY", _DEV_SECRET)
+APP_ENV = os.getenv("APP_ENV", "prod")
+# Fail fast rather than run production on the insecure default signing key.
+if APP_ENV == "prod" and SECRET_KEY == _DEV_SECRET:
+    raise RuntimeError(
+        "SECRET_KEY must be set to a stable secret in production. "
+        "Set SECRET_KEY in the environment (Render dashboard)."
+    )
+# Secure cookies require HTTPS; gate on an explicit flag (set SESSION_HTTPS_ONLY=1
+# on Render) so local dev over http still works.
+_SESSION_HTTPS_ONLY = os.getenv("SESSION_HTTPS_ONLY", "0") == "1"
+
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://unpkg.com; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'"
+)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Standard hardening headers on every response (incl. gate redirects)."""
+
+    async def dispatch(self, request: Request, call_next):
+        resp = await call_next(request)
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("Referrer-Policy", "same-origin")
+        resp.headers.setdefault("Content-Security-Policy", _CSP)
+        if request.url.scheme == "https":
+            resp.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            )
+        return resp
+
+
 app = FastAPI()
-# Order matters: add the gate FIRST so SessionMiddleware wraps it (Starlette runs
-# middleware in reverse add-order), guaranteeing request.session is populated when
-# the gate reads it.
+# Add order is reverse of execution order. We want, outer→inner:
+#   SessionMiddleware (populates request.session) → SecurityHeaders (wraps every
+#   response, including the gate's redirects) → GateMiddleware → app.
 app.add_middleware(GateMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     SessionMiddleware,
-    secret_key=os.getenv("SECRET_KEY", "dev-insecure-change-me"),
-    https_only=False,
+    secret_key=SECRET_KEY,
+    https_only=_SESSION_HTTPS_ONLY,
+    same_site="lax",
 )
 app.include_router(v1_router)
 app.include_router(admin_router)
