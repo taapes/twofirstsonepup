@@ -333,6 +333,35 @@ def keepers_submit(
     return RedirectResponse("/teams", status_code=303)
 
 
+def _resolve_my_fpl(request: Request, db: Session, league) -> str | None:
+    """Whose 'my team' to show: a manager sees their own; admin may pass ?fpl=."""
+    if is_admin(request):
+        return request.query_params.get("fpl") or current_manager_id(request)
+    return current_manager_id(request)
+
+
+@router.get("/my-team", response_class=HTMLResponse)
+def my_team_page(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    fpl = _resolve_my_fpl(request, db, league)
+    team = services.get_my_team(db, league, fpl) if fpl else None
+    return templates.TemplateResponse("my_team.html", {
+        "request": request, "league": league, "team": team,
+    })
+
+
+@router.get("/my-team/upcoming", response_class=HTMLResponse)
+def my_team_upcoming_page(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    fpl = _resolve_my_fpl(request, db, league)
+    matchups = services.get_upcoming_matchups(db, league, fpl) if fpl else []
+    me = services.get_my_team(db, league, fpl) if fpl else None
+    return templates.TemplateResponse("my_team_upcoming.html", {
+        "request": request, "league": league,
+        "matchups": matchups, "me_name": me["manager"] if me else None,
+    })
+
+
 @router.get("/picks", response_class=HTMLResponse)
 def picks_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)

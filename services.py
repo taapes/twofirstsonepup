@@ -35,6 +35,7 @@ from rules import (
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
     RuleViolation,
+    SEASON_LAST_GW,
     compute_payouts,
     h2h_standings,
     il_can_return,
@@ -241,6 +242,155 @@ def get_rosters(db: Session, league: League) -> list[dict]:
             }
         )
     return out
+
+
+def _squad_players(db: Session, manager_id, gw_id) -> list[Player]:
+    if gw_id is None:
+        return []
+    return (
+        db.query(Player)
+        .join(Roster, Roster.player_id == Player.id)
+        .filter(Roster.manager_id == manager_id, Roster.gameweek_id == gw_id)
+        .order_by(Player.position, Player.name)
+        .all()
+    )
+
+
+def _player_stat_dict(p: Player) -> dict:
+    return {
+        "fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team,
+        "price": (p.price / 10) if p.price is not None else None,
+        "status": p.status, "news": p.news,
+        "form": p.form, "points_per_game": p.points_per_game,
+        "total_points": p.total_points, "goals_scored": p.goals_scored,
+        "assists": p.assists, "clean_sheets": p.clean_sheets, "bonus": p.bonus,
+        "minutes": p.minutes, "ict_index": p.ict_index,
+        "selected_by_percent": p.selected_by_percent,
+    }
+
+
+_POSITION_ORDER = {"GKP": 0, "DEF": 1, "MID": 2, "FWD": 3}
+
+
+def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None:
+    """A single manager's current squad with rich per-player stats + a recent
+    points trend (from stored gameweek_points). None if the manager isn't found."""
+    manager = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    if not manager:
+        return None
+    gw = latest_gameweek(db, league)
+    players = _squad_players(db, manager.id, gw.id if gw else None)
+
+    # recent points trend per player (last 5 synced GWs, oldest->newest)
+    recent = (
+        db.query(GameweekPoints, Gameweek)
+        .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
+        .filter(GameweekPoints.manager_id == manager.id, Gameweek.league_id == league.id)
+        .order_by(Gameweek.number.desc())
+        .limit(5)
+        .all()
+    )
+    trend: dict = {}
+    for gp, _g in reversed(recent):
+        for entry in (gp.player_points or []):
+            trend.setdefault(entry.get("fpl_id"), []).append(entry.get("points"))
+
+    # keeper badges for the upcoming season
+    upcoming = (league.season_year or 0) + 1
+    keeper_pids = {
+        pid for (pid,) in db.query(KeeperSelection.player_id).filter_by(
+            league_id=league.id, manager_id=manager.id, season_year=upcoming
+        )
+    }
+
+    out_players = []
+    for p in players:
+        d = _player_stat_dict(p)
+        d["trend"] = trend.get(p.fpl_id, [])
+        d["is_keeper"] = p.id in keeper_pids
+        out_players.append(d)
+    out_players.sort(key=lambda d: (_POSITION_ORDER.get(d["position"], 9), d["name"]))
+    return {
+        "manager": manager.display,
+        "fpl": manager.fpl_manager_id,
+        "gameweek": gw.number if gw else None,
+        "players": out_players,
+    }
+
+
+def get_upcoming_matchups(
+    db: Session, league: League, fpl_manager_id: str, n: int = 3
+) -> list[dict]:
+    """The manager's next `n` H2H matchups (from the synced schedule) with both
+    squads and each player's real-life PL fixture + difficulty. Future starting XIs
+    aren't set yet, so each squad shown is the current 15-man roster (projected)."""
+    manager = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    if not manager:
+        return []
+    cur = current_gameweek(db, league)
+    if cur is None:
+        return []
+    gw_numbers = [cur + i for i in range(1, n + 1) if cur + i <= SEASON_LAST_GW]
+    if not gw_numbers:
+        return []
+
+    gws = {
+        g.number: g
+        for g in db.query(Gameweek).filter(
+            Gameweek.league_id == league.id, Gameweek.number.in_(gw_numbers)
+        )
+    }
+    fixtures = fixtures_for_gws(db, league, gw_numbers)
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    fpls = {m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)}
+    latest = latest_gameweek(db, league)
+    latest_id = latest.id if latest else None
+
+    def squad_with_fixtures(manager_id, gw_num):
+        rows = _squad_players(db, manager_id, latest_id)
+        gw_fix = fixtures.get(gw_num, {})
+        out = []
+        for p in rows:
+            d = _player_stat_dict(p)
+            d["fixtures"] = gw_fix.get(p.current_team, [])
+            out.append(d)
+        out.sort(key=lambda d: (_POSITION_ORDER.get(d["position"], 9), d["name"]))
+        return out
+
+    result = []
+    for num in gw_numbers:
+        g = gws.get(num)
+        if not g:
+            continue
+        match = (
+            db.query(Match)
+            .filter(
+                Match.league_id == league.id,
+                Match.gameweek_id == g.id,
+                (Match.home_manager_id == manager.id) | (Match.away_manager_id == manager.id),
+            )
+            .one_or_none()
+        )
+        if not match:
+            result.append({"gameweek": num, "opponent": None})
+            continue
+        opp_id = match.away_manager_id if match.home_manager_id == manager.id else match.home_manager_id
+        result.append({
+            "gameweek": num,
+            "opponent": names.get(opp_id),
+            "opponent_fpl": fpls.get(opp_id),
+            "my_squad": squad_with_fixtures(manager.id, num),
+            "opp_squad": squad_with_fixtures(opp_id, num),
+        })
+    return result
 
 
 def get_injury_list(db: Session, league: League) -> list[dict]:
