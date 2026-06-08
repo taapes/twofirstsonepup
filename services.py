@@ -77,7 +77,7 @@ def get_standings(db: Session, league: League) -> list[dict]:
         {
             "rank": s.rank,
             "last_rank": s.last_rank,
-            "manager": m.name,
+            "manager": m.display,
             "total": s.total,
             "points_for": s.points_for,
             "points_against": s.points_against,
@@ -108,7 +108,7 @@ def get_rosters(db: Session, league: League) -> list[dict]:
             )
         out.append(
             {
-                "manager": m.name,
+                "manager": m.display,
                 "players": [
                     {"name": p.name, "position": p.position, "team": p.current_team}
                     for p in players
@@ -129,7 +129,7 @@ def get_injury_list(db: Session, league: League) -> list[dict]:
     )
     return [
         {
-            "manager": m.name,
+            "manager": m.display,
             "player": p.name,
             "start_gw": il.start_gw,
             "end_gw": il.end_gw,
@@ -160,7 +160,7 @@ def get_infractions(db: Session, league: League) -> list[dict]:
     # manager id -> {"name": str, "counts": {gw_number: zero_minute_count}}
     per_manager: dict = {}
     for gp, gw, m in rows:
-        entry = per_manager.setdefault(m.id, {"name": m.name, "counts": {}})
+        entry = per_manager.setdefault(m.id, {"name": m.display, "counts": {}})
         entry["counts"][gw.number] = zero_minute_count(gp.player_points or [])
 
     infractions = []
@@ -443,7 +443,7 @@ def _cup_final_and_third(db: Session, cup: Tournament):
 
 def get_cups(db: Session, league: League) -> list[dict]:
     """Read both cup brackets (matches grouped by round) for API/homepage."""
-    names = {m.id: m.name for m in db.query(Manager).filter_by(league_id=league.id)}
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
     out = []
     for t in (
         db.query(Tournament)
@@ -527,7 +527,7 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
 
     num_managers = db.query(Manager).filter_by(league_id=league.id).count()
     raw = compute_payouts(recipients, num_managers, other_fines=other_fines)
-    names = {m.id: m.name for m in db.query(Manager).filter_by(league_id=league.id)}
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
     payouts = sorted(
         ({"manager": names.get(mid, str(mid)), **info} for mid, info in raw.items()),
         key=lambda x: -x["total"],
@@ -640,7 +640,7 @@ def get_keepers(db: Session, league: League) -> list[dict]:
     for m in managers:
         items = list(status.get(m.id, {}).values())
         items.sort(key=lambda x: (not x["eligible"], -x["keeper_years"], x["player"]))
-        out.append({"manager": m.name, "manager_fpl": m.fpl_manager_id, "players": items})
+        out.append({"manager": m.display, "manager_fpl": m.fpl_manager_id, "players": items})
     return out
 
 
@@ -713,7 +713,7 @@ def get_keeper_selections(db: Session, league: League, season_year: int) -> list
     )
     by_manager: dict = {}
     for sel, m, p in rows:
-        by_manager.setdefault(m.name, []).append(
+        by_manager.setdefault(m.display, []).append(
             {"player": p.name, "position": p.position, "is_discovery": sel.is_discovery}
         )
     return [{"manager": k, "keepers": v} for k, v in sorted(by_manager.items())]
@@ -749,7 +749,7 @@ def set_draft_order(db: Session, league: League, fpl_manager_ids: list[str]) -> 
     for i, m in enumerate(managers, start=1):
         db.add(DraftLottery(league_id=league.id, manager_id=m.id, pick_result=i))
     db.commit()
-    return [{"pick": i, "manager": m.name} for i, m in enumerate(managers, start=1)]
+    return [{"pick": i, "manager": m.display} for i, m in enumerate(managers, start=1)]
 
 
 def trade_pick(
@@ -770,7 +770,7 @@ def trade_pick(
         )
     )
     db.commit()
-    return {"from": frm.name, "to": to.name, "pick": label}
+    return {"from": frm.display, "to": to.display, "pick": label}
 
 
 def trade_player(
@@ -783,7 +783,7 @@ def trade_player(
     player = _resolve_player(db, player_fpl_id)
     db.add(Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id, player_id=player.id))
     db.commit()
-    return {"from": frm.name, "to": to.name, "player": player.name}
+    return {"from": frm.display, "to": to.display, "player": player.name}
 
 
 def record_pick(
@@ -816,7 +816,7 @@ def get_draft_board(
     """The draft board: slots in pick order with current owner (after pick trades)
     and any recorded selection. Computed from the R1 order + reverse standings +
     free-keeper counts, so it reflects trades the moment they're entered."""
-    names = {m.id: m.name for m in db.query(Manager).filter_by(league_id=league.id)}
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
     r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
     rev = _reverse_standings_managers(db, league)
 
@@ -914,7 +914,7 @@ def search_players(
 def get_trades(db: Session, league: League) -> list[dict]:
     """All trades for the league — synced player trades and commissioner-entered
     pick/player trades — newest-ish first (by GW then id)."""
-    names = {m.id: m.name for m in db.query(Manager).filter_by(league_id=league.id)}
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
     pnames = {p.id: p.name for p in db.query(Player)}
     rows = db.query(Trade).filter_by(league_id=league.id).all()
     out = []

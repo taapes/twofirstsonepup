@@ -60,8 +60,15 @@ class Manager(Base):
     fpl_league_entry_id: Mapped[str | None] = mapped_column(
         String, index=True, nullable=True
     )
-    name: Mapped[str] = mapped_column(String)
+    name: Mapped[str] = mapped_column(String)  # FPL team name (synced; changes YoY)
+    # League-custom person/display name (e.g. "Kevin T"). Stable across seasons;
+    # sync never overwrites it. The stable identity for historical/manager views.
+    display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     email: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    @property
+    def display(self) -> str:
+        return self.display_name or self.name
 
 
 class Player(Base):

@@ -35,7 +35,7 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
         "draft_type": draft_type,
         "board": board,
         "on_clock": services.next_open_pick(board),
-        "managers": [{"name": m.name, "fpl": m.fpl_manager_id} for m in managers],
+        "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
         "is_admin": is_admin(request),
     }
 
@@ -94,10 +94,10 @@ def team_page(fpl_manager_id: str, request: Request, db: Session = Depends(get_d
     )
     if not m:
         raise HTTPException(status_code=404, detail="team not found")
-    team = next((t for t in services.get_keepers(db, league) if t["manager"] == m.name), None)
+    team = next((t for t in services.get_keepers(db, league) if t["manager"] == m.display), None)
     return templates.TemplateResponse(
         "team.html",
-        {"request": request, "league": league, "is_admin": is_admin(request), "team": team, "manager": m.name},
+        {"request": request, "league": league, "is_admin": is_admin(request), "team": team, "manager": m.display},
     )
 
 

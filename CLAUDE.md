@@ -75,6 +75,12 @@ live FPL calls into request handlers.
   IL logic, discovery draft, anti-tanking, ineligible players, cup structure,
   commissioner data, draft/trade/waiver history.
 
+Manager identity: `managers.name` is the **FPL team name** (synced; changes
+year to year). `managers.display_name` is the **person** (e.g. "Kevin T") — a
+league-custom field sync never overwrites, and the **stable identity** for
+historical/manager-centric views. Use `Manager.display` (display_name or name)
+for all manager labels; services already do.
+
 League logic must never corrupt synced canonical data. Custom state lives in its
 own tables alongside, not by mutating FPL-sourced rows.
 
