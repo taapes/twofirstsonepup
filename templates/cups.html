@@ -34,12 +34,13 @@
     </div>
     <div class="round">
       <div class="round-h">Semifinal</div>
-      {% for m in r2 %}{{ mbox(m) }}{% endfor %}
+      {% if r2 %}{% for m in r2 %}{{ mbox(m) }}{% endfor %}
+      {% else %}{{ mbox(none) }}{{ mbox(none) }}{% endif %}
     </div>
     <div class="round">
       <div class="round-h">Final</div>
       {{ mbox(final) }}
-      {% if third %}<div class="round-h" style="margin-top:14px">3rd place</div>{{ mbox(third) }}{% endif %}
+      {% if cup.name == "Cup" %}<div class="round-h" style="margin-top:14px">3rd place</div>{{ mbox(third) }}{% endif %}
     </div>
   </div>
   {% endif %}
