@@ -6,7 +6,7 @@
 <div class="card">
   {% if trades %}
   <table>
-    <thead><tr><th>Type</th><th>What</th><th>From</th><th>To</th><th class="num">GW</th></tr></thead>
+    <thead><tr><th>Type</th><th>What</th><th>From</th><th>To</th><th class="num">GW</th><th>Source</th></tr></thead>
     <tbody>
       {% for t in trades %}
       <tr>
@@ -15,6 +15,7 @@
         <td>{{ t['from'] }}</td>
         <td>{{ t['to'] }}</td>
         <td class="num">{% if t.gw %}GW{{ t.gw }}{% else %}—{% endif %}</td>
+        <td class="tag">{{ t.source }}</td>
       </tr>
       {% endfor %}
     </tbody>

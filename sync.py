@@ -497,6 +497,22 @@ async def sync_trades():
         def _record(tid, event, player, from_mgr, to_mgr):
             if not player or not from_mgr or not to_mgr:
                 return
+            # Reconcile: if the same player move was already entered on the SITE
+            # (a manual player trade, no fpl_trade_id), link it to this FPL trade
+            # instead of creating a duplicate.
+            manual = (
+                session.query(Trade)
+                .filter_by(
+                    league_id=league.id, player_id=player.id,
+                    from_manager=from_mgr.id, to_manager=to_mgr.id,
+                    fpl_trade_id=None, pick_round=None,
+                )
+                .first()
+            )
+            if manual:
+                manual.fpl_trade_id = tid
+                manual.event_gw = event
+                return
             _upsert(
                 session,
                 Trade,

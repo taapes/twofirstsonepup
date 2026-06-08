@@ -1045,6 +1045,7 @@ def get_trades(db: Session, league: League) -> list[dict]:
             "from": names.get(t.from_manager),
             "to": names.get(t.to_manager),
             "gw": t.event_gw,
+            "source": "FPL" if t.fpl_trade_id else "site",
         })
     out.sort(key=lambda x: (x["gw"] is None, x["gw"] or 0), reverse=True)
     return out
