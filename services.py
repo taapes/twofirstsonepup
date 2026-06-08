@@ -1260,6 +1260,86 @@ def get_transactions(db: Session, league: League) -> list[dict]:
     ]
 
 
+def reconcile_absences(db: Session, league: League) -> int:
+    """After a sync: auto-close any active IL / international-list entry whose player is
+    back on the manager's latest synced roster — i.e. the manager re-added them in the
+    FPL app. Sets the entry to 'returned' at the latest GW. Returns the number closed."""
+    from models import InternationalList
+
+    gw = latest_gameweek(db, league)
+    if not gw:
+        return 0
+    on_roster = {
+        (mid, pid)
+        for mid, pid in db.query(Roster.manager_id, Roster.player_id).filter_by(gameweek_id=gw.id)
+    }
+    closed = 0
+    for model in (InjuryList, InternationalList):
+        for e in (
+            db.query(model)
+            .join(Manager, Manager.id == model.manager_id)
+            .filter(Manager.league_id == league.id, model.status == "active")
+            .all()
+        ):
+            if (e.manager_id, e.player_id) in on_roster:
+                e.end_gw = gw.number
+                e.status = "returned"
+                closed += 1
+    if closed:
+        db.commit()
+    return closed
+
+
+def flagged_actions(db: Session, league: League) -> list[dict]:
+    """League attention items for the home page: IL/international players that must be
+    returned at season end, players on the IL 4+ GWs (eligible to return), and teams
+    flagged or at risk of an anti-tanking violation."""
+    from models import InternationalList
+
+    cur = current_gameweek(db, league)
+    season_over = cur is not None and cur >= SEASON_LAST_GW
+    out: list[dict] = []
+
+    # IL: season-end return-or-release, and 4+ GW eligible-to-return
+    for il, m, p in (
+        db.query(InjuryList, Manager, Player)
+        .join(Manager, Manager.id == InjuryList.manager_id)
+        .join(Player, Player.id == InjuryList.player_id)
+        .filter(Manager.league_id == league.id, InjuryList.status == "active")
+    ):
+        gws_on = (cur - il.start_gw + 1) if (cur and il.start_gw) else None
+        if season_over:
+            out.append({"category": "Injury list", "manager": m.display,
+                        "detail": f"Season over — return or release {p.name}"})
+        elif gws_on is not None and gws_on >= MIN_IL_STAY_GWS:
+            out.append({"category": "Injury list", "manager": m.display,
+                        "detail": f"{p.name} on the IL {gws_on} GWs — eligible to return"})
+
+    # International: season-end return
+    for il, m, p in (
+        db.query(InternationalList, Manager, Player)
+        .join(Manager, Manager.id == InternationalList.manager_id)
+        .join(Player, Player.id == InternationalList.player_id)
+        .filter(Manager.league_id == league.id, InternationalList.status == "active")
+    ):
+        if season_over:
+            out.append({"category": "International", "manager": m.display,
+                        "detail": f"Season over — return {p.name} from international duty"})
+
+    # Anti-tanking: flagged (in violation) or at risk (one GW short of the threshold)
+    for info in _tanking_counts_by_manager(db, league).values():
+        counts = info["counts"]
+        if tanking_windows(counts):
+            out.append({"category": "Anti-tanking", "manager": info["manager"].display,
+                        "detail": "flagged for an anti-tanking violation"})
+        else:
+            streak = current_tanking_streak(counts)
+            if streak and streak >= ANTI_TANKING_MIN_WEEKS - 1:
+                out.append({"category": "Anti-tanking", "manager": info["manager"].display,
+                            "detail": f"at risk — {streak} straight GWs near the threshold"})
+    return out
+
+
 def get_international_list(db: Session, league: League) -> list[dict]:
     """Active international-list entries for the league."""
     from models import InternationalList

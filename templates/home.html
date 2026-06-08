@@ -35,6 +35,22 @@
     {% for a in adjustments %}{{ a.manager }}{% if a.total_delta %} {{ "%+d"|format(a.total_delta) }} H2H{% endif %}{% if a.points_for_delta %} {{ "%+d"|format(a.points_for_delta) }} total{% endif %}{% if a.gameweek %} (from GW{{ a.gameweek }}){% endif %}{% if a.note %} — {{ a.note }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}</p>
   {% endif %}
 
+  {% if flagged_actions %}
+  <h2>Flagged Actions</h2>
+  <div class="card">
+    <p class="sub">League items needing attention.</p>
+    <table>
+      <thead><tr><th>Manager</th><th>Type</th><th>Action</th></tr></thead>
+      <tbody>
+        {% for a in flagged_actions %}
+        <tr><td>{{ a.manager }}</td><td><span class="pill warn">{{ a.category }}</span></td>
+          <td>{{ a.detail }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
   <h2>Anti-Tanking Flags</h2>
   <div class="card">
     {% set ns = namespace(shown=0) %}

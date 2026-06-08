@@ -172,6 +172,7 @@ def home(request: Request, db: Session = Depends(get_db)):
             flags=services.get_flags(db, league),
             injury_list=services.get_injury_list(db, league),
             international_list=services.get_international_list(db, league),
+            flagged_actions=services.flagged_actions(db, league),
             cups=services.get_cups(db, league),
             payouts=services.get_payouts(db, league),
             adjustments=services.get_standing_adjustments(db, league),
@@ -197,11 +198,6 @@ def admin_sync(force: bool = False):
 
     if plan == "full":
         asyncio.run(sync_all())
-        # after a full pull, re-evaluate post-draft (non-DEF) additions
-        with SessionLocal() as db:
-            league = services.current_league(db)
-            if league:
-                services.flag_ineligible(db, league)
     elif plan == "live":
         # only the GW-changing pulls while matches are live
         async def _live():
@@ -210,5 +206,15 @@ def admin_sync(force: bool = False):
             await sync_fixtures()
 
         asyncio.run(_live())
+
+    if plan in ("full", "live"):
+        # rosters just refreshed: re-flag post-draft additions and auto-return any
+        # IL / international player the manager has re-added in FPL.
+        with SessionLocal() as db:
+            league = services.current_league(db)
+            if league:
+                if plan == "full":
+                    services.flag_ineligible(db, league)
+                services.reconcile_absences(db, league)
     # plan == "skip": nothing to do (phase advance already ran)
     return {"ok": True, "plan": plan, "phase_advanced": advanced}
