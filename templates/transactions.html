@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Transactions{% endblock %}
+{% block content %}
+<h1>Transactions</h1>
+<p class="sub">Weekly roster moves (adds/drops), derived from each gameweek's squad
+  snapshot — covers waivers, free agency, and trades.</p>
+{% for w in weeks %}
+<h2>GW{{ w.gameweek }}</h2>
+<div class="card" style="margin-bottom:12px">
+  <table>
+    <thead><tr><th>Manager</th><th></th><th>Player</th></tr></thead>
+    <tbody>
+      {% for m in w.moves %}
+      <tr>
+        <td>{{ m.manager }}</td>
+        <td>{% if m.action == "added" %}<span class="pill">+ added</span>{% else %}<span class="pill warn">− dropped</span>{% endif %}</td>
+        <td>{{ m.player }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">No transactions yet (needs at least two gameweeks of roster data).</div>
+{% endfor %}
+{% endblock %}

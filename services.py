@@ -1128,6 +1128,44 @@ def return_from_intl(db: Session, league: League, intl_id: str, return_gw: int) 
     return {"returned_gw": return_gw}
 
 
+def get_transactions(db: Session, league: League) -> list[dict]:
+    """Weekly add/drops derived from consecutive per-GW roster snapshots (the FPL Draft
+    waiver feed isn't public). Grouped newest-GW first: for each manager, players in
+    GW n but not n-1 = added; in n-1 but not n = dropped. Captures waivers/FA/trades."""
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    pnames = {p.id: p.name for p in db.query(Player)}
+    # (manager_id, gw_number) -> set(player_id)
+    rosters: dict = {}
+    for mid, pid, gnum in (
+        db.query(Roster.manager_id, Roster.player_id, Gameweek.number)
+        .join(Gameweek, Gameweek.id == Roster.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+    ):
+        rosters.setdefault((mid, gnum), set()).add(pid)
+
+    gws = sorted({gnum for (_mid, gnum) in rosters})
+    by_gw: dict = {}
+    for i in range(1, len(gws)):
+        prev_gw, gw = gws[i - 1], gws[i]
+        for mid in names:
+            before = rosters.get((mid, prev_gw), set())
+            after = rosters.get((mid, gw), set())
+            if not before or not after:
+                continue
+            for pid in (after - before):
+                by_gw.setdefault(gw, []).append(
+                    {"manager": names[mid], "player": pnames.get(pid, "?"), "action": "added"}
+                )
+            for pid in (before - after):
+                by_gw.setdefault(gw, []).append(
+                    {"manager": names[mid], "player": pnames.get(pid, "?"), "action": "dropped"}
+                )
+    return [
+        {"gameweek": gw, "moves": sorted(by_gw[gw], key=lambda x: (x["manager"], x["action"]))}
+        for gw in sorted(by_gw, reverse=True)
+    ]
+
+
 def get_international_list(db: Session, league: League) -> list[dict]:
     """Active international-list entries for the league."""
     from models import InternationalList

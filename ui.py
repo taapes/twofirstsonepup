@@ -1010,6 +1010,15 @@ def trades_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/transactions", response_class=HTMLResponse)
+def transactions_page(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    return templates.TemplateResponse(
+        "transactions.html",
+        {"request": request, "league": league, "weeks": services.get_transactions(db, league)},
+    )
+
+
 # ---- draft board ----
 @router.get("/draft/{year}", response_class=HTMLResponse)
 def draft_page(year: int, request: Request, draft_type: str = "main", db: Session = Depends(get_db)):
