@@ -42,6 +42,12 @@ class ScoreCupRoundRequest(BaseModel):
     gw2: int
 
 
+class KeeperSeedRequest(BaseModel):
+    fpl_manager_id: str
+    player_fpl_id: int
+    prior_years: int
+
+
 @router.post("/leagues/{league_key}/injury-list")
 def place_on_il(
     league_key: str, body: PlaceOnILRequest, db: Session = Depends(get_db)
@@ -92,5 +98,23 @@ def score_cup_round(
     league = _league(db, league_key)
     try:
         return services.score_cup_round(db, league, body.round, body.gw1, body.gw2)
+    except RuleViolation as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/leagues/{league_key}/keeper-seeds")
+def set_keeper_seed(
+    league_key: str, body: KeeperSeedRequest, db: Session = Depends(get_db)
+):
+    """Option-B bootstrap: set a player's prior keeper-years for a manager."""
+    league = _league(db, league_key)
+    try:
+        return services.set_keeper_seed(
+            db,
+            league,
+            fpl_manager_id=body.fpl_manager_id,
+            player_fpl_id=body.player_fpl_id,
+            prior_years=body.prior_years,
+        )
     except RuleViolation as e:
         raise HTTPException(status_code=400, detail=str(e))

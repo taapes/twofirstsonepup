@@ -160,6 +160,60 @@ PAYOUT_STRUCTURE = {
     "pup_cup_winner": 150,  # flat, not a percentage
 }
 
+# ---- Keepers ----
+# A player can be kept at most this many seasons; in the (MAX+1)th year they must
+# return to the draft. Dropping to FA/waivers resets the clock.
+KEEPER_MAX_YEARS = 4
+# Of a manager's keepers, at most this many may be waiver-acquired (from 2025).
+KEEPER_MAX_WAIVER = 2
+
+
+def keeper_continuity(presence_gws: set, il_gws: set, last_gw: int) -> dict | None:
+    """Whether a player was held continuously through the season end.
+
+    `presence_gws`: GWs the player was on the manager's roster. `il_gws`: GWs he
+    was on that manager's injury list (an explained absence). Returns None if he
+    isn't on the roster at `last_gw` (not a keeper candidate), else the first GW
+    held and whether continuous (gaps allowed only when covered by the IL).
+    A non-continuous hold means he was dropped and re-acquired -> clock resets.
+    """
+    if last_gw not in presence_gws:
+        return None
+    first = min(presence_gws)
+    for gw in range(first, last_gw + 1):
+        if gw not in presence_gws and gw not in il_gws:
+            return {"first_gw": first, "continuous": False}
+    return {"first_gw": first, "continuous": True}
+
+
+def classify_acquisition(first_gw: int, traded_in: bool, continuous: bool) -> str:
+    """How the player came to the manager: 'draft' (rostered from GW1), 'trade'
+    (arrived via a trade), or 'waiver' (arrived mid-season, or re-acquired after a
+    drop). Only waiver keepers count toward KEEPER_MAX_WAIVER."""
+    if not continuous:
+        return "waiver"
+    if traded_in:
+        return "trade"
+    return "draft" if first_gw == 1 else "waiver"
+
+
+def keeper_years_used(prior_years, continuous: bool, was_kept_this_season: bool) -> int:
+    """Seasons the player has been kept entering the next selection. `prior_years`
+    is the Option-B seed (None if never a keeper before). A dropped (non-continuous)
+    player resets to 0. A continuously-held player who was a keeper this season
+    (has a seed) counts seed+1; one drafted fresh this season counts 0."""
+    if not continuous:
+        return 0
+    if was_kept_this_season:
+        return (prior_years or 0) + 1
+    return 0
+
+
+def keeper_eligible(years_used: int, max_years: int = KEEPER_MAX_YEARS) -> bool:
+    """Eligible to be kept again only if kept fewer than max_years seasons."""
+    return years_used < max_years
+
+
 _PAYOUT_LABELS = {
     "league_1": "1st place — League",
     "league_2": "2nd place — League",

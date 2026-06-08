@@ -11,6 +11,7 @@ from models import (
     Gameweek,
     GameweekPoints,
     InjuryList,
+    KeeperSeed,
     League,
     Manager,
     Match,
@@ -19,19 +20,25 @@ from models import (
     Roster,
     Tournament,
     TournamentMatch,
+    Trade,
 )
 from rules import (
     ANTI_TANKING_MIN_WEEKS,
     ANTI_TANKING_MIN_ZERO_PLAYERS,
     CUP_SEED_THROUGH_GW,
     CUP_SIZE,
+    KEEPER_MAX_YEARS,
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
     RuleViolation,
+    classify_acquisition,
     compute_payouts,
     h2h_standings,
     il_can_return,
     il_same_position,
+    keeper_continuity,
+    keeper_eligible,
+    keeper_years_used,
     match_winner,
     tanking_windows,
     zero_minute_count,
@@ -526,3 +533,103 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
         "total_paid": round(sum(p["total"] for p in payouts), 2),
         "payouts": payouts,
     }
+
+
+# ---- keepers (derived from roster history + IL + trades + Option-B seeds) ----
+def set_keeper_seed(
+    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int, prior_years: int
+) -> dict:
+    """Option-B bootstrap: record prior keeper-years for an already-kept player."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    player = _resolve_player(db, player_fpl_id)
+    if prior_years < 0 or prior_years > KEEPER_MAX_YEARS:
+        raise RuleViolation(f"prior_years must be 0..{KEEPER_MAX_YEARS}")
+    seed = (
+        db.query(KeeperSeed)
+        .filter_by(manager_id=manager.id, player_id=player.id)
+        .one_or_none()
+    )
+    if seed:
+        seed.prior_years = prior_years
+    else:
+        seed = KeeperSeed(
+            league_id=league.id,
+            manager_id=manager.id,
+            player_id=player.id,
+            prior_years=prior_years,
+            season_year=league.season_year,
+        )
+        db.add(seed)
+    db.commit()
+    return {"manager": manager.name, "player": player.name, "prior_years": prior_years}
+
+
+def get_keepers(db: Session, league: League) -> list[dict]:
+    """Per-manager keeper eligibility for the upcoming selection, derived from
+    roster continuity (drops reset the clock; IL and trades are explained moves),
+    acquisition type, and Option-B seeds. Precomputed read; no FPL calls."""
+    gw = latest_gameweek(db, league)
+    if gw is None:
+        return []
+    last_n = gw.number
+    managers = (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
+    )
+    players = {p.id: p for p in db.query(Player)}
+
+    presence: dict = {}  # (manager_id, player_id) -> set of GW numbers rostered
+    for mid, pid, gnum in (
+        db.query(Roster.manager_id, Roster.player_id, Gameweek.number)
+        .join(Gameweek, Gameweek.id == Roster.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+        .all()
+    ):
+        presence.setdefault((mid, pid), set()).add(gnum)
+
+    il: dict = {}  # (manager_id, player_id) -> set of GW numbers on IL
+    for e in (
+        db.query(InjuryList)
+        .join(Manager, Manager.id == InjuryList.manager_id)
+        .filter(Manager.league_id == league.id)
+        .all()
+    ):
+        il.setdefault((e.manager_id, e.player_id), set()).update(
+            range(e.start_gw, (e.end_gw or last_n) + 1)
+        )
+
+    traded_in = {
+        (t.to_manager, t.player_id)
+        for t in db.query(Trade).filter_by(league_id=league.id)
+    }
+    seed_prior: dict = {}  # player_id -> prior_years (history transfers via trade)
+    for s in db.query(KeeperSeed).filter_by(league_id=league.id):
+        seed_prior[s.player_id] = max(seed_prior.get(s.player_id, 0), s.prior_years)
+
+    out = []
+    for m in managers:
+        items = []
+        for (mid, pid), gws in presence.items():
+            if mid != m.id or last_n not in gws:
+                continue
+            cont = keeper_continuity(gws, il.get((m.id, pid), set()), last_n)
+            if cont is None:
+                continue
+            acq = classify_acquisition(
+                cont["first_gw"], (m.id, pid) in traded_in, cont["continuous"]
+            )
+            years = keeper_years_used(
+                seed_prior.get(pid), cont["continuous"], pid in seed_prior
+            )
+            p = players.get(pid)
+            items.append(
+                {
+                    "player": p.name if p else str(pid),
+                    "position": p.position if p else None,
+                    "acquisition": acq,
+                    "keeper_years": years,
+                    "eligible": keeper_eligible(years),
+                }
+            )
+        items.sort(key=lambda x: (not x["eligible"], -x["keeper_years"], x["player"]))
+        out.append({"manager": m.name, "players": items})
+    return out

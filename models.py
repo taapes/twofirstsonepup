@@ -155,6 +155,10 @@ class Trade(Base):
     player_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
     )
+    # Gameweek (FPL event) the trade processed in — aligns trades with roster
+    # diffs so a traded-away player isn't mistaken for a drop.
+    event_gw: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fpl_trade_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
     draft_pick: Mapped[str | None] = mapped_column(String, nullable=True)  # e.g. "2026-R3"
     conditions: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -193,6 +197,30 @@ class KeeperException(Base):
     )
     validated_gw: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_valid: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
+
+class KeeperSeed(Base):
+    """Option-B bootstrap: prior keeper-years a manager had already accrued on a
+    player when tracking began (25/26). The derivation engine adds completed
+    seasons held on top of this. One row per (manager, player)."""
+
+    __tablename__ = "keeper_seeds"
+    __table_args__ = (
+        UniqueConstraint("manager_id", "player_id", name="uq_keeper_seed_mgr_player"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), index=True
+    )
+    prior_years: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    season_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class DraftPick(Base):

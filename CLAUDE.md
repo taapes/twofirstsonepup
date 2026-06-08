@@ -117,6 +117,18 @@ Write tests for these. They are custom and non-obvious:
   applies). Max 4 years of keeper eligibility — track the clock per player.
   Waiver keepers capped at 2 (from 2025 on). Traded players KEEP keeper history;
   dropped players LOSE keeper eligibility.
+  *Phase 1 (done):* eligibility is **derived**, not manually entered — roster
+  continuity across GW snapshots determines drops (a gap not covered by the IL
+  or a trade = dropped → clock resets); acquisition (draft/trade/waiver) and
+  keeper-years come from roster history + synced trades (`sync_trades`, from the
+  FPL `/draft/.../trades` feed) + Option-B `keeper_seeds` (commissioner-entered
+  prior years for players already kept entering 25/26). `rules.keeper_*`,
+  `services.get_keepers`, `GET /v1/.../keepers`, `POST /admin/.../keeper-seeds`.
+  CAVEAT: derivation needs IL data to explain roster gaps; 25/26 has no IL
+  records in our system, so legitimate IL absences look like drops — the
+  25/26→26/27 report needs commissioner review for gap cases. Accurate going
+  forward. *Phase 2 (TODO):* keeper SELECTION submission + cap validation
+  (≤5, ≤2 waiver, discovery 6th) and the main/discovery drafts.
 - **Waivers vs. free agency:** Waiver period = start of a GW until 24h before the
   next GW. Final 24h before GW start = free agency. Enforce limits/eligibility.
 - **Player eligibility:** Player added to FPL *after* the league draft date is

@@ -24,6 +24,7 @@ from models import (
     Roster,
     Standing,
     SyncLog,
+    Trade,
 )
 from settings import API_BASE, LEAGUE_ID
 
@@ -446,6 +447,73 @@ async def backfill_history(start: int = 1, end: int = 38):
     await sync_gameweek_dates()
     await backfill_rosters(start, end)
     await backfill_gameweek_points(start, end)
+    await sync_trades()
+
+
+# ---------- trades (canonical, from FPL draft trades feed) ----------
+async def sync_trades():
+    """Pull accepted trades from the FPL Draft trades feed into `trades` — one row
+    per moved player (from_manager -> to_manager, at the trade's GW). Keeper
+    derivation uses these so a traded-away player isn't counted as a drop."""
+    if not LEAGUE_ID:
+        return
+    with SessionLocal() as session:
+        log = SyncLog(kind="trades")
+        session.add(log)
+        session.commit()
+
+        league = (
+            session.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one_or_none()
+        )
+        if not league:
+            log.notes = "league missing, run sync_league_and_managers first"
+            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+            session.commit()
+            return
+
+        async with httpx.AsyncClient() as client:
+            data = await _get_json(
+                client, f"{API_BASE}/draft/league/{LEAGUE_ID}/trades"
+            )
+
+        mgr_by_entry = {
+            m.fpl_manager_id: m
+            for m in session.query(Manager).filter_by(league_id=league.id)
+        }
+        player_by_fpl = {p.fpl_id: p for p in session.query(Player)}
+
+        def _record(tid, event, player, from_mgr, to_mgr):
+            if not player or not from_mgr or not to_mgr:
+                return
+            _upsert(
+                session,
+                Trade,
+                {
+                    "fpl_trade_id": tid,
+                    "player_id": player.id,
+                    "from_manager": from_mgr.id,
+                    "to_manager": to_mgr.id,
+                },
+                {"league_id": league.id, "event_gw": event},
+            )
+
+        for t in data.get("trades", []):
+            if t.get("state") != "p":  # only processed/accepted trades
+                continue
+            offered = mgr_by_entry.get(str(t.get("offered_entry")))
+            received = mgr_by_entry.get(str(t.get("received_entry")))
+            if not offered or not received:
+                continue
+            tid, event = str(t.get("id")), t.get("event")
+            for item in t.get("tradeitem_set", []):
+                # element_in moves INTO the offering team (from the receiver);
+                # element_out moves the other way.
+                _record(tid, event, player_by_fpl.get(item.get("element_in")), received, offered)
+                _record(tid, event, player_by_fpl.get(item.get("element_out")), offered, received)
+
+        log.ok = True
+        log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+        session.commit()
 
 
 # ---------- orchestrator ----------
@@ -455,3 +523,4 @@ async def sync_all():
     await sync_gameweek_dates()
     await sync_rosters()
     await sync_gameweek_points()
+    await sync_trades()
