@@ -1273,3 +1273,28 @@ def data_health(db: Session, league: League) -> list[dict]:
         f"{bad_picks} malformed" if bad_picks else "ok")
 
     return checks
+
+
+# ---- keeper selection UI support ----
+def keeper_candidates(db: Session, league: League, fpl_manager_id: str) -> dict:
+    """A manager's roster players with keeper eligibility (for the selection UI):
+    fpl_id, name, position, acquisition, years_remaining, eligible."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    status = _derive_keeper_status(db, league).get(manager.id, {})
+    fpl_by_id = {p.id: p.fpl_id for p in db.query(Player)}
+    items = [{**v, "fpl_id": fpl_by_id.get(pid)} for pid, v in status.items()]
+    items.sort(key=lambda x: (not x["eligible"], -x["years_remaining"], x["player"]))
+    # current submitted selection (upcoming season) so the form can preselect
+    upcoming = (league.season_year or 0) + 1
+    selected = {
+        s.player_id: s.is_discovery
+        for s in db.query(KeeperSelection).filter_by(
+            league_id=league.id, manager_id=manager.id, season_year=upcoming
+        )
+    }
+    sel_fpl = {fpl_by_id.get(pid): disc for pid, disc in selected.items()}
+    for it in items:
+        it["selected"] = it["fpl_id"] in sel_fpl
+        it["is_discovery"] = sel_fpl.get(it["fpl_id"], False)
+    return {"manager": manager.display, "fpl": manager.fpl_manager_id,
+            "season": upcoming, "players": items}

@@ -111,6 +111,50 @@ def team_page(fpl_manager_id: str, request: Request, db: Session = Depends(get_d
     )
 
 
+@router.get("/keepers", response_class=HTMLResponse)
+def keepers_page(request: Request, db: Session = Depends(get_db)):
+    """Keeper selection — a manager (or admin) picks their keepers for next season."""
+    league = _league_or_404(db)
+    managers = (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
+    )
+    return templates.TemplateResponse("keepers_select.html", {
+        "request": request, "league": league, "is_admin": is_admin(request),
+        "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
+        "season": (league.season_year or 0) + 1,
+    })
+
+
+@router.get("/keepers/candidates", response_class=HTMLResponse)
+def keepers_candidates(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    fpl = request.query_params.get("fpl_manager_id")
+    cands = services.keeper_candidates(db, league, fpl) if fpl else None
+    return templates.TemplateResponse(
+        "_keeper_candidates.html", {"request": request, "candidates": cands}
+    )
+
+
+@router.post("/keepers")
+def keepers_submit(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), season_year: int = Form(...),
+    keeper_fpl_ids: list[int] = Form(default=[]), discovery_fpl_id: str = Form(""),
+):
+    league = _league_or_404(db)
+    if not _writes_allowed(request, league):
+        return _locked_response()
+    try:
+        services.submit_keepers(
+            db, league, fpl_manager_id=fpl_manager_id, keeper_fpl_ids=keeper_fpl_ids,
+            season_year=season_year,
+            discovery_fpl_id=int(discovery_fpl_id) if discovery_fpl_id.strip() else None,
+        )
+    except RuleViolation as e:
+        return HTMLResponse(f"error: {e}", status_code=400)
+    return RedirectResponse("/teams", status_code=303)
+
+
 @router.get("/picks", response_class=HTMLResponse)
 def picks_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)

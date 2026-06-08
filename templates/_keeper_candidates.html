@@ -1,0 +1,29 @@
+<div id="cands">
+  {% if candidates %}
+  <input type="hidden" name="season_year" value="{{ candidates.season }}">
+  <table>
+    <thead><tr><th>Keep</th><th>Player</th><th class="num">Yrs left</th></tr></thead>
+    <tbody>
+      {% for p in candidates.players %}
+      <tr>
+        <td><input type="checkbox" name="keeper_fpl_ids" value="{{ p.fpl_id }}"
+                   {% if p.selected %}checked{% endif %} {% if not p.eligible %}disabled{% endif %}></td>
+        <td>{{ p.player }} <span class="tag">{{ p.position }} · {{ p.acquisition }}</span></td>
+        <td class="num">{% if p.eligible %}{{ p.years_remaining }}{% else %}<span class="pill warn">max</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <label style="display:block;margin-top:10px">Discovery keeper (optional 6th)
+    <select name="discovery_fpl_id" style="width:100%">
+      <option value="">— none —</option>
+      {% for p in candidates.players %}{% if p.eligible %}
+      <option value="{{ p.fpl_id }}" {% if p.is_discovery %}selected{% endif %}>{{ p.player }}</option>
+      {% endif %}{% endfor %}
+    </select>
+  </label>
+  <button type="submit" style="margin-top:10px">Save keepers</button>
+  {% else %}
+  <p class="sub">Select a manager.</p>
+  {% endif %}
+</div>
