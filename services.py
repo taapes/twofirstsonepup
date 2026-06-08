@@ -613,7 +613,8 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
             "player": p.name if p else str(pid),
             "position": p.position if p else None,
             "acquisition": acq,
-            "keeper_years": years,
+            "keeper_years": years,  # seasons kept through this season
+            "years_remaining": max(0, KEEPER_MAX_YEARS - years),  # more years keepable
             "eligible": keeper_eligible(years),
         }
     return status

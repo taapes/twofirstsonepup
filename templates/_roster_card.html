@@ -7,8 +7,7 @@
         <td>{{ p.player }}</td>
         <td class="tag">{{ p.position }} · {{ p.acquisition }}</td>
         <td class="num">
-          {% if p.keeper_years %}{{ p.keeper_years }}y{% if not p.eligible %} <span class="pill warn">max</span>{% endif %}
-          {% else %}<span class="yrs">—</span>{% endif %}
+          {% if p.years_remaining > 0 %}{{ p.years_remaining }} left{% else %}<span class="pill warn">max</span>{% endif %}
         </td>
       </tr>
       {% else %}
