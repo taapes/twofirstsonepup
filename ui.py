@@ -46,8 +46,12 @@ def _writes_allowed(request: Request, league) -> bool:
     return (not league.writes_locked) or is_admin(request)
 
 
-def _locked_response():
-    return HTMLResponse("Editing is locked by the commissioner.", status_code=423)
+def _locked_response(what="Editing"):
+    return HTMLResponse(f"{what} is locked by the commissioner.", status_code=423)
+
+
+def _keepers_allowed(request: Request, league) -> bool:
+    return (not league.keepers_locked) or is_admin(request)
 
 
 def _board_response(request, db, league, year, draft_type="main"):
@@ -122,6 +126,7 @@ def keepers_page(request: Request, db: Session = Depends(get_db)):
         "request": request, "league": league, "is_admin": is_admin(request),
         "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
         "season": (league.season_year or 0) + 1,
+        "locked": league.keepers_locked and not is_admin(request),
     })
 
 
@@ -142,8 +147,8 @@ def keepers_submit(
     keeper_fpl_ids: list[int] = Form(default=[]), discovery_fpl_id: str = Form(""),
 ):
     league = _league_or_404(db)
-    if not _writes_allowed(request, league):
-        return _locked_response()
+    if not _keepers_allowed(request, league):
+        return _locked_response("Keeper selection")
     try:
         services.submit_keepers(
             db, league, fpl_manager_id=fpl_manager_id, keeper_fpl_ids=keeper_fpl_ids,
@@ -174,15 +179,20 @@ def admin_health(request: Request, db: Session = Depends(get_db)):
         "request": request, "league": league, "is_admin": True,
         "checks": services.data_health(db, league),
         "writes_locked": league.writes_locked,
+        "keepers_locked": league.keepers_locked,
     })
 
 
 @router.post("/admin/lock")
-def admin_lock(request: Request, db: Session = Depends(get_db), lock: str = Form("")):
+def admin_lock(
+    request: Request, db: Session = Depends(get_db),
+    lock: str = Form(""), keepers_lock: str = Form(""),
+):
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
     league = _league_or_404(db)
     league.writes_locked = lock == "on"
+    league.keepers_locked = keepers_lock == "on"
     db.commit()
     return RedirectResponse("/admin/health", status_code=303)
 

@@ -49,6 +49,10 @@ class League(Base):
     writes_locked: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # Separate freeze for keeper selections (e.g. after the keeper deadline).
+    keepers_locked: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
 
 
 class Manager(Base):

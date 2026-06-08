@@ -8,10 +8,12 @@
   <p class="sub">When locked, the public can't record picks or trades; you (logged in) still can.
      Use this to freeze edits outside the live draft window.</p>
   <form method="post" action="/admin/lock">
-    <label><input type="checkbox" name="lock" {% if writes_locked %}checked{% endif %}> Lock public editing</label>
-    <button type="submit" style="margin-left:10px">Save</button>
+    <label style="display:block"><input type="checkbox" name="lock" {% if writes_locked %}checked{% endif %}>
+      Lock public picks &amp; trades <span class="sub">(currently {{ "LOCKED" if writes_locked else "open" }})</span></label>
+    <label style="display:block;margin-top:6px"><input type="checkbox" name="keepers_lock" {% if keepers_locked %}checked{% endif %}>
+      Lock keeper selection <span class="sub">(currently {{ "LOCKED" if keepers_locked else "open" }})</span></label>
+    <button type="submit" style="margin-top:8px">Save</button>
   </form>
-  <p class="sub">Currently: <strong>{{ "LOCKED" if writes_locked else "open" }}</strong></p>
 </div>
 
 <h2>Checks</h2>

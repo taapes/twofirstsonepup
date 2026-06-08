@@ -2,6 +2,11 @@
 {% block title %}Keeper Selection{% endblock %}
 {% block content %}
 <h1>Keeper Selection — {{ season }} draft</h1>
+{% if locked %}
+<div class="card" style="padding:12px;border-color:var(--warn)">
+  🔒 Keeper selection is <strong>locked</strong> by the commissioner. Submissions are closed.
+</div>
+{% endif %}
 <p class="sub">Pick up to 5 keepers (6 with a discovery keeper); at most 2 waiver-acquired.
    Players with 0 years left can't be kept.</p>
 <form method="post" action="/keepers" class="card" style="padding:12px;max-width:560px">
