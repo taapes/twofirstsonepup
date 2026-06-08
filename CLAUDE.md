@@ -174,24 +174,42 @@ Write tests for these. They are custom and non-obvious:
   FPL feed): `POST /admin/.../draft/trade-pick|trade-player`; a pick trade
   reassigns the (season, type, round, original-owner) slot's owner. Selections
   recorded live via `.../draft/record-pick`.
-- **Cups:** Cup (top 6) and Pup Cup (bottom 4 + Cup losers), start after GW28,
-  each round spans 2 GWs, admin sets GWs per round. Auto-score 2-week totals.
-  Implemented as auto-generated single-elim brackets seeded from H2H standings
-  through GW28: Cup = top-2 byes (QF 3v6/4v5 -> SF vs seeds 1,2 -> Final); the
-  two Cup QF losers feed the Pup Cup SFs (Pup play-in 7v10/8v9 first). Ties break
-  to the better seed. Run from the **browser** at `GET /admin/cups` (generate +
-  score each round); the JSON `POST /admin/.../cups/generate` + `.../cups/score-round`
-  still exist. See `services.generate_cups` / `score_cup_round`. Cup/Pup winnings flow
-  into payouts only once the final round is scored (`get_payouts` sets `cups_pending`
-  otherwise; the homepage Winnings table shows a "results pending" note).
-- **Payouts:** Config-driven (`rules.PAYOUT_STRUCTURE`), auto-calculated from
-  final standings + cup results. Base pot = entry_fee × managers (25/26 $125;
-  rises 26/27 $150, 27/28 $175, 28/29 $200). Pct of pot: League 1st 40%, 2nd
-  15%, 3rd 5%; Cup 1st 25%, 2nd 10%, 3rd 5%. Pup Cup winner flat $150. Last-place
-  fine ($125) + other fines added to League 1st; last place shown owing it.
-  Cup 3rd place comes from a 3rd-place playoff (the two SF losers, scored in the
-  final's GWs). `GET /v1/.../payouts`, `services.get_payouts`. Weekly entry and
-  team-sale clause are separate pools, not in this calc yet.
+- **Cups:** Cup (top 6) and Pup Cup (bottom 4 + the two Cup R1 losers) start at GW28,
+  each round spans 2 GWs (admin sets GWs per round; **DGW = first game only is a manual
+  admin score override** via `services.override_cup_match`). **Seeded from H2H standings
+  through GW27.** Cup: seeds 1&2 bye → R1 3v6/4v5 → R2 **re-seeds** (seed 1 vs lowest
+  remaining seed, 2 vs highest) → R3 Final **+ 3rd-place playoff** (SF losers). Pup:
+  bottom-4 play-in R1, the two Cup R1 losers join at R2, R3 final. **Tiebreakers:** total
+  goals → assists → clean sheets (team totals over the match, from `gameweek_points.
+  team_*`) → better seed (`rules.match_winner`). Admin at `GET /admin/cups` (generate,
+  score round, per-match override); public read-only at `GET /cups`.
+  `services.generate_cups`/`score_cup_round`. Cup/Pup winnings need the final round
+  scored (`get_payouts` sets `cups_pending` otherwise), with a **historical fallback**:
+  past seasons with no live bracket resolve cup/pup winners from imported
+  `season_history`.
+- **Pupmunity Shield:** prior season's Cup winner vs Pup winner in GW1; $25 each → $50
+  to the winner. `services.set_shield`/`score_shield`/`get_shield`
+  (`prior_season_shield_participants` suggests the two by entry id); admin on `/admin/cups`.
+- **Payouts:** Config-driven (`rules.PAYOUT_STRUCTURE`), auto from final standings +
+  cup results. Base pot = entry_fee × managers (25/26 $125; rises 26/27 $150, 27/28
+  $175, 28/29 $200). Pct of pot: League 1st 40%, 2nd 15%, 3rd 5%; Cup 1st 25%, 2nd 10%,
+  3rd 5%. **Pup Cup winner = $25 × Pup entrants pool** (default 6 → $150). Pupmunity
+  Shield $50 to winner. Last-place fine ($125) + fines added to League 1st. Each
+  manager's `net` = payout − buy-in (overall winnings). `services.get_payouts`. Weekly
+  entry + team-sale clause still separate pools, not in this calc.
+- **Injury / International lists:** IL (same-position replacement, 4-GW min stay) and
+  the **international list** (AFCON/Asia Cup: no min stay, no same-position rule; one
+  replacement per absence; re-add when the nation is eliminated) both preserve keeper
+  eligibility — their gameweeks are folded into the "covered" set in
+  `_derive_keeper_status` so an absence never counts as a drop. Manager self-service on
+  My Team (`/il/*`, `/intl/*`).
+- **Draft (live ops):** boards auto-refresh on all devices (7s poll on `_board.html` /
+  `_discovery_board.html`); a unique slot constraint + `record_pick` guard block
+  concurrent overwrites. Managers keep an **autodraft queue** (`draft_queue`, `+Q` in
+  search); admin "approve queued pick" fills the on-the-clock slot from the absent
+  manager's queue (main + discovery).
+- **Transactions:** weekly add/drops at `GET /transactions`, derived from consecutive
+  roster snapshots (`services.get_transactions`) since the FPL waiver feed isn't public.
 
 ## Testing ahead of the season & data quality
 
