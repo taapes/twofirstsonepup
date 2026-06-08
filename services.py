@@ -353,9 +353,15 @@ def _manager_status(db: Session, league: League, manager: Manager) -> dict:
         gws_on = None
         if cur is not None and entry.start_gw is not None:
             gws_on = max(cur - entry.start_gw + 1, 0)
+        repl = db.get(Player, entry.replacement_id) if entry.replacement_id else None
+        eligible_gw = il_return_eligible_gw(entry.start_gw) if entry.start_gw is not None else None
         il.append({
+            "id": str(entry.id),
             "player": p.name, "position": p.position,
+            "replacement": repl.name if repl else None,
             "start_gw": entry.start_gw, "end_gw": entry.end_gw, "gws_on_il": gws_on,
+            "return_gw": eligible_gw,
+            "can_return": cur is not None and eligible_gw is not None and cur >= eligible_gw,
         })
     return {
         "tanking": {
@@ -668,6 +674,11 @@ def place_on_il(
     db.commit()
     db.refresh(entry)
     return _il_to_dict(entry, injured, replacement)
+
+
+def il_return_eligible_gw(start_gw: int) -> int:
+    """Earliest GW an IL'd player may return (min stay, capped at season end)."""
+    return min(start_gw + MIN_IL_STAY_GWS, SEASON_LAST_GW)
 
 
 def return_from_il(

@@ -15,8 +15,8 @@ from auth import (
     verify_password,
 )
 from db import get_db
-from models import Manager
-from rules import RuleViolation
+from models import InjuryList, Manager
+from rules import RuleViolation, SEASON_LAST_GW
 from settings import LEAGUE_ID
 from templating import templates
 
@@ -363,9 +363,92 @@ def my_team_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     fpl = _resolve_my_fpl(request, db, league)
     team = services.get_my_team(db, league, fpl) if fpl else None
+    cur = services.current_gameweek(db, league)
     return templates.TemplateResponse("my_team.html", {
         "request": request, "league": league, "team": team,
+        # IL self-service controls (only when viewing your own team / admin)
+        "can_edit_il": bool(team) and (is_admin(request) or fpl == current_manager_id(request)),
+        "players": services.list_players(db, league),
+        "current_gw": cur,
+        "season_last_gw": SEASON_LAST_GW,
+        "season_over": cur is not None and cur >= SEASON_LAST_GW,
     })
+
+
+# ---- injury list (manager self-service: place / return / release) ----
+def _il_entry_or_403(db, league, fpl_manager_id: str, il_id: str):
+    """Resolve an IL entry and confirm it belongs to fpl_manager_id (admin bypass)."""
+    manager = services._resolve_manager(db, league, fpl_manager_id)
+    entry = db.get(InjuryList, il_id)
+    if not entry or entry.manager_id != manager.id:
+        return None
+    return entry
+
+
+@router.post("/il/place")
+def il_place(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), injured_fpl_id: str = Form(...),
+    replacement_fpl_id: str = Form(...),
+):
+    league = _league_or_404(db)
+    if not _writes_allowed(request, league):
+        return _locked_response()
+    if not can_act_as(request, fpl_manager_id):
+        return _forbidden(request, "You can only manage your own team's injury list.")
+    try:
+        services.place_on_il(
+            db, league, fpl_manager_id=fpl_manager_id,
+            injured_fpl_id=_safe_int(injured_fpl_id, 1, 10_000_000, field="injured player"),
+            replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
+            start_gw=services.current_gameweek(db, league) or 1,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/my-team", status_code=303)
+
+
+@router.post("/il/return")
+def il_return(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), il_id: str = Form(...),
+):
+    league = _league_or_404(db)
+    if not _writes_allowed(request, league):
+        return _locked_response()
+    if not can_act_as(request, fpl_manager_id):
+        return _forbidden(request, "You can only manage your own team's injury list.")
+    if not _il_entry_or_403(db, league, fpl_manager_id, il_id):
+        return _forbidden(request, "That injury-list entry isn't yours.")
+    try:
+        services.return_from_il(
+            db, league, il_id, services.current_gameweek(db, league) or SEASON_LAST_GW,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/my-team", status_code=303)
+
+
+@router.post("/il/release")
+def il_release(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), il_id: str = Form(...),
+):
+    league = _league_or_404(db)
+    if not _writes_allowed(request, league):
+        return _locked_response()
+    if not can_act_as(request, fpl_manager_id):
+        return _forbidden(request, "You can only manage your own team's injury list.")
+    if not _il_entry_or_403(db, league, fpl_manager_id, il_id):
+        return _forbidden(request, "That injury-list entry isn't yours.")
+    try:
+        services.return_from_il(
+            db, league, il_id, services.current_gameweek(db, league) or SEASON_LAST_GW,
+            via="waiver",
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/my-team", status_code=303)
 
 
 @router.get("/my-team/upcoming", response_class=HTMLResponse)

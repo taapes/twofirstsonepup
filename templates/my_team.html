@@ -26,17 +26,64 @@
     {% endif %}
   </div>
   <div class="card statusbox">
-    <strong>Injury list</strong>
+    <strong>Injury list</strong> <span class="sub">(1 per team; min 4-GW stay)</span>
     {% if team.status.injury_list %}
-    <table style="margin-top:6px">
-      <tbody>
-        {% for il in team.status.injury_list %}
-        <tr><td>{{ il.player }} <span class="sub">{{ il.position }}</span></td>
-          <td class="num sub">since GW{{ il.start_gw }}</td>
-          <td class="num">{% if il.gws_on_il is not none %}{{ il.gws_on_il }} GW{% if il.gws_on_il != 1 %}s{% endif %}{% else %}—{% endif %}</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    {% for il in team.status.injury_list %}
+    <div style="margin-top:6px">
+      <strong>{{ il.player }}</strong> <span class="sub">{{ il.position }}</span>
+      — replaced by {{ il.replacement or "—" }};
+      on IL {{ il.gws_on_il }} GW{% if il.gws_on_il != 1 %}s{% endif %} (since GW{{ il.start_gw }}).
+      {% if il.can_return %}<span class="pill ok">eligible to return</span>{% else %}
+        <span class="sub">can return at GW{{ il.return_gw }}</span>{% endif %}
+      {% if can_edit_il %}
+      <div style="margin-top:6px;display:flex;gap:6px">
+        <form method="post" action="/il/return" style="display:inline">
+          <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
+          <input type="hidden" name="il_id" value="{{ il.id }}">
+          <button type="submit" {% if not il.can_return %}disabled title="min 4-GW stay not met"{% endif %}>Return to roster</button>
+        </form>
+        <form method="post" action="/il/release" style="display:inline"
+              onsubmit="return confirm('Release {{ il.player }}? They are dropped from your squad.')">
+          <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
+          <input type="hidden" name="il_id" value="{{ il.id }}">
+          <button type="submit" {% if not il.can_return %}disabled{% endif %}>Release</button>
+        </form>
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+    {% if season_over and can_edit_il %}
+    <p class="sub" style="color:var(--warn);margin-top:8px">⚠ Season over — add this player
+      back to your roster (Return) or Release them.</p>
+    {% endif %}
+    {% elif can_edit_il %}
+    <p class="sub">No players on the injury list.</p>
+    <details style="margin-top:6px"><summary class="sub">Place a player on the IL</summary>
+      <form method="post" action="/il/place" onsubmit="return ilResolve(this)" style="margin-top:8px">
+        <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
+        <label>Injured player<br>
+          <select name="injured_fpl_id" required style="width:100%">
+            {% for p in team.players %}<option value="{{ p.fpl_id }}">{{ p.name }} · {{ p.position }}</option>{% endfor %}
+          </select></label>
+        <label style="display:block;margin-top:6px">Replacement (same position)<br>
+          <input list="ilPlayers" name="replacement_name" placeholder="search by name" autocomplete="off" style="width:100%" required>
+          <input type="hidden" name="replacement_fpl_id"></label>
+        <button type="submit" style="margin-top:8px">Place on IL</button>
+        <p class="sub">Min 4-GW stay; the replacement must play the same position.</p>
+      </form>
+    </details>
+    <datalist id="ilPlayers">
+      {% for p in players %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.label }}"></option>{% endfor %}
+    </datalist>
+    <script>
+      function ilResolve(form){
+        var name=form.querySelector('[name=replacement_name]').value;
+        var opt=document.querySelector('#ilPlayers option[value="'+name.replace(/"/g,'\\"')+'"]');
+        if(!opt){alert('Pick a replacement from the list.');return false;}
+        form.querySelector('[name=replacement_fpl_id]').value=opt.dataset.fpl;
+        return true;
+      }
+    </script>
     {% else %}<p class="sub">No players on the injury list.</p>{% endif %}
   </div>
 </div>
