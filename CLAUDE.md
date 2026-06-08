@@ -206,8 +206,41 @@ Three layers protect the live data when testing before the draft:
 **Data-quality aids:** idempotent upsert sync; the two-truths boundary (sync never
 overwrites custom data); trade reconciliation (site+FPL dedupe); the standings
 audit log; `GET /admin/health` runs integrity checks (roster sizes, standings
-coverage, unseeded keepers, malformed pick trades). Public writes are
-unauthenticated by design — no per-user accountability yet.
+coverage, unseeded keepers, malformed pick trades).
+
+## Auth & authorization (per-manager identity)
+
+A **hard gate** (`GateMiddleware` in `main.py`) requires a logged-in identity
+before any HTML page renders — first visit redirects to `/who` (a button per
+manager + Admin). Exempt: the `/v1` JSON API, any request with a valid
+`X-Auth-Token` (cron `/admin/sync` + programmatic `/admin/*`), `/static`, and the
+login surface. HTMX logged-out requests get an `HX-Redirect` (full nav, not a swap).
+
+- **Per-manager passwords** live on `managers.password_hash` (stdlib PBKDF2 via
+  `auth.hash_password`/`verify_password` — no extra deps). NULL = first-time set
+  flow at `/login`→`/set-password`. Admin clears it (reset) at
+  `POST /admin/managers/reset-password` (button on `/admin/health`); the manager
+  then sets a new one. Session keys: `session["manager_id"]` (the `fpl_manager_id`)
+  and `session["manager_name"]`; admin keeps `session["admin"]`.
+- **Scoped writes** via `auth.can_act_as(request, *fpl_ids)` (admin bypasses):
+  keepers only for your own team; trades require you as a party; draft picks only
+  when you're on the clock; **draft order is admin-only**. Failures → 403 via
+  `_forbidden`. Forms auto-fill/lock to the logged-in manager; identity is injected
+  into every template by the `_identity` Jinja context processor in `templating.py`
+  (so the nav shows who you are without each route passing it).
+- The commissioner can **remove** a standings adjustment
+  (`services.delete_standing_adjustment`, `POST /admin/standings/delete`).
+- The **editing lock** (`leagues.writes_locked`, toggled at `/admin/health`) still
+  layers on top: when locked, only admin can write picks/trades.
+
+**My Team pages:** `/my-team` (your current squad with rich FPL stats — form, PPG,
+season pts, G/A/CS/bonus/min, ICT, ownership, availability, keeper badges, a
+recent-points sparkline) and `/my-team/upcoming` (next 3 H2H opponents with both
+squads and each player's real-life PL fixture + difficulty). Admin can view any
+manager's via `?fpl=`. Rich player stats come from the classic FPL bootstrap
+(`sync_players`); PL fixtures from the classic fixtures feed (`sync_fixtures` →
+`fixtures` table); `services.current_gameweek` derives the GW from stored dates
+(no live FPL call).
 
 ## Working style
 
