@@ -65,6 +65,23 @@ def resolve_league(db: Session, league_key: str) -> League | None:
     return db.query(League).filter_by(fpl_league_id=str(league_key)).one_or_none()
 
 
+def current_league(db: Session) -> League | None:
+    """The active season's league row. Prefers the `is_current` flag (set by the
+    advance-season rollover, so no env redeploy is needed); falls back to the
+    FPL_DRAFT_LEAGUE_ID env, then to the only league row if there's just one."""
+    from settings import LEAGUE_ID
+
+    lg = db.query(League).filter_by(is_current=True).first()
+    if lg:
+        return lg
+    if LEAGUE_ID:
+        lg = resolve_league(db, LEAGUE_ID)
+        if lg:
+            return lg
+    rows = db.query(League).all()
+    return rows[0] if len(rows) == 1 else None
+
+
 def latest_gameweek(db: Session, league: League) -> Gameweek | None:
     return (
         db.query(Gameweek)

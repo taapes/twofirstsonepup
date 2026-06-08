@@ -21,7 +21,22 @@ def _identity(request: Request) -> dict:
     }
 
 
-templates = Jinja2Templates(directory="templates", context_processors=[_identity])
+def _phase(request: Request) -> dict:
+    """Inject the current league phase + feature flags into every template so the nav
+    can show/hide features by phase. Read-only DB lookup; degrades to None on any
+    error so rendering never breaks."""
+    try:
+        from db import SessionLocal
+        import services
+
+        with SessionLocal() as db:
+            league = services.current_league(db)
+            return {"phase": services.phase_context(db, league) if league else None}
+    except Exception:
+        return {"phase": None}
+
+
+templates = Jinja2Templates(directory="templates", context_processors=[_identity, _phase])
 # Escape HTML by default (defense-in-depth against XSS; explicit so a config change
 # can't silently disable it).
 templates.env.autoescape = True

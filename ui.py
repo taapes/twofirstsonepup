@@ -81,10 +81,17 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
     }
 
 
-def _writes_allowed(request: Request, league) -> bool:
-    """Public writes (picks/trades) allowed unless the commissioner has locked
-    editing; the logged-in commissioner can always write."""
-    return (not league.writes_locked) or is_admin(request)
+def _feature_allowed(
+    request: Request, db: Session, league, flag: str, *, lock_attr: str = "writes_locked"
+) -> bool:
+    """Is a phase-gated feature available for a write? Admin always bypasses; else the
+    manual lock (`writes_locked`/`keepers_locked`) must be off AND the current phase
+    must enable `flag` (see services.phase_context / rules.phase_features)."""
+    if is_admin(request):
+        return True
+    if getattr(league, lock_attr, False):
+        return False
+    return bool(services.phase_context(db, league).get(flag, False))
 
 
 def _locked_response(what="Editing"):
@@ -107,10 +114,6 @@ def _safe_int(value, lo: int, hi: int, *, field: str = "value") -> int:
     if n < lo or n > hi:
         raise RuleViolation(f"{field} must be between {lo} and {hi}")
     return n
-
-
-def _keepers_allowed(request: Request, league) -> bool:
-    return (not league.keepers_locked) or is_admin(request)
 
 
 def _board_response(request, db, league, year, draft_type="main"):
@@ -299,11 +302,14 @@ def keepers_page(request: Request, db: Session = Depends(get_db)):
     managers = (
         db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
     )
+    # keepers are only editable in the offseason phase (and not when manually locked);
+    # admin can always edit.
+    editable = _feature_allowed(request, db, league, "keepers_editable", lock_attr="keepers_locked")
     return templates.TemplateResponse("keepers_select.html", {
         "request": request, "league": league, "is_admin": is_admin(request),
         "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
         "season": (league.season_year or 0) + 1,
-        "locked": league.keepers_locked and not is_admin(request),
+        "locked": not editable,
     })
 
 
@@ -336,7 +342,7 @@ def keepers_submit(
     keeper_fpl_ids: list[int] = Form(default=[]), discovery_fpl_id: str = Form(""),
 ):
     league = _league_or_404(db)
-    if not _keepers_allowed(request, league):
+    if not _feature_allowed(request, db, league, "keepers_editable", lock_attr="keepers_locked"):
         return _locked_response("Keeper selection")
     if not can_act_as(request, fpl_manager_id):
         return _forbidden(request, "You can only set keepers for your own team.")
@@ -392,8 +398,8 @@ def il_place(
     replacement_fpl_id: str = Form(...),
 ):
     league = _league_or_404(db)
-    if not _writes_allowed(request, league):
-        return _locked_response()
+    if not _feature_allowed(request, db, league, "gw_logic_active"):
+        return _locked_response("The injury list")
     if not can_act_as(request, fpl_manager_id):
         return _forbidden(request, "You can only manage your own team's injury list.")
     try:
@@ -414,8 +420,8 @@ def il_return(
     fpl_manager_id: str = Form(...), il_id: str = Form(...),
 ):
     league = _league_or_404(db)
-    if not _writes_allowed(request, league):
-        return _locked_response()
+    if not _feature_allowed(request, db, league, "gw_logic_active"):
+        return _locked_response("The injury list")
     if not can_act_as(request, fpl_manager_id):
         return _forbidden(request, "You can only manage your own team's injury list.")
     if not _il_entry_or_403(db, league, fpl_manager_id, il_id):
@@ -435,8 +441,8 @@ def il_release(
     fpl_manager_id: str = Form(...), il_id: str = Form(...),
 ):
     league = _league_or_404(db)
-    if not _writes_allowed(request, league):
-        return _locked_response()
+    if not _feature_allowed(request, db, league, "gw_logic_active"):
+        return _locked_response("The injury list")
     if not can_act_as(request, fpl_manager_id):
         return _forbidden(request, "You can only manage your own team's injury list.")
     if not _il_entry_or_403(db, league, fpl_manager_id, il_id):
@@ -728,8 +734,8 @@ def trade_submit(
     b_picks: list[str] = Form(default=[]),
 ):
     league = _league_or_404(db)
-    if not _writes_allowed(request, league):
-        return _locked_response()
+    if not _feature_allowed(request, db, league, "trades_allowed"):
+        return _locked_response("Trading")
     if not can_act_as(request, a_manager, b_manager):
         return _forbidden(request, "You must be one of the two managers in the trade.")
     try:
@@ -786,8 +792,8 @@ def draft_pick(
     pick_number: int | None = Form(None), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
-    if not _writes_allowed(request, league):
-        return _locked_response()
+    if not _feature_allowed(request, db, league, "draft_available"):
+        return _locked_response("The draft")
     board = services.get_draft_board(db, league, year)
     slot = (
         services.next_open_pick(board)
@@ -815,8 +821,8 @@ def draft_trade_pick(
     """`pick` is the combined "<original_fpl>:<round>" slot id; the current holder
     (from) is derived from live pick ownership so the form only needs pick + to."""
     league = _league_or_404(db)
-    if not _writes_allowed(request, league):
-        return _locked_response()
+    if not _feature_allowed(request, db, league, "draft_available"):
+        return _locked_response("The draft")
     try:
         original_fpl, round_str = pick.rsplit(":", 1)
         round = int(round_str)
@@ -848,8 +854,8 @@ def draft_trade_player(
     player_fpl_id: int = Form(...), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
-    if not _writes_allowed(request, league):
-        return _locked_response()
+    if not _feature_allowed(request, db, league, "draft_available"):
+        return _locked_response("The draft")
     if not can_act_as(request, from_fpl, to_fpl):
         return _forbidden(request, "You must be one of the two managers in the player trade.")
     try:
