@@ -129,6 +129,32 @@ class Gameweek(Base):
     )
 
 
+class Fixture(Base):
+    """A real-life Premier League match (canonical, from the classic FPL fixtures
+    feed). Lets us show each rostered player's upcoming opponent + difficulty.
+    Teams stored as short names (e.g. 'MCI') to join against players.current_team."""
+
+    __tablename__ = "fixtures"
+    __table_args__ = (
+        UniqueConstraint("league_id", "fpl_fixture_id", name="uq_fixture_league_fplid"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    fpl_fixture_id: Mapped[int] = mapped_column(Integer, index=True)
+    event: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # GW number
+    kickoff_time: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    home_team: Mapped[str | None] = mapped_column(String, nullable=True)
+    away_team: Mapped[str | None] = mapped_column(String, nullable=True)
+    home_difficulty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_difficulty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    finished: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
+
 class Roster(Base):
     __tablename__ = "rosters"
 

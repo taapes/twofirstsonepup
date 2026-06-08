@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from db import SessionLocal
 from models import (
+    Fixture,
     Gameweek,
     GameweekPoints,
     League,
@@ -157,6 +158,66 @@ async def sync_players():
                 "news": c.get("news") or None,
             }
             _upsert(session, Player, match, values)
+
+        log.ok = True
+        log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+        session.commit()
+
+
+# ---------- real-life PL fixtures ----------
+async def sync_fixtures():
+    """Pull the PL fixture list + difficulty from the classic FPL feed so we can
+    show each rostered player's upcoming opponent. Best-effort (same host already
+    used for prices); skips quietly if unreachable. Teams stored as short names."""
+    if not LEAGUE_ID:
+        return
+    with SessionLocal() as session:
+        log = SyncLog(kind="fixtures")
+        session.add(log)
+        session.commit()
+
+        league = (
+            session.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one_or_none()
+        )
+        if not league:
+            log.notes = "league missing, run sync_league_and_managers first"
+            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+            session.commit()
+            return
+
+        async with httpx.AsyncClient() as client:
+            try:
+                classic = await _get_json(
+                    client, "https://fantasy.premierleague.com/api/bootstrap-static/"
+                )
+                fixtures = await _get_json(
+                    client, "https://fantasy.premierleague.com/api/fixtures/"
+                )
+            except Exception as exc:
+                log.notes = f"classic fixtures unreachable: {exc}"
+                log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+                session.commit()
+                return
+
+        team_short = {
+            t["id"]: t.get("short_name") or t.get("name")
+            for t in classic.get("teams", [])
+        }
+        for f in fixtures:
+            _upsert(
+                session,
+                Fixture,
+                {"league_id": league.id, "fpl_fixture_id": f["id"]},
+                {
+                    "event": f.get("event"),
+                    "kickoff_time": _parse_iso(f.get("kickoff_time")),
+                    "home_team": team_short.get(f.get("team_h")),
+                    "away_team": team_short.get(f.get("team_a")),
+                    "home_difficulty": f.get("team_h_difficulty"),
+                    "away_difficulty": f.get("team_a_difficulty"),
+                    "finished": bool(f.get("finished")),
+                },
+            )
 
         log.ok = True
         log.finished_at = datetime.datetime.now(datetime.timezone.utc)
@@ -568,6 +629,7 @@ async def sync_all():
     await sync_players()
     await sync_league_and_managers()  # also standings + matches
     await sync_gameweek_dates()
+    await sync_fixtures()
     await sync_rosters()
     await sync_gameweek_points()
     await sync_trades()

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from models import (
     DraftLottery,
     DraftPick,
+    Fixture,
     Gameweek,
     GameweekPoints,
     InjuryList,
@@ -61,6 +62,54 @@ def latest_gameweek(db: Session, league: League) -> Gameweek | None:
         .order_by(Gameweek.number.desc())
         .first()
     )
+
+
+def current_gameweek(db: Session, league: League) -> int | None:
+    """The GW we're 'on' — derived from stored data only (no live FPL call, per
+    the two-truths boundary): the latest GW whose window has started (start_date <=
+    today), else the latest GW that has points data, else None."""
+    import datetime as _dt
+
+    today = _dt.date.today()
+    started = [
+        g.number
+        for g in db.query(Gameweek).filter_by(league_id=league.id)
+        if g.start_date and g.start_date <= today
+    ]
+    if started:
+        return max(started)
+    gp = (
+        db.query(GameweekPoints, Gameweek)
+        .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+        .all()
+    )
+    return max((gw.number for _p, gw in gp), default=None)
+
+
+def fixtures_for_gws(db: Session, league: League, gw_numbers: list[int]) -> dict:
+    """Real-life PL fixtures for the given GW numbers, indexed for quick lookup by a
+    player's club: {gw: {team_short: [{opp, home, difficulty, kickoff}, ...]}}. A
+    club may have 0 (blank) or 2 (double) fixtures in a GW, hence the list."""
+    out: dict = {gw: {} for gw in gw_numbers}
+    if not gw_numbers:
+        return out
+    rows = (
+        db.query(Fixture)
+        .filter(Fixture.league_id == league.id, Fixture.event.in_(gw_numbers))
+        .all()
+    )
+    for f in rows:
+        kickoff = f.kickoff_time.isoformat() if f.kickoff_time else None
+        if f.home_team:
+            out[f.event].setdefault(f.home_team, []).append(
+                {"opp": f.away_team, "home": True, "difficulty": f.home_difficulty, "kickoff": kickoff}
+            )
+        if f.away_team:
+            out[f.event].setdefault(f.away_team, []).append(
+                {"opp": f.home_team, "home": False, "difficulty": f.away_difficulty, "kickoff": kickoff}
+            )
+    return out
 
 
 def get_standings(db: Session, league: League) -> list[dict]:
