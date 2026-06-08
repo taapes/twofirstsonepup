@@ -101,6 +101,26 @@ def next_phase(
         open_discovery = True
     return new_macro, open_discovery
 
+
+# How long after a PL kickoff we treat a match as "live" (90' + half-time + stoppage
+# + a margin for bonus/stat settling), so we keep refreshing scores while games run.
+LIVE_FIXTURE_WINDOW_HOURS = 2.5
+
+
+def decide_sync(*, full_today: bool, live_fixture: bool, gw_starts_today: bool) -> str:
+    """Pure sync-cadence decision → 'full' | 'live' | 'skip'. The cron fires often;
+    this decides what (if anything) to actually do:
+      - 'full'  : nothing has run today yet, or a GW deadline is today (capture
+                  standings/schedule/lineups) — run the whole pipeline.
+      - 'live'  : a PL match is in its live window now — refresh rosters/points/fixtures.
+      - 'skip'  : today's full sync is done and nothing is live — do nothing.
+    """
+    if not full_today or gw_starts_today:
+        return "full"
+    if live_fixture:
+        return "live"
+    return "skip"
+
 # Anti-tanking (across gameweeks): a manager is flagged when, for >= MIN_WEEKS
 # consecutive gameweeks, each of those gameweeks has >= MIN_ZERO_PLAYERS rostered
 # players (the entire 15-man squad, not just the XI) who recorded 0 real-match

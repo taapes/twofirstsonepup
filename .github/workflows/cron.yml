@@ -1,10 +1,18 @@
-name: Daily & 4h Sync
+name: Sync (phase + fixture aligned)
 
+# The endpoint decides what to actually do (full | live | skip) from the league
+# phase + live PL fixtures, so we can fire often cheaply. See services.sync_plan.
 on:
   schedule:
-    - cron: "0 6 * * *"     # daily 06:00 UTC
-    - cron: "0 */4 * * *"   # every 4 hours
+    - cron: "0 6 * * *"          # daily 06:00 UTC — guarantees one full sync/day
+    - cron: "*/30 11-23 * * *"   # every 30 min, 11:00–23:00 UTC (covers PL kickoffs);
+                                  # endpoint no-ops ('skip') when nothing is live
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Force a full sync"
+        type: boolean
+        default: false
 
 jobs:
   call-sync:
@@ -14,4 +22,4 @@ jobs:
         run: |
           curl -sS -X POST \
             -H "X-Auth-Token: ${{ secrets.SYNC_AUTH_TOKEN }}" \
-            https://twofirstsonepup.onrender.com/admin/sync
+            "https://twofirstsonepup.onrender.com/admin/sync${{ (github.event.inputs.force == 'true') && '?force=1' || '' }}"

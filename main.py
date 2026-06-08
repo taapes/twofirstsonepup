@@ -126,14 +126,29 @@ def home(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/admin/sync", dependencies=[Depends(require_admin)])
-def admin_sync():
-    # Heartbeat: advance the time/GW-driven phase before pulling fresh data.
+def admin_sync(force: bool = False):
+    """Heartbeat: advance the time/GW-driven phase, then sync per the fixture-aligned
+    cadence plan (full | live | skip). `?force=1` always does a full sync (manual)."""
     from db import SessionLocal
+    from sync import sync_fixtures, sync_gameweek_points, sync_rosters
 
     advanced = False
+    plan = "full"
     with SessionLocal() as db:
         league = services.current_league(db)
         if league:
             advanced = services.advance_phase_if_due(db, league)
-    asyncio.run(sync_all())
-    return {"ok": True, "phase_advanced": advanced}
+            plan = "full" if force else services.sync_plan(db, league)
+
+    if plan == "full":
+        asyncio.run(sync_all())
+    elif plan == "live":
+        # only the GW-changing pulls while matches are live
+        async def _live():
+            await sync_rosters()
+            await sync_gameweek_points()
+            await sync_fixtures()
+
+        asyncio.run(_live())
+    # plan == "skip": nothing to do (phase advance already ran)
+    return {"ok": True, "plan": plan, "phase_advanced": advanced}

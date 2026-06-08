@@ -44,8 +44,10 @@ from rules import (
     SEASON_LAST_GW,
     TRADE_DEADLINE_DAY,
     TRADE_DEADLINE_MONTH,
+    LIVE_FIXTURE_WINDOW_HOURS,
     compute_payouts,
     current_tanking_streak,
+    decide_sync,
     next_phase,
     phase_features,
     h2h_standings,
@@ -217,6 +219,47 @@ def close_discovery(db: Session, league: League) -> None:
     league.discovery_open = False
     league.discovery_done = True
     db.commit()
+
+
+def sync_plan(db: Session, league: League, now=None) -> str:
+    """Decide what a sync run should do right now: 'full' | 'live' | 'skip'. Gathers
+    the facts (was there a full sync today? is a PL match live? does a GW start today?)
+    and defers the decision to the pure rules.decide_sync. Lets the cron fire often
+    while only doing real work when it's useful."""
+    import datetime as _dt
+    from models import Fixture, SyncLog
+
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    today = now.date()
+
+    full_today = (
+        db.query(SyncLog)
+        .filter(SyncLog.kind == "league", SyncLog.ok.is_(True))
+        .filter(SyncLog.started_at >= _dt.datetime(today.year, today.month, today.day, tzinfo=_dt.timezone.utc))
+        .first()
+        is not None
+    )
+    window = _dt.timedelta(hours=LIVE_FIXTURE_WINDOW_HOURS)
+    live_fixture = (
+        db.query(Fixture)
+        .filter(
+            Fixture.league_id == league.id,
+            Fixture.kickoff_time.isnot(None),
+            Fixture.kickoff_time <= now,
+            Fixture.kickoff_time >= now - window,
+        )
+        .first()
+        is not None
+    )
+    gw_starts_today = (
+        db.query(Gameweek)
+        .filter(Gameweek.league_id == league.id, Gameweek.start_date == today)
+        .first()
+        is not None
+    )
+    return decide_sync(
+        full_today=full_today, live_fixture=live_fixture, gw_starts_today=gw_starts_today
+    )
 
 
 def advance_season(db: Session, old_league: League, new_league: League) -> dict:
