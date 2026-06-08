@@ -300,6 +300,7 @@ PAYOUT_STRUCTURE = {
     },
     "pup_cup_winner": 150,  # flat fallback if entrant count is unknown
     "pup_entry": 25,        # each Pup entrant pays this; winner takes the pool
+    "shield_entry": 25,     # Pupmunity Shield: each of the 2 teams pays this -> winner
 }
 
 # ---- Keepers ----
@@ -427,6 +428,7 @@ def compute_payouts(
     other_fines: float = 0.0,
     fines: dict | None = None,
     pup_pool: float | None = None,
+    extra: dict | None = None,
 ) -> dict:
     """Compute each manager's payout. `recipients` maps slot -> manager key
     (league_1/2/3, cup_1/2/3, pup_cup, last_place); missing/None slots are
@@ -454,6 +456,10 @@ def compute_payouts(
     for mgr_key, amount in fines.items():
         if amount:
             items.append((mgr_key, "Fine(s)", -float(amount)))
+    # arbitrary side-pot lines (e.g. the Pupmunity Shield): {manager: [(label, amount)]}
+    for mgr_key, lines in (extra or {}).items():
+        for label, amount in lines:
+            items.append((mgr_key, label, float(amount)))
 
     out: dict = {}
     for manager, label, amount in items:

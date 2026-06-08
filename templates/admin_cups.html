@@ -32,6 +32,32 @@
   </div>
 </div>
 
+<h2>Pupmunity Shield</h2>
+<div class="card" style="padding:12px;max-width:560px">
+  <p class="sub">Last season's Cup winner vs Pup winner, played in GW1. $25 each → $50 to the winner.</p>
+  {% if shield %}
+  <p><strong>{{ shield.cup_winner }}</strong> v <strong>{{ shield.pup_winner }}</strong>
+    {% if shield.score_a is not none %}— {{ shield.score_a }}–{{ shield.score_b }}{% endif %}
+    {% if shield.winner %}<span class="pill">winner: {{ shield.winner }}</span>{% endif %}</p>
+  <form method="post" action="/admin/shield/score" style="display:flex;gap:6px;align-items:center">
+    <label>Score from GW <input name="gw" type="number" min="1" max="38" value="1" style="width:64px"></label>
+    <button type="submit">Score Shield</button>
+  </form>
+  {% endif %}
+  <form method="post" action="/admin/shield/set" style="margin-top:8px">
+    <label>Cup winner
+      <select name="cup_winner_fpl">
+        {% for m in managers %}<option value="{{ m.fpl }}" {% if m.fpl == suggest_cup %}selected{% endif %}>{{ m.name }}</option>{% endfor %}
+      </select></label>
+    <label style="margin-left:6px">Pup winner
+      <select name="pup_winner_fpl">
+        {% for m in managers %}<option value="{{ m.fpl }}" {% if m.fpl == suggest_pup %}selected{% endif %}>{{ m.name }}</option>{% endfor %}
+      </select></label>
+    <button type="submit" style="margin-left:6px">{{ "Reset" if shield else "Create" }} Shield</button>
+    <p class="sub">Defaults to last season's winners when known.</p>
+  </form>
+</div>
+
 <h2>Brackets</h2>
 {% for cup in cups %}
 <div class="card" style="margin-bottom:12px">

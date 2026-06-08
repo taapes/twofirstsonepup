@@ -26,4 +26,14 @@
 {% else %}
 <div class="empty">Cups haven't been set up yet.</div>
 {% endfor %}
+
+{% if shield %}
+<h2>Pupmunity Shield</h2>
+<div class="card">
+  <p>{{ shield.cup_winner }}{% if shield.winner == shield.cup_winner %} ✓{% endif %}
+    v {{ shield.pup_winner }}{% if shield.winner == shield.pup_winner %} ✓{% endif %}
+    {% if shield.score_a is not none %}<span class="num">— {{ shield.score_a }}–{{ shield.score_b }}</span>{% endif %}</p>
+  <p class="sub">Last season's Cup winner vs Pup winner (GW1).</p>
+</div>
+{% endif %}
 {% endblock %}

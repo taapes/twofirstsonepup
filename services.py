@@ -1283,6 +1283,126 @@ def override_cup_match(db: Session, league: League, match_id: str, score_a: int,
     return {"match": match_id, "score_a": score_a, "score_b": score_b}
 
 
+SHIELD_NAME = "Pupmunity Shield"
+
+
+def prior_season_shield_participants(db: Session, league: League):
+    """Suggested Shield participants: the PRIOR season's Cup + Pup winners, mapped to
+    THIS league's managers by stable FPL entry id. Returns (cup_fpl, pup_fpl), either
+    may be None. Reads the prior season's live tournaments, else its season_history."""
+    prior = (
+        db.query(League)
+        .filter(League.season_year == (league.season_year or 0) - 1)
+        .order_by(League.season_year.desc())
+        .first()
+    )
+    if not prior:
+        return None, None
+    cup_id, pup_id = None, None
+    cup = _get_tournament(db, prior, "Cup")
+    if cup:
+        final, _ = _cup_final_and_third(db, cup)
+        cup_id = final.winner_id if final else None
+    pup = _get_tournament(db, prior, "Pup Cup")
+    if pup:
+        pf = _round_matches(db, pup, 3)
+        pup_id = pf[0].winner_id if pf and pf[0].winner_id else None
+    if cup_id is None or pup_id is None:
+        h_cup, h_pup = _historical_cup_winners(db, prior)
+        cup_id = cup_id or h_cup
+        pup_id = pup_id or h_pup
+    # map the prior-season manager ids -> this season's managers by entry id
+    def to_current(prior_mid):
+        if not prior_mid:
+            return None
+        pm = db.get(Manager, prior_mid)
+        if not pm:
+            return None
+        cur = db.query(Manager).filter_by(
+            league_id=league.id, fpl_manager_id=pm.fpl_manager_id
+        ).one_or_none()
+        return cur.fpl_manager_id if cur else None
+    return to_current(cup_id), to_current(pup_id)
+
+
+def set_shield(db: Session, league: League, *, cup_winner_fpl: str, pup_winner_fpl: str) -> dict:
+    """Create/replace the Pupmunity Shield: last season's Cup winner vs Pup winner,
+    played in GW1. One match; scored later via score_shield."""
+    a = _resolve_manager(db, league, cup_winner_fpl)
+    b = _resolve_manager(db, league, pup_winner_fpl)
+    if a.id == b.id:
+        raise RuleViolation("the two Shield teams must be different")
+    existing = _get_tournament(db, league, SHIELD_NAME)
+    if existing:
+        db.query(TournamentMatch).filter_by(tournament_id=existing.id).delete()
+        db.delete(existing)
+        db.flush()
+    shield = Tournament(name=SHIELD_NAME, league_id=league.id, start_gw=1, end_gw=1)
+    db.add(shield)
+    db.flush()
+    db.add(TournamentMatch(tournament_id=shield.id, round=1, manager_a=a.id, manager_b=b.id))
+    db.commit()
+    return {"cup_winner": a.display, "pup_winner": b.display}
+
+
+def score_shield(db: Session, league: League, gw: int = 1) -> dict:
+    """Score the Shield from a single gameweek's totals; set the winner."""
+    shield = _get_tournament(db, league, SHIELD_NAME)
+    if not shield:
+        raise RuleViolation("Shield not set up yet")
+    matches = _round_matches(db, shield, 1)
+    if not matches:
+        raise RuleViolation("Shield has no match")
+    m = matches[0]
+    m.score_a = _two_gw_total(db, league, m.manager_a, [gw])
+    m.score_b = _two_gw_total(db, league, m.manager_b, [gw])
+    side = match_winner(
+        m.score_a, m.score_b, 1, 2,
+        _two_gw_tiebreak(db, league, m.manager_a, [gw]),
+        _two_gw_tiebreak(db, league, m.manager_b, [gw]),
+    )
+    m.winner_id = m.manager_a if side == "a" else m.manager_b
+    db.commit()
+    return {"winner": db.get(Manager, m.winner_id).display}
+
+
+def get_shield(db: Session, league: League) -> dict | None:
+    """The Shield match for display (participants, score, winner) or None."""
+    shield = _get_tournament(db, league, SHIELD_NAME)
+    if not shield:
+        return None
+    matches = _round_matches(db, shield, 1)
+    if not matches:
+        return None
+    m = matches[0]
+    names = {mm.id: mm.display for mm in db.query(Manager).filter_by(league_id=league.id)}
+    return {
+        "id": str(m.id),
+        "cup_winner": names.get(m.manager_a), "pup_winner": names.get(m.manager_b),
+        "score_a": m.score_a, "score_b": m.score_b,
+        "winner": names.get(m.winner_id) if m.winner_id else None,
+    }
+
+
+def _shield_lines(db: Session, league: League) -> dict:
+    """Pupmunity Shield payout lines: each of the 2 teams pays the entry; the winner
+    collects both entries. {manager_id: [(label, amount)]}."""
+    shield = _get_tournament(db, league, SHIELD_NAME)
+    if not shield:
+        return {}
+    matches = _round_matches(db, shield, 1)
+    if not matches:
+        return {}
+    m = matches[0]
+    entry = PAYOUT_STRUCTURE["shield_entry"]
+    extra: dict = {}
+    for mid in (m.manager_a, m.manager_b):
+        extra.setdefault(mid, []).append(("Pupmunity Shield entry", -float(entry)))
+    if m.winner_id:
+        extra.setdefault(m.winner_id, []).append(("Pupmunity Shield", float(entry) * 2))
+    return extra
+
+
 def _cup_final_and_third(db: Session, cup: Tournament):
     """Identify the Cup's final vs 3rd-place match: the final is between the two
     semifinal winners; the other round-3 match is the 3rd-place playoff."""
@@ -1413,7 +1533,8 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
     # 6-team field (bottom 4 + 2 Cup losers) when the entrant count is unknown.
     pup_pool = PAYOUT_STRUCTURE["pup_entry"] * (pup_entrants or 6)
     raw = compute_payouts(
-        recipients, num_managers, other_fines=other_fines, fines=fines, pup_pool=pup_pool
+        recipients, num_managers, other_fines=other_fines, fines=fines, pup_pool=pup_pool,
+        extra=_shield_lines(db, league),
     )
     all_mgrs = db.query(Manager).filter_by(league_id=league.id).all()
     names = {m.id: m.display for m in all_mgrs}

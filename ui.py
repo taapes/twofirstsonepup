@@ -750,10 +750,42 @@ def admin_cups(request: Request, db: Session = Depends(get_db)):
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/cups", status_code=303)
     league = _league_or_404(db)
+    managers = db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
+    sug_cup, sug_pup = services.prior_season_shield_participants(db, league)
     return templates.TemplateResponse("admin_cups.html", {
         "request": request, "league": league, "is_admin": True,
         "cups": services.get_cups(db, league),
+        "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
+        "shield": services.get_shield(db, league),
+        "suggest_cup": sug_cup, "suggest_pup": sug_pup,
     })
+
+
+@router.post("/admin/shield/set")
+def admin_shield_set(
+    request: Request, db: Session = Depends(get_db),
+    cup_winner_fpl: str = Form(...), pup_winner_fpl: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/cups", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.set_shield(db, league, cup_winner_fpl=cup_winner_fpl, pup_winner_fpl=pup_winner_fpl)
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/cups", status_code=303)
+
+
+@router.post("/admin/shield/score")
+def admin_shield_score(request: Request, db: Session = Depends(get_db), gw: str = Form("1")):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/cups", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.score_shield(db, league, _safe_int(gw, 1, 38, field="gameweek"))
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/cups", status_code=303)
 
 
 @router.post("/admin/cups/generate")
@@ -814,6 +846,7 @@ def cups_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     return templates.TemplateResponse("cups.html", {
         "request": request, "league": league, "cups": services.get_cups(db, league),
+        "shield": services.get_shield(db, league),
     })
 
 
