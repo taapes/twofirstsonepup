@@ -58,17 +58,23 @@
       ⚠ {{ app_env|upper }} ENVIRONMENT — not the live league site.
     </div>
     {% endif %}
+    {% if not hide_nav %}
     <nav class="nav">
       <a href="/">Home</a>
-      {% if league %}<a href="/teams">Teams</a>
+      {% if league %}{% if current_fpl %}<a href="/my-team">My Team</a>
+      <a href="/my-team/upcoming">Upcoming</a>{% endif %}
+      <a href="/teams">Teams</a>
       <a href="/trades">Trades</a>
       <a href="/history">History</a>
       <a href="/picks">Picks</a>
       <a href="/keepers">Keepers</a>
       <a href="/draft/{{ league.season_year + 1 }}">Draft {{ league.season_year + 1 }}</a>{% endif %}
       <span class="spacer"></span>
-      {% if is_admin %}<a href="/admin/standings">Adjust</a> <a href="/admin/health">Health</a> <a href="/admin/logout">Log out</a>{% else %}<a href="/admin/login?next={{ request.url.path }}">Commissioner login</a>{% endif %}
+      {% if current_name %}<span class="tag">{{ current_name }}</span> {% endif %}
+      {% if is_admin %}<span class="tag">admin</span> <a href="/admin/standings">Adjust</a> <a href="/admin/health">Health</a> {% endif %}
+      {% if is_admin or current_fpl %}<a href="/logout">Log out</a>{% else %}<a href="/admin/login?next={{ request.url.path }}">Commissioner login</a>{% endif %}
     </nav>
+    {% endif %}
     {% block content %}{% endblock %}
   </div>
   <script>

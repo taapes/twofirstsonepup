@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Sign in — {{ manager.name }}{% endblock %}
+{% block content %}
+<div style="max-width:380px;margin:8vh auto 0">
+  <p class="sub"><a href="/who">← who are you?</a></p>
+  <h1>{{ manager.name }}</h1>
+  {% if error %}<p class="sub" style="color:var(--warn)">{{ error }}</p>{% endif %}
+  {% if first_time %}
+  <p class="sub">First time in — set a password for your team.</p>
+  <form method="post" action="/set-password" class="card" style="padding:16px">
+    <input type="hidden" name="manager_id" value="{{ manager.fpl }}">
+    <input type="password" name="password" placeholder="New password (min 6)" autofocus
+           style="width:100%;margin-bottom:8px">
+    <input type="password" name="confirm" placeholder="Confirm password"
+           style="width:100%;margin-bottom:10px">
+    <button type="submit">Set password &amp; sign in</button>
+  </form>
+  {% else %}
+  <form method="post" action="/login" class="card" style="padding:16px">
+    <input type="hidden" name="manager_id" value="{{ manager.fpl }}">
+    <input type="password" name="password" placeholder="Password" autofocus
+           style="width:100%;margin-bottom:10px">
+    <button type="submit">Sign in</button>
+  </form>
+  <p class="sub">Forgot it? Ask the commissioner to reset your password.</p>
+  {% endif %}
+</div>
+{% endblock %}

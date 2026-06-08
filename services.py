@@ -134,12 +134,35 @@ def get_standing_adjustments(db: Session, league: League) -> list[dict]:
     )
     return [
         {
+            "id": str(a.id),
             "manager": names.get(a.manager_id), "total_delta": a.total_delta,
             "points_for_delta": a.points_for_delta, "gameweek": a.gameweek,
             "note": a.note, "when": a.created_at.isoformat() if a.created_at else None,
         }
         for a in rows
     ]
+
+
+def reset_manager_password(db: Session, league: League, fpl_manager_id: str) -> None:
+    """Clear a manager's UI password so they set a new one on next login."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    manager.password_hash = None
+    db.commit()
+
+
+def delete_standing_adjustment(db: Session, league: League, adjustment_id: str) -> None:
+    """Remove a standings adjustment (commissioner only). Reversible by re-adding."""
+    from models import StandingAdjustment
+
+    row = (
+        db.query(StandingAdjustment)
+        .filter_by(league_id=league.id, id=adjustment_id)
+        .one_or_none()
+    )
+    if not row:
+        raise RuleViolation("adjustment not found")
+    db.delete(row)
+    db.commit()
 
 
 def get_rosters(db: Session, league: League) -> list[dict]:

@@ -16,6 +16,25 @@
   </form>
 </div>
 
+<h2>Manager Passwords</h2>
+<div class="card" style="padding:12px;max-width:480px">
+  <p class="sub">Reset clears a manager's password; they set a new one on next login.
+     "no password" = they haven't set one yet.</p>
+  <table>
+    <tbody>
+      {% for m in managers %}
+      <tr><td>{{ m.name }}</td>
+        <td class="sub">{{ "set" if m.has_password else "no password" }}</td>
+        <td><form method="post" action="/admin/managers/reset-password" style="display:inline"
+                  onsubmit="return confirm('Reset {{ m.name }}\'s password?')">
+          <input type="hidden" name="fpl_manager_id" value="{{ m.fpl }}">
+          <button type="submit" {% if not m.has_password %}disabled{% endif %}>Reset</button>
+        </form></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
 <h2>Checks</h2>
 <div class="card">
   <table>

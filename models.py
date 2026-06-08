@@ -74,6 +74,9 @@ class Manager(Base):
     # sync never overwrites it. The stable identity for historical/manager views.
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     email: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Per-manager UI login password (league-custom). NULL = not set yet -> the
+    # manager sets one on first login; an admin reset clears it back to NULL.
+    password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
 
     @property
     def display(self) -> str:

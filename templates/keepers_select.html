@@ -10,6 +10,7 @@
 <p class="sub">Pick up to 5 keepers (6 with a discovery keeper); at most 2 waiver-acquired.
    Players with 0 years left can't be kept.</p>
 <form method="post" action="/keepers" class="card" style="padding:12px;max-width:560px">
+  {% if is_admin %}
   <label>Manager
     <select name="fpl_manager_id" required style="width:100%"
             hx-get="/keepers/candidates" hx-target="#cands" hx-trigger="change">
@@ -18,5 +19,14 @@
     </select>
   </label>
   <div id="cands" style="margin-top:10px"><p class="sub">Select a manager.</p></div>
+  {% else %}
+  <input type="hidden" name="fpl_manager_id" value="{{ current_fpl }}">
+  <p class="sub">Keepers for <strong>{{ current_name }}</strong></p>
+  <div id="cands" style="margin-top:10px"
+       hx-get="/keepers/candidates?fpl_manager_id={{ current_fpl }}"
+       hx-target="#cands" hx-trigger="load">
+    <p class="sub">Loading your squad…</p>
+  </div>
+  {% endif %}
 </form>
 {% endblock %}

@@ -42,14 +42,18 @@
 <div class="card">
   {% if adjustments %}
   <table>
-    <thead><tr><th>When</th><th>Manager</th><th class="num">H2H Δ</th><th class="num">Total Δ</th><th class="num">GW</th><th>Note</th></tr></thead>
+    <thead><tr><th>When</th><th>Manager</th><th class="num">H2H Δ</th><th class="num">Total Δ</th><th class="num">GW</th><th>Note</th><th></th></tr></thead>
     <tbody>
       {% for a in adjustments %}
       <tr><td class="sub">{{ a.when[:16] }}</td><td>{{ a.manager }}</td>
         <td class="num">{{ "%+d"|format(a.total_delta) if a.total_delta else "—" }}</td>
         <td class="num">{{ "%+d"|format(a.points_for_delta) if a.points_for_delta else "—" }}</td>
         <td class="num">{{ a.gameweek if a.gameweek else "—" }}</td>
-        <td class="sub">{{ a.note or "" }}</td></tr>
+        <td class="sub">{{ a.note or "" }}</td>
+        <td><form method="post" action="/admin/standings/delete" style="display:inline"
+                  onsubmit="return confirm('Remove this adjustment?')">
+          <input type="hidden" name="adjustment_id" value="{{ a.id }}">
+          <button type="submit" title="remove">✕</button></form></td></tr>
       {% endfor %}
     </tbody>
   </table>

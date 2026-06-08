@@ -6,7 +6,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 import services
-from auth import check_admin_password, is_admin
+from auth import (
+    can_act_as,
+    check_admin_password,
+    current_manager_id,
+    hash_password,
+    is_admin,
+    verify_password,
+)
 from db import get_db
 from models import Manager
 from rules import RuleViolation
@@ -57,13 +64,15 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
         for r in sorted(picks_by_round)
     ]
 
+    on_clock = services.next_open_pick(board)
     return {
         "request": request,
         "league": league,
         "year": year,
         "draft_type": draft_type,
         "board": board,
-        "on_clock": services.next_open_pick(board),
+        "on_clock": on_clock,
+        "can_pick": bool(on_clock) and can_act_as(request, on_clock.get("owner_fpl")),
         "managers": mgr_opts,
         "r1_order": r1_order,
         "pick_rounds": pick_rounds,
@@ -93,6 +102,124 @@ def _board_response(request, db, league, year, draft_type="main"):
     return resp
 
 
+# ---- identity / per-manager auth ----
+def _current_manager(request: Request, db: Session, league) -> Manager | None:
+    """The logged-in manager row (None for admin-only or anonymous)."""
+    fpl = current_manager_id(request)
+    if not fpl:
+        return None
+    return (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl))
+        .one_or_none()
+    )
+
+
+def _identity_ctx(request: Request, db: Session, league) -> dict:
+    """Identity bits shared by every rendered template (DRY)."""
+    me = _current_manager(request, db, league)
+    return {
+        "is_admin": is_admin(request),
+        "current_fpl": me.fpl_manager_id if me else None,
+        "current_name": me.display if me else None,
+    }
+
+
+def _forbidden(request: Request, what: str = "You can only edit your own team."):
+    return HTMLResponse(what, status_code=403)
+
+
+# ---- "who are you?" gate + per-manager login ----
+@router.get("/who", response_class=HTMLResponse)
+def who(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    managers = (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
+    )
+    return templates.TemplateResponse("who.html", {
+        "request": request, "league": league, "is_admin": is_admin(request), "hide_nav": True,
+        "managers": [
+            {"name": m.display, "fpl": m.fpl_manager_id, "needs_password": m.password_hash is None}
+            for m in managers
+        ],
+    })
+
+
+@router.get("/login", response_class=HTMLResponse)
+def manager_login_form(manager_id: str, request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    m = (
+        db.query(Manager).filter_by(league_id=league.id, fpl_manager_id=str(manager_id)).one_or_none()
+    )
+    if not m:
+        raise HTTPException(status_code=404, detail="manager not found")
+    return templates.TemplateResponse("manager_login.html", {
+        "request": request, "is_admin": is_admin(request), "hide_nav": True,
+        "manager": {"name": m.display, "fpl": m.fpl_manager_id},
+        "first_time": m.password_hash is None, "error": None,
+    })
+
+
+@router.post("/login")
+def manager_login(
+    request: Request, db: Session = Depends(get_db),
+    manager_id: str = Form(...), password: str = Form(...),
+):
+    league = _league_or_404(db)
+    m = (
+        db.query(Manager).filter_by(league_id=league.id, fpl_manager_id=str(manager_id)).one_or_none()
+    )
+    if not m:
+        raise HTTPException(status_code=404, detail="manager not found")
+    if m.password_hash is None:
+        return RedirectResponse(f"/login?manager_id={manager_id}", status_code=303)
+    if not verify_password(password, m.password_hash):
+        return templates.TemplateResponse("manager_login.html", {
+            "request": request, "is_admin": False, "hide_nav": True,
+            "manager": {"name": m.display, "fpl": m.fpl_manager_id},
+            "first_time": False, "error": "Incorrect password",
+        }, status_code=401)
+    request.session.clear()
+    request.session["manager_id"] = m.fpl_manager_id
+    request.session["manager_name"] = m.display
+    return RedirectResponse("/", status_code=303)
+
+
+@router.post("/set-password")
+def set_password(
+    request: Request, db: Session = Depends(get_db),
+    manager_id: str = Form(...), password: str = Form(...), confirm: str = Form(...),
+):
+    league = _league_or_404(db)
+    m = (
+        db.query(Manager).filter_by(league_id=league.id, fpl_manager_id=str(manager_id)).one_or_none()
+    )
+    if not m:
+        raise HTTPException(status_code=404, detail="manager not found")
+    # Only settable when no password exists yet (an admin reset clears it). Prevents takeover.
+    if m.password_hash is not None:
+        return RedirectResponse(f"/login?manager_id={manager_id}", status_code=303)
+    if password != confirm or len(password) < 6:
+        return templates.TemplateResponse("manager_login.html", {
+            "request": request, "is_admin": False, "hide_nav": True,
+            "manager": {"name": m.display, "fpl": m.fpl_manager_id},
+            "first_time": True,
+            "error": "Passwords must match and be at least 6 characters.",
+        }, status_code=400)
+    m.password_hash = hash_password(password)
+    db.commit()
+    request.session.clear()
+    request.session["manager_id"] = m.fpl_manager_id
+    request.session["manager_name"] = m.display
+    return RedirectResponse("/", status_code=303)
+
+
+@router.get("/logout")
+def logout_any(request: Request):
+    request.session.clear()
+    return RedirectResponse("/who", status_code=303)
+
+
 # ---- commissioner login ----
 @router.get("/admin/login", response_class=HTMLResponse)
 def login_form(request: Request, next: str = "/"):
@@ -116,7 +243,7 @@ def login(request: Request, password: str = Form(...), next: str = Form("/")):
 @router.get("/admin/logout")
 def logout(request: Request):
     request.session.clear()
-    return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/who", status_code=303)
 
 
 # ---- public league views ----
@@ -193,6 +320,8 @@ def keepers_submit(
     league = _league_or_404(db)
     if not _keepers_allowed(request, league):
         return _locked_response("Keeper selection")
+    if not can_act_as(request, fpl_manager_id):
+        return _forbidden(request, "You can only set keepers for your own team.")
     try:
         services.submit_keepers(
             db, league, fpl_manager_id=fpl_manager_id, keeper_fpl_ids=keeper_fpl_ids,
@@ -219,11 +348,18 @@ def admin_health(request: Request, db: Session = Depends(get_db)):
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
     league = _league_or_404(db)
+    managers = (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
+    )
     return templates.TemplateResponse("admin_health.html", {
         "request": request, "league": league, "is_admin": True,
         "checks": services.data_health(db, league),
         "writes_locked": league.writes_locked,
         "keepers_locked": league.keepers_locked,
+        "managers": [
+            {"name": m.display, "fpl": m.fpl_manager_id, "has_password": m.password_hash is not None}
+            for m in managers
+        ],
     })
 
 
@@ -279,6 +415,31 @@ def admin_standings_adjust(
     return RedirectResponse("/admin/standings", status_code=303)
 
 
+@router.post("/admin/standings/delete")
+def admin_standings_delete(
+    request: Request, db: Session = Depends(get_db), adjustment_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/standings", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.delete_standing_adjustment(db, league, adjustment_id)
+    except RuleViolation as e:
+        return HTMLResponse(f"error: {e}", status_code=400)
+    return RedirectResponse("/admin/standings", status_code=303)
+
+
+@router.post("/admin/managers/reset-password")
+def admin_reset_password(
+    request: Request, db: Session = Depends(get_db), fpl_manager_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    services.reset_manager_password(db, league, fpl_manager_id)
+    return RedirectResponse("/admin/health", status_code=303)
+
+
 @router.get("/history", response_class=HTMLResponse)
 def history_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
@@ -327,6 +488,8 @@ def trade_submit(
     league = _league_or_404(db)
     if not _writes_allowed(request, league):
         return _locked_response()
+    if not can_act_as(request, a_manager, b_manager):
+        return _forbidden(request, "You must be one of the two managers in the trade.")
     try:
         services.record_trade(
             db, league, a_fpl=a_manager, b_fpl=b_manager,
@@ -367,8 +530,11 @@ def draft_search(
             db, league, q=q.strip() or None, position=position or None,
             sort=sort or None, available_year=year, include_taken=True, limit=50,
         )
+    on_clock = services.next_open_pick(services.get_draft_board(db, league, year))
+    can_pick = bool(on_clock) and can_act_as(request, on_clock.get("owner_fpl"))
     return templates.TemplateResponse(
-        "_search_results.html", {"request": request, "results": results, "year": year, "is_admin": is_admin(request)}
+        "_search_results.html", {"request": request, "results": results, "year": year,
+                                 "is_admin": is_admin(request), "can_pick": can_pick}
     )
 
 
@@ -387,6 +553,8 @@ def draft_pick(
         else next((b for b in board if b["pick"] == pick_number), None)
     )
     if slot and slot.get("owner_fpl"):
+        if not can_act_as(request, slot["owner_fpl"]):
+            return _forbidden(request, "It's not your pick to make.")
         try:
             services.record_pick(
                 db, league, season_year=year, pick_number=slot["pick"],
@@ -420,6 +588,8 @@ def draft_trade_pick(
         None,
     )
     from_fpl = cur["owner_fpl"] if cur else original_fpl
+    if not can_act_as(request, from_fpl, to_fpl):
+        return _forbidden(request, "You must be one of the two managers in the pick trade.")
     try:
         services.trade_pick(
             db, league, from_fpl=from_fpl, to_fpl=to_fpl, original_fpl=original_fpl,
@@ -438,6 +608,8 @@ def draft_trade_player(
     league = _league_or_404(db)
     if not _writes_allowed(request, league):
         return _locked_response()
+    if not can_act_as(request, from_fpl, to_fpl):
+        return _forbidden(request, "You must be one of the two managers in the player trade.")
     try:
         services.trade_player(db, league, from_fpl=from_fpl, to_fpl=to_fpl, player_fpl_id=player_fpl_id)
     except RuleViolation as e:
@@ -449,8 +621,8 @@ def draft_trade_player(
 def draft_set_order(year: int, request: Request, order: str = Form(...), db: Session = Depends(get_db)):
     """`order` is a comma-separated list of fpl_manager_ids in round-1 pick order."""
     league = _league_or_404(db)
-    if not _writes_allowed(request, league):
-        return _locked_response()
+    if not is_admin(request):
+        return _forbidden(request, "Only the commissioner can set the draft order.")
     ids = [s.strip() for s in order.split(",") if s.strip()]
     try:
         services.set_draft_order(db, league, ids)

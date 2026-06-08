@@ -6,6 +6,7 @@
 <form method="post" action="/trade">
   <div class="grid2">
     <div class="card" style="padding:12px">
+      {% if is_admin %}
       <label>Manager A
         <select name="a_manager" required style="width:100%"
                 hx-get="/trade/assets/a" hx-target="#assets-a" hx-trigger="change">
@@ -14,6 +15,15 @@
         </select>
       </label>
       <div id="assets-a" style="margin-top:10px"><p class="sub">Select a manager.</p></div>
+      {% else %}
+      <input type="hidden" name="a_manager" value="{{ current_fpl }}">
+      <label>Manager A <strong>{{ current_name }}</strong> (you)</label>
+      <div id="assets-a" style="margin-top:10px"
+           hx-get="/trade/assets/a?a_manager={{ current_fpl }}"
+           hx-target="#assets-a" hx-trigger="load">
+        <p class="sub">Loading your assets…</p>
+      </div>
+      {% endif %}
     </div>
     <div class="card" style="padding:12px">
       <label>Manager B

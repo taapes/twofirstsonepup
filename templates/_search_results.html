@@ -12,7 +12,7 @@
         <td class="num">
           {% if r.taken %}
           <span class="pill warn" title="{{ r.taken_by }}">{{ r.taken_by }}</span>
-          {% else %}
+          {% elif can_pick %}
           <button hx-post="/draft/{{ year }}/pick" hx-vals='{"player_fpl_id": {{ r.fpl_id }}}'
                   hx-target="#board" hx-swap="outerHTML">Draft</button>
           {% endif %}
