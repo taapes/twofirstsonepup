@@ -461,6 +461,30 @@ class SeasonHistory(Base):
     pup_winner: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class HistoricalStanding(Base):
+    """Per-season final standings imported from the sheet. Team/stats may be
+    absent for older seasons (manager-only rows). Manager stored as person text."""
+
+    __tablename__ = "historical_standings"
+    __table_args__ = (
+        UniqueConstraint("league_id", "year", "rank", name="uq_hist_standing_year_rank"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    year: Mapped[str] = mapped_column(String, index=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    team_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    manager_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    wins: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    draws: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    losses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    points_for: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    h2h_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class ManagerHonors(Base):
     """Career title/cup tally per person, imported from the sheet. Manually
     maintained there (predates the per-season rows we have), so stored as-is."""

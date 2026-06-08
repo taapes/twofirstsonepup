@@ -932,8 +932,8 @@ def next_open_pick(board: list[dict]) -> dict | None:
 
 # ---- league history / honor roll ----
 def get_history(db: Session, league: League) -> dict:
-    """Season-by-season winners + career title/cup honor roll (imported)."""
-    from models import ManagerHonors, SeasonHistory
+    """Season-by-season winners + career honor roll + per-season standings."""
+    from models import HistoricalStanding, ManagerHonors, SeasonHistory
 
     seasons = (
         db.query(SeasonHistory)
@@ -947,6 +947,17 @@ def get_history(db: Session, league: League) -> dict:
         .order_by(ManagerHonors.titles.desc(), ManagerHonors.cups.desc(), ManagerHonors.manager_name)
         .all()
     )
+    standings_by_season: dict = {}
+    for s in (
+        db.query(HistoricalStanding)
+        .filter_by(league_id=league.id)
+        .order_by(HistoricalStanding.year.desc(), HistoricalStanding.rank)
+        .all()
+    ):
+        standings_by_season.setdefault(s.year, []).append(
+            {"rank": s.rank, "team": s.team_name, "manager": s.manager_name,
+             "w": s.wins, "d": s.draws, "l": s.losses, "pf": s.points_for, "h2h": s.h2h_points}
+        )
     return {
         "seasons": [
             {"year": s.year, "league": s.league_winner, "cup": s.cup_winner, "pup": s.pup_winner}
@@ -954,5 +965,8 @@ def get_history(db: Session, league: League) -> dict:
         ],
         "honors": [
             {"manager": h.manager_name, "titles": h.titles, "cups": h.cups} for h in honors
+        ],
+        "standings_by_season": [
+            {"year": y, "rows": rows} for y, rows in standings_by_season.items()
         ],
     }

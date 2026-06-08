@@ -11,12 +11,21 @@ import re
 import unicodedata
 
 from db import SessionLocal
-from models import KeeperSeed, League, Manager, ManagerHonors, Player, SeasonHistory
+from models import (
+    HistoricalStanding,
+    KeeperSeed,
+    League,
+    Manager,
+    ManagerHonors,
+    Player,
+    SeasonHistory,
+)
 from settings import LEAGUE_ID
 
 HISTORY_DIR = "history"
 CURRENT_TEAMS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Current Teams.csv"
 LEAGUE_HISTORY = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - League History.csv"
+STANDINGS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - League History - Standings.csv"
 
 # Sheet player name -> our players.name (web_name). For accents/typos/abbrev that
 # normalized matching can't bridge. Confirmed against the DB + the commissioner.
@@ -150,11 +159,58 @@ def import_league_history(commit: bool = False) -> None:
     db.close()
 
 
+def _int(s):
+    s = (s or "").strip()
+    return int(s) if s.lstrip("-").isdigit() else None
+
+
+def import_standings_history(commit: bool = False) -> None:
+    """Standings CSV -> historical_standings (per season, per rank). Tolerant of
+    missing teams/stats (older seasons have manager-only rows)."""
+    db = SessionLocal()
+    league = db.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
+    rows = [r + [""] * 8 for r in csv.reader(open(STANDINGS))]
+
+    entries = []  # (year, rank, team, manager, w, d, l, pf, h2h)
+    year = None
+    for r in rows:
+        if re.match(r"\d\d/\d\d", r[0]) and "Manager" in r[1]:
+            year = r[0].strip()
+            continue
+        if year and r[0].strip().isdigit():
+            cell = r[1].strip()
+            if "\n" in cell:
+                team, manager = cell.split("\n", 1)
+                team, manager = team.strip(), manager.strip()
+            else:
+                team, manager = (None, cell or None)
+            entries.append((year, int(r[0]), team, manager,
+                            _int(r[2]), _int(r[3]), _int(r[4]), _int(r[5]), _int(r[6])))
+
+    if commit:
+        db.query(HistoricalStanding).filter_by(league_id=league.id).delete()
+        for year, rank, team, mgr, w, d, l, pf, h2h in entries:
+            db.add(HistoricalStanding(league_id=league.id, year=year, rank=rank,
+                                      team_name=team, manager_name=mgr, wins=w, draws=d,
+                                      losses=l, points_for=pf, h2h_points=h2h))
+        db.commit()
+        print(f"COMMITTED: {len(entries)} standings rows across "
+              f"{len(set(e[0] for e in entries))} seasons")
+    else:
+        for e in entries:
+            print("   ", e)
+        print(f"({len(entries)} rows; preview only — pass commit=True to write)")
+    db.close()
+
+
+_IMPORTERS = {
+    "keepers": import_keeper_seeds,
+    "history": import_league_history,
+    "standings": import_standings_history,
+}
+
 if __name__ == "__main__":
     import sys
     commit = "--commit" in sys.argv
     target = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else "keepers"
-    if target == "history":
-        import_league_history(commit=commit)
-    else:
-        import_keeper_seeds(commit=commit)
+    _IMPORTERS[target](commit=commit)

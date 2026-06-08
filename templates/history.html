@@ -35,4 +35,28 @@
   </table>
   {% else %}<div class="empty">No season history recorded.</div>{% endif %}
 </div>
+
+{% if history.standings_by_season %}
+<h2>Final Standings by Season</h2>
+{% for season in history.standings_by_season %}
+<details class="card" style="padding:8px 12px">
+  <summary>{{ season.year }}</summary>
+  <table style="margin-top:8px">
+    <thead><tr><th class="rank">#</th><th>Team</th><th>Manager</th><th class="num">W-D-L</th><th class="num">For</th><th class="num">H2H</th></tr></thead>
+    <tbody>
+      {% for r in season.rows %}
+      <tr>
+        <td class="rank">{{ r.rank }}</td>
+        <td>{{ r.team or "—" }}</td>
+        <td>{{ r.manager or "—" }}</td>
+        <td class="num">{% if r.w is not none %}{{ r.w }}-{{ r.d }}-{{ r.l }}{% else %}—{% endif %}</td>
+        <td class="num">{{ r.pf if r.pf is not none else "—" }}</td>
+        <td class="num">{{ r.h2h if r.h2h is not none else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endfor %}
+{% endif %}
 {% endblock %}
