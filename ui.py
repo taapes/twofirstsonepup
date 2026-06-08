@@ -555,6 +555,50 @@ def admin_delete_fine(
     return RedirectResponse("/admin/standings", status_code=303)
 
 
+# ---- cups (admin: generate + score the auto-bracket) ----
+@router.get("/admin/cups", response_class=HTMLResponse)
+def admin_cups(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/cups", status_code=303)
+    league = _league_or_404(db)
+    return templates.TemplateResponse("admin_cups.html", {
+        "request": request, "league": league, "is_admin": True,
+        "cups": services.get_cups(db, league),
+    })
+
+
+@router.post("/admin/cups/generate")
+def admin_cups_generate(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/cups", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.generate_cups(db, league)
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/cups", status_code=303)
+
+
+@router.post("/admin/cups/score-round")
+def admin_cups_score_round(
+    request: Request, db: Session = Depends(get_db),
+    round: str = Form(...), gw1: str = Form(...), gw2: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/cups", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.score_cup_round(
+            db, league,
+            _safe_int(round, 1, 3, field="round"),
+            _safe_int(gw1, 1, 38, field="gw1"),
+            _safe_int(gw2, 1, 38, field="gw2"),
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/cups", status_code=303)
+
+
 @router.get("/history", response_class=HTMLResponse)
 def history_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)

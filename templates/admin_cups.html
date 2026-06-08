@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Cups{% endblock %}
+{% block content %}
+<h1>Cups <span class="tag">commissioner</span></h1>
+<p class="sub">The Cup (top 6) and Pup Cup (bottom 4 + Cup losers) are auto-generated
+  single-elim brackets seeded from H2H standings through GW28. Generate once, then
+  score each round from its two gameweeks (the bracket advances automatically).
+  Cup/Pup winnings only appear once the final round is scored.</p>
+
+<div class="grid2">
+  <div class="card" style="padding:12px">
+    <h3>1 · Generate brackets</h3>
+    <p class="sub">Seeds from standings through GW28 and creates round 1. Re-running
+      regenerates the brackets.</p>
+    <form method="post" action="/admin/cups/generate"
+          onsubmit="return confirm('Generate/regenerate the Cup + Pup brackets?')">
+      <button type="submit">Generate cups</button>
+    </form>
+  </div>
+  <div class="card" style="padding:12px">
+    <h3>2 · Score a round</h3>
+    <p class="sub">Each round spans two gameweeks; totals decide the winner.
+      Round 1 = QFs/play-in, 2 = SFs, 3 = Final + 3rd-place / Pup final.</p>
+    <form method="post" action="/admin/cups/score-round">
+      <div style="display:flex;gap:8px">
+        <label>Round<br><input name="round" type="number" min="1" max="3" style="width:70px" required></label>
+        <label>GW 1<br><input name="gw1" type="number" min="1" max="38" style="width:80px" required></label>
+        <label>GW 2<br><input name="gw2" type="number" min="1" max="38" style="width:80px" required></label>
+      </div>
+      <button type="submit" style="margin-top:8px">Score round</button>
+    </form>
+  </div>
+</div>
+
+<h2>Brackets</h2>
+{% for cup in cups %}
+<div class="card" style="margin-bottom:12px">
+  <table>
+    <thead><tr><th colspan="3">{{ cup.name }}</th></tr></thead>
+    <tbody>
+      {% for m in cup.matches %}
+      <tr>
+        <td class="rank">{{ m.round_label }}</td>
+        <td>{{ m.home or "TBD" }}{% if m.winner == m.home %} ✓{% endif %}
+          v {{ m.away or "TBD" }}{% if m.winner == m.away %} ✓{% endif %}</td>
+        <td class="num">{% if m.home_score is not none %}{{ m.home_score }}–{{ m.away_score }}{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">No brackets yet — generate them above.</div>
+{% endfor %}
+{% endblock %}

@@ -931,19 +931,26 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
     if by_rank:
         recipients["last_place"] = by_rank[-1][1].id
 
+    cups_pending = False  # a bracket exists but its decisive match isn't scored yet
     cup = _get_tournament(db, league, "Cup")
     if cup:
         final, third = _cup_final_and_third(db, cup)
         if final and final.winner_id:
             recipients["cup_1"] = final.winner_id
             recipients["cup_2"] = _loser(final)
+        else:
+            cups_pending = True
         if third and third.winner_id:
             recipients["cup_3"] = third.winner_id
+        elif third is not None:
+            cups_pending = True
     pup = _get_tournament(db, league, "Pup Cup")
     if pup:
         pup_final = _round_matches(db, pup, 3)
         if pup_final and pup_final[0].winner_id:
             recipients["pup_cup"] = pup_final[0].winner_id
+        else:
+            cups_pending = True
 
     num_managers = db.query(Manager).filter_by(league_id=league.id).count()
     fines = _fines_by_manager_id(db, league)
@@ -972,6 +979,7 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
         "base_pot": entry_fee * num_managers,
         "total_paid": round(sum(p["total"] for p in payouts), 2),
         "total_fines": sum(fines.values()),
+        "cups_pending": cups_pending,
         "payouts": payouts,
     }
 

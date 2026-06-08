@@ -66,6 +66,11 @@
 
   {% if payouts and payouts.payouts %}
   <h2>Winnings</h2>
+  {% if payouts.cups_pending %}
+  <p class="sub" style="color:var(--warn)">⚠ Cup results pending — score the remaining
+    round(s){% if is_admin %} on the <a href="/admin/cups">Cups</a> page{% endif %} for
+    Cup/Pup winnings to appear here.</p>
+  {% endif %}
   <div class="card">
     <table>
       <thead><tr><th>Manager</th><th>Breakdown</th><th class="num">Payout</th><th class="num">Overall</th></tr></thead>
