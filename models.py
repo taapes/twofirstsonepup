@@ -217,9 +217,9 @@ class KeeperException(Base):
 
 
 class KeeperSeed(Base):
-    """Option-B bootstrap: prior keeper-years a manager had already accrued on a
-    player when tracking began (25/26). The derivation engine adds completed
-    seasons held on top of this. One row per (manager, player)."""
+    """Imported keeper state per (manager, player) from the Current Teams sheet:
+    `years_remaining` = how many more seasons the player may be kept (0 = maxed,
+    can't keep), as of entering the next selection. One row per (manager, player)."""
 
     __tablename__ = "keeper_seeds"
     __table_args__ = (
@@ -236,7 +236,7 @@ class KeeperSeed(Base):
     player_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("players.id"), index=True
     )
-    prior_years: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    years_remaining: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     season_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 

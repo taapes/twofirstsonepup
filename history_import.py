@@ -78,8 +78,9 @@ def parse_current_teams() -> dict:
 
 
 def import_keeper_seeds(commit: bool = False) -> None:
-    """Current Teams -> KeeperSeed.prior_years (= keeper years entering 25/26).
-    Only players with years>=1 are seeded (years=0 = drafted fresh, no seed)."""
+    """Current Teams -> KeeperSeed.years_remaining (years a player can still be
+    kept; 0 = maxed). The CSV is authoritative as of the 25/26 draft. All players
+    are seeded, including 0s."""
     db = SessionLocal()
     league = db.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
     mgr_by_person = {m.display_name: m for m in db.query(Manager).filter_by(league_id=league.id) if m.display_name}
@@ -96,30 +97,26 @@ def import_keeper_seeds(commit: bool = False) -> None:
         return by_norm.get(_norm(target))
 
     teams = parse_current_teams()
-    seeded, drafted, unresolved, no_manager = 0, 0, [], []
+    seeded, unresolved, no_manager = 0, [], []
     for person, squad in teams.items():
         mgr = mgr_by_person.get(person)
         if not mgr:
             no_manager.append(person)
             continue
-        for pos, pname, years in squad:
+        for pos, pname, remaining in squad:  # CSV value = years REMAINING
             player = resolve_player(pname)
             if not player:
                 unresolved.append(f"{person}:{pname}")
                 continue
-            if years < 1:
-                drafted += 1
-                continue
             existing = db.query(KeeperSeed).filter_by(manager_id=mgr.id, player_id=player.id).one_or_none()
             if existing:
-                existing.prior_years = years
+                existing.years_remaining = remaining
             else:
                 db.add(KeeperSeed(league_id=league.id, manager_id=mgr.id,
-                                  player_id=player.id, prior_years=years, season_year=2025))
+                                  player_id=player.id, years_remaining=remaining, season_year=2025))
             seeded += 1
 
-    print(f"seeded (years>=1): {seeded}")
-    print(f"drafted this year (years=0, no seed): {drafted}")
+    print(f"seeded (years remaining): {seeded}")
     print(f"unmatched managers: {no_manager or 'none'}")
     print(f"unresolved players ({len(unresolved)}): {unresolved or 'none'}")
     if commit:

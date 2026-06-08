@@ -45,7 +45,7 @@ class ScoreCupRoundRequest(BaseModel):
 class KeeperSeedRequest(BaseModel):
     fpl_manager_id: str
     player_fpl_id: int
-    prior_years: int
+    years_remaining: int
 
 
 class SubmitKeepersRequest(BaseModel):
@@ -149,7 +149,7 @@ def set_keeper_seed(
             league,
             fpl_manager_id=body.fpl_manager_id,
             player_fpl_id=body.player_fpl_id,
-            prior_years=body.prior_years,
+            years_remaining=body.years_remaining,
         )
     except RuleViolation as e:
         raise HTTPException(status_code=400, detail=str(e))

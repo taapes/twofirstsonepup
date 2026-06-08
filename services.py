@@ -30,7 +30,7 @@ from rules import (
     ANTI_TANKING_MIN_ZERO_PLAYERS,
     CUP_SEED_THROUGH_GW,
     CUP_SIZE,
-    KEEPER_MAX_YEARS,
+    KEEPER_FRESH_REMAINING,
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
     RuleViolation,
@@ -539,33 +539,33 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
     }
 
 
-# ---- keepers (derived from roster history + IL + trades + Option-B seeds) ----
+# ---- keepers (imported seeds = years remaining; engine = start-vs-final) ----
 def set_keeper_seed(
-    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int, prior_years: int
+    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int, years_remaining: int
 ) -> dict:
-    """Option-B bootstrap: record prior keeper-years for an already-kept player."""
+    """Set a player's keeper years-remaining for a manager (commissioner override)."""
     manager = _resolve_manager(db, league, fpl_manager_id)
     player = _resolve_player(db, player_fpl_id)
-    if prior_years < 0 or prior_years > KEEPER_MAX_YEARS:
-        raise RuleViolation(f"prior_years must be 0..{KEEPER_MAX_YEARS}")
+    if years_remaining < 0 or years_remaining > 4:
+        raise RuleViolation("years_remaining must be 0..4")
     seed = (
         db.query(KeeperSeed)
         .filter_by(manager_id=manager.id, player_id=player.id)
         .one_or_none()
     )
     if seed:
-        seed.prior_years = prior_years
+        seed.years_remaining = years_remaining
     else:
         seed = KeeperSeed(
             league_id=league.id,
             manager_id=manager.id,
             player_id=player.id,
-            prior_years=prior_years,
+            years_remaining=years_remaining,
             season_year=league.season_year,
         )
         db.add(seed)
     db.commit()
-    return {"manager": manager.name, "player": player.name, "prior_years": prior_years}
+    return {"manager": manager.display, "player": player.name, "years_remaining": years_remaining}
 
 
 def _derive_keeper_status(db: Session, league: League) -> dict:
@@ -597,25 +597,24 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
         (t.to_manager, t.player_id)
         for t in db.query(Trade).filter_by(league_id=league.id)
     }
-    seed_prior: dict = {}  # player_id -> keeper years entering the season
+    seed_remaining: dict = {}  # player_id -> imported years remaining
     for s in db.query(KeeperSeed).filter_by(league_id=league.id):
-        seed_prior[s.player_id] = max(seed_prior.get(s.player_id, 0), s.prior_years)
+        seed_remaining[s.player_id] = s.years_remaining
 
     status: dict = {}
     for mid, pid in final_candidates:
-        acq, years = keeper_status(
+        acq, remaining = keeper_status(
             pid in start_roster.get(mid, set()),
             (mid, pid) in traded_in,
-            seed_prior.get(pid),
+            seed_remaining.get(pid),
         )
         p = players.get(pid)
         status.setdefault(mid, {})[pid] = {
             "player": p.name if p else str(pid),
             "position": p.position if p else None,
             "acquisition": acq,
-            "keeper_years": years,  # seasons kept through this season
-            "years_remaining": max(0, KEEPER_MAX_YEARS - years),  # more years keepable
-            "eligible": keeper_eligible(years),
+            "years_remaining": remaining,
+            "eligible": keeper_eligible(remaining),
         }
     return status
 
@@ -631,7 +630,7 @@ def get_keepers(db: Session, league: League) -> list[dict]:
     out = []
     for m in managers:
         items = list(status.get(m.id, {}).values())
-        items.sort(key=lambda x: (not x["eligible"], -x["keeper_years"], x["player"]))
+        items.sort(key=lambda x: (not x["eligible"], -x["years_remaining"], x["player"]))
         out.append({"manager": m.display, "manager_fpl": m.fpl_manager_id, "players": items})
     return out
 
@@ -684,11 +683,11 @@ def submit_keepers(
         )
     db.commit()
     return {
-        "manager": manager.name,
+        "manager": manager.display,
         "season_year": season_year,
         "keepers": [
             {"player": s["player"], "acquisition": s["acquisition"],
-             "keeper_years": s["keeper_years"], "is_discovery": s["is_discovery"]}
+             "years_remaining": s["years_remaining"], "is_discovery": s["is_discovery"]}
             for s in selections
         ],
     }

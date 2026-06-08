@@ -161,37 +161,39 @@ PAYOUT_STRUCTURE = {
 }
 
 # ---- Keepers ----
-# A player can be kept at most this many seasons; in the (MAX+1)th year they must
-# return to the draft. Dropping to FA/waivers resets the clock.
-KEEPER_MAX_YEARS = 4
+# Keeper state is tracked as YEARS REMAINING (imported from the league sheet):
+# 0 = maxed out, can't be kept; >0 = can be kept that many more seasons.
+# A waiver/FA pickup starts fresh with this many years remaining.
+KEEPER_FRESH_REMAINING = 2
 # Of a manager's keepers, at most this many may be waiver-acquired (from 2025).
 KEEPER_MAX_WAIVER = 2
 
 
-def keeper_status(started_with_manager: bool, traded_in: bool, seed_prior) -> tuple:
-    """Start-vs-final keeper model. Determines a GW38 roster player's acquisition
-    and keeper-years for the manager who holds them, from three signals:
+def keeper_status(
+    started_with_manager: bool, traded_in: bool, seed_remaining,
+    fresh: int = KEEPER_FRESH_REMAINING,
+) -> tuple:
+    """Start-vs-final keeper model -> (acquisition, years_remaining).
       - started_with_manager: on this manager's start-of-season (GW1) roster,
-      - traded_in: arrived to this manager via a trade,
-      - seed_prior: keeper years entering the season (None if never a keeper).
+      - traded_in: arrived via a trade,
+      - seed_remaining: imported years-remaining for the player (None if not in
+        the sheet, i.e. acquired in-season).
 
     A player kept from the start ('draft') or acquired by trade ('trade') carries
-    the seed: years = seed_prior + 1. A waiver pickup resets to 0 ('waiver').
-    This tolerates mid-season roster gaps (e.g. injuries) — unlike GW-by-GW
-    continuity — since the start+final rosters bound retention. Returns
-    (acquisition, keeper_years_used)."""
+    its imported years_remaining; a waiver/FA pickup ('waiver') starts fresh.
+    Mid-season roster gaps are tolerated (start+final rosters bound retention)."""
     if started_with_manager:
         acq = "draft"
     elif traded_in:
         acq = "trade"
     else:
-        return ("waiver", 0)
-    return (acq, (seed_prior + 1) if seed_prior is not None else 0)
+        return ("waiver", fresh)
+    return (acq, seed_remaining if seed_remaining is not None else fresh)
 
 
-def keeper_eligible(years_used: int, max_years: int = KEEPER_MAX_YEARS) -> bool:
-    """Eligible to be kept again only if kept fewer than max_years seasons."""
-    return years_used < max_years
+def keeper_eligible(years_remaining: int) -> bool:
+    """Can be kept again only if at least one keeper year remains."""
+    return years_remaining > 0
 
 
 # Base keeper limit per season; a valid discovery keeper raises it by one.

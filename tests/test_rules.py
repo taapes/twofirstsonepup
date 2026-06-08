@@ -3,8 +3,8 @@
 from rules import (
     ANTI_TANKING_MIN_WEEKS,
     ANTI_TANKING_MIN_ZERO_PLAYERS,
+    KEEPER_FRESH_REMAINING,
     KEEPER_MAX_WAIVER,
-    KEEPER_MAX_YEARS,
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
     SEASON_LAST_GW,
@@ -186,41 +186,36 @@ def test_payout_structure_percentages_sum_to_one():
     assert round(sum(PAYOUT_STRUCTURE["pct"].values()), 4) == 1.0
 
 
-# ---- keepers (start-vs-final model) ----
-def test_keeper_kept_from_start_with_seed():
-    # started with manager + 2 prior seed years -> 3 used, eligible (<4)
-    assert keeper_status(True, False, 2) == ("draft", 3)
+# ---- keepers (start-vs-final model; value = years REMAINING) ----
+def test_keeper_kept_from_start_carries_remaining():
+    # started with manager, seed remaining=3 -> ("draft", 3), eligible
+    assert keeper_status(True, False, 3) == ("draft", 3)
     assert keeper_eligible(3) is True
 
 
-def test_keeper_drafted_fresh_from_start():
-    # started with manager, no seed (drafted this season) -> 0, eligible
-    assert keeper_status(True, False, None) == ("draft", 0)
+def test_keeper_maxed_zero_remaining():
+    # seed remaining=0 -> ("draft", 0) -> NOT eligible
+    assert keeper_status(True, False, 0) == ("draft", 0)
+    assert keeper_eligible(0) is False
 
 
-def test_keeper_maxed_after_four():
-    # started + 3 prior -> 4 used -> NOT eligible
-    assert keeper_status(True, False, 3) == ("draft", 4)
-    assert keeper_eligible(4) is False
+def test_keeper_traded_in_carries_remaining():
+    assert keeper_status(False, True, 2) == ("trade", 2)
 
 
-def test_keeper_traded_in_carries_history():
-    # arrived via trade with 2 prior seed years -> history transfers (trade, 3)
-    assert keeper_status(False, True, 2) == ("trade", 3)
+def test_keeper_waiver_pickup_is_fresh():
+    # not started, not traded -> waiver, fresh remaining (KEEPER_FRESH_REMAINING)
+    assert keeper_status(False, False, 3) == ("waiver", KEEPER_FRESH_REMAINING)
+    assert keeper_status(False, False, None) == ("waiver", KEEPER_FRESH_REMAINING)
 
 
-def test_keeper_waiver_pickup_resets():
-    # not started, not traded -> waiver pickup resets even if previously a keeper
-    assert keeper_status(False, False, 3) == ("waiver", 0)
-    assert keeper_status(False, False, None) == ("waiver", 0)
-
-
-def test_keeper_started_takes_precedence_over_seed_absence():
-    assert keeper_status(True, True, None)[0] == "draft"  # start beats trade flag
+def test_keeper_started_without_seed_is_fresh():
+    # started but not in the sheet -> fresh remaining, draft acquisition
+    assert keeper_status(True, False, None) == ("draft", KEEPER_FRESH_REMAINING)
 
 
 def test_keeper_constants():
-    assert KEEPER_MAX_YEARS == 4
+    assert KEEPER_FRESH_REMAINING == 2
     assert KEEPER_MAX_WAIVER == 2
 
 
