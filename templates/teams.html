@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Teams — Rosters & Keepers{% endblock %}
+{% block content %}
+<h1>Teams — Rosters &amp; Keeper Years</h1>
+<p class="sub">Current 15-man rosters. "Ny" = seasons kept entering {{ league.season_year + 1 }};
+   <span class="pill warn">max</span> = hit the {{ 4 }}-year limit (must be drafted).</p>
+<div class="teamgrid">
+  {% for t in teams %}{% include "_roster_card.html" %}{% endfor %}
+</div>
+{% endblock %}

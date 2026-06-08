@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ manager }}{% endblock %}
+{% block content %}
+<h1>{{ manager }}</h1>
+<p class="sub"><a href="/teams">← all teams</a></p>
+{% if team %}
+  {% set t = team %}
+  <div style="max-width:480px">{% include "_roster_card.html" %}</div>
+{% else %}
+  <div class="card empty">No roster data for this team.</div>
+{% endif %}
+{% endblock %}

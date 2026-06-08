@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Trades{% endblock %}
+{% block content %}
+<h1>Trades</h1>
+<p class="sub">Player trades (synced from the FPL feed) and pick/player trades entered by the commissioner.</p>
+<div class="card">
+  {% if trades %}
+  <table>
+    <thead><tr><th>Type</th><th>What</th><th>From</th><th>To</th><th class="num">GW</th></tr></thead>
+    <tbody>
+      {% for t in trades %}
+      <tr>
+        <td class="tag">{{ t.kind }}</td>
+        <td>{{ t.what }}</td>
+        <td>{{ t['from'] }}</td>
+        <td>{{ t['to'] }}</td>
+        <td class="num">{% if t.gw %}GW{{ t.gw }}{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">No trades recorded.</div>{% endif %}
+</div>
+{% endblock %}

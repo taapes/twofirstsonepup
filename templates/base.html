@@ -37,13 +37,21 @@
     details:first-child { border-top:0; }
     summary { cursor:pointer; color:var(--accent); }
     details form { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+    .infraction { padding:12px; border-bottom:1px solid var(--line); }
+    .infraction:last-child { border-bottom:0; }
+    .teamgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:12px; }
+    .yrs { color:var(--muted); font-variant-numeric:tabular-nums; }
+    .tag { font-size:.7rem; color:var(--muted); }
   </style>
+  {% block head %}{% endblock %}
 </head>
 <body>
   <div class="wrap">
     <nav class="nav">
       <a href="/">Home</a>
-      {% if league %}<a href="/draft/{{ league.season_year + 1 }}">Draft {{ league.season_year + 1 }}</a>{% endif %}
+      {% if league %}<a href="/teams">Teams</a>
+      <a href="/trades">Trades</a>
+      <a href="/draft/{{ league.season_year + 1 }}">Draft {{ league.season_year + 1 }}</a>{% endif %}
       <span class="spacer"></span>
       {% if is_admin %}<a href="/admin/logout">Log out</a>{% else %}<a href="/admin/login?next={{ request.url.path }}">Commissioner login</a>{% endif %}
     </nav>

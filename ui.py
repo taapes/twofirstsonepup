@@ -73,6 +73,44 @@ def logout(request: Request):
     return RedirectResponse("/", status_code=303)
 
 
+# ---- public league views ----
+@router.get("/teams", response_class=HTMLResponse)
+def teams_page(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    return templates.TemplateResponse(
+        "teams.html",
+        {"request": request, "league": league, "is_admin": is_admin(request),
+         "teams": services.get_keepers(db, league)},
+    )
+
+
+@router.get("/team/{fpl_manager_id}", response_class=HTMLResponse)
+def team_page(fpl_manager_id: str, request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    m = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    if not m:
+        raise HTTPException(status_code=404, detail="team not found")
+    team = next((t for t in services.get_keepers(db, league) if t["manager"] == m.name), None)
+    return templates.TemplateResponse(
+        "team.html",
+        {"request": request, "league": league, "is_admin": is_admin(request), "team": team, "manager": m.name},
+    )
+
+
+@router.get("/trades", response_class=HTMLResponse)
+def trades_page(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    return templates.TemplateResponse(
+        "trades.html",
+        {"request": request, "league": league, "is_admin": is_admin(request),
+         "trades": services.get_trades(db, league)},
+    )
+
+
 # ---- draft board ----
 @router.get("/draft/{year}", response_class=HTMLResponse)
 def draft_page(year: int, request: Request, draft_type: str = "main", db: Session = Depends(get_db)):

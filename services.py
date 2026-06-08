@@ -640,7 +640,7 @@ def get_keepers(db: Session, league: League) -> list[dict]:
     for m in managers:
         items = list(status.get(m.id, {}).values())
         items.sort(key=lambda x: (not x["eligible"], -x["keeper_years"], x["player"]))
-        out.append({"manager": m.name, "players": items})
+        out.append({"manager": m.name, "manager_fpl": m.fpl_manager_id, "players": items})
     return out
 
 
