@@ -48,6 +48,13 @@ class KeeperSeedRequest(BaseModel):
     prior_years: int
 
 
+class SubmitKeepersRequest(BaseModel):
+    fpl_manager_id: str
+    keeper_fpl_ids: list[int]
+    season_year: int
+    discovery_fpl_id: int | None = None
+
+
 @router.post("/leagues/{league_key}/injury-list")
 def place_on_il(
     league_key: str, body: PlaceOnILRequest, db: Session = Depends(get_db)
@@ -115,6 +122,25 @@ def set_keeper_seed(
             fpl_manager_id=body.fpl_manager_id,
             player_fpl_id=body.player_fpl_id,
             prior_years=body.prior_years,
+        )
+    except RuleViolation as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/leagues/{league_key}/keepers")
+def submit_keepers(
+    league_key: str, body: SubmitKeepersRequest, db: Session = Depends(get_db)
+):
+    """Validate + persist a manager's keeper selection (caps + eligibility)."""
+    league = _league(db, league_key)
+    try:
+        return services.submit_keepers(
+            db,
+            league,
+            fpl_manager_id=body.fpl_manager_id,
+            keeper_fpl_ids=body.keeper_fpl_ids,
+            season_year=body.season_year,
+            discovery_fpl_id=body.discovery_fpl_id,
         )
     except RuleViolation as e:
         raise HTTPException(status_code=400, detail=str(e))

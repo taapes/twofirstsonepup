@@ -223,6 +223,34 @@ class KeeperSeed(Base):
     season_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class KeeperSelection(Base):
+    """A manager's chosen keepers for an upcoming season (submitted pre-draft).
+    Validated against eligibility + caps before persisting. One row per kept
+    player per season; `is_discovery` marks the bonus 6th (discovery) keeper."""
+
+    __tablename__ = "keeper_selections"
+    __table_args__ = (
+        UniqueConstraint(
+            "manager_id", "player_id", "season_year", name="uq_keeper_sel_mgr_player_season"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), index=True
+    )
+    season_year: Mapped[int] = mapped_column(Integer, index=True)
+    is_discovery: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
+
 class DraftPick(Base):
     __tablename__ = "draft_picks"
 

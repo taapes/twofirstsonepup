@@ -214,6 +214,46 @@ def keeper_eligible(years_used: int, max_years: int = KEEPER_MAX_YEARS) -> bool:
     return years_used < max_years
 
 
+# Base keeper limit per season; a valid discovery keeper raises it by one.
+KEEPER_MAX_SELECTIONS = 5
+
+
+def validate_keeper_selection(
+    selections: list[dict],
+    has_discovery_keeper: bool = False,
+    max_base: int = KEEPER_MAX_SELECTIONS,
+    max_waiver: int = KEEPER_MAX_WAIVER,
+) -> list[str]:
+    """Validate a proposed keeper set. `selections`: list of dicts with `player`
+    (name), `eligible` (bool), `acquisition` ('draft'/'trade'/'waiver'), and
+    `is_discovery` (bool). Returns a list of human-readable violations (empty =
+    valid). Rules: at most max_base keepers (+1 with a discovery keeper); all must
+    be eligible (clock < 4); at most max_waiver waiver-acquired (discovery keepers
+    excluded — they come from the discovery draft, not waivers)."""
+    errors = []
+    limit = max_base + (1 if has_discovery_keeper else 0)
+    if len(selections) > limit:
+        errors.append(f"{len(selections)} keepers selected, limit is {limit}")
+
+    ineligible = [s["player"] for s in selections if not s.get("eligible")]
+    if ineligible:
+        errors.append("ineligible (4-year limit / dropped): " + ", ".join(ineligible))
+
+    waiver = [
+        s for s in selections
+        if s.get("acquisition") == "waiver" and not s.get("is_discovery")
+    ]
+    if len(waiver) > max_waiver:
+        errors.append(
+            f"{len(waiver)} waiver keepers ({', '.join(s['player'] for s in waiver)}), "
+            f"max {max_waiver}"
+        )
+
+    if has_discovery_keeper and not any(s.get("is_discovery") for s in selections):
+        errors.append("discovery keeper allowance used but no keeper marked discovery")
+    return errors
+
+
 _PAYOUT_LABELS = {
     "league_1": "1st place — League",
     "league_2": "2nd place — League",

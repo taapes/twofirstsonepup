@@ -49,3 +49,8 @@ def payouts(league_key: str, db: Session = Depends(get_db)):
 @router.get("/leagues/{league_key}/keepers")
 def keepers(league_key: str, db: Session = Depends(get_db)):
     return services.get_keepers(db, _league(db, league_key))
+
+
+@router.get("/leagues/{league_key}/keeper-selections/{season_year}")
+def keeper_selections(league_key: str, season_year: int, db: Session = Depends(get_db)):
+    return services.get_keeper_selections(db, _league(db, league_key), season_year)

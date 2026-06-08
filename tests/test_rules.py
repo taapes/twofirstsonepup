@@ -19,6 +19,7 @@ from rules import (
     keeper_years_used,
     match_winner,
     tanking_windows,
+    validate_keeper_selection,
     zero_minute_count,
 )
 
@@ -234,3 +235,44 @@ def test_keeper_years_and_eligibility():
 def test_keeper_constants():
     assert KEEPER_MAX_YEARS == 4
     assert KEEPER_MAX_WAIVER == 2
+
+
+# ---- keeper selection / caps ----
+def _sel(player, eligible=True, acquisition="draft", is_discovery=False):
+    return {"player": player, "eligible": eligible, "acquisition": acquisition, "is_discovery": is_discovery}
+
+
+def test_valid_five_keepers():
+    sels = [_sel(f"P{i}") for i in range(5)]
+    assert validate_keeper_selection(sels) == []
+
+
+def test_too_many_keepers():
+    sels = [_sel(f"P{i}") for i in range(6)]
+    errs = validate_keeper_selection(sels)
+    assert any("limit is 5" in e for e in errs)
+
+
+def test_discovery_raises_limit_to_six():
+    sels = [_sel(f"P{i}") for i in range(5)] + [_sel("Disc", is_discovery=True)]
+    assert validate_keeper_selection(sels, has_discovery_keeper=True) == []
+
+
+def test_ineligible_keeper_rejected():
+    sels = [_sel("A"), _sel("B", eligible=False)]
+    errs = validate_keeper_selection(sels)
+    assert any("ineligible" in e and "B" in e for e in errs)
+
+
+def test_waiver_cap():
+    sels = [_sel("A", acquisition="waiver"), _sel("B", acquisition="waiver"),
+            _sel("C", acquisition="waiver")]
+    errs = validate_keeper_selection(sels)
+    assert any("waiver keepers" in e for e in errs)
+
+
+def test_discovery_keeper_excluded_from_waiver_cap():
+    # 2 waiver + 1 discovery(waiver-flagged) -> discovery not counted, so OK
+    sels = [_sel("A", acquisition="waiver"), _sel("B", acquisition="waiver"),
+            _sel("D", acquisition="waiver", is_discovery=True)]
+    assert validate_keeper_selection(sels, has_discovery_keeper=True) == []

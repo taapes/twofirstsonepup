@@ -12,6 +12,7 @@ from models import (
     GameweekPoints,
     InjuryList,
     KeeperSeed,
+    KeeperSelection,
     League,
     Manager,
     Match,
@@ -41,6 +42,7 @@ from rules import (
     keeper_years_used,
     match_winner,
     tanking_windows,
+    validate_keeper_selection,
     zero_minute_count,
 )
 
@@ -564,17 +566,14 @@ def set_keeper_seed(
     return {"manager": manager.name, "player": player.name, "prior_years": prior_years}
 
 
-def get_keepers(db: Session, league: League) -> list[dict]:
-    """Per-manager keeper eligibility for the upcoming selection, derived from
-    roster continuity (drops reset the clock; IL and trades are explained moves),
-    acquisition type, and Option-B seeds. Precomputed read; no FPL calls."""
+def _derive_keeper_status(db: Session, league: League) -> dict:
+    """Core keeper derivation, shared by the report and selection validation.
+    Returns {manager_id: {player_id: {player, position, acquisition,
+    keeper_years, eligible}}} for players on each manager's final-GW roster."""
     gw = latest_gameweek(db, league)
     if gw is None:
-        return []
+        return {}
     last_n = gw.number
-    managers = (
-        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
-    )
     players = {p.id: p for p in db.query(Player)}
 
     presence: dict = {}  # (manager_id, player_id) -> set of GW numbers rostered
@@ -605,31 +604,112 @@ def get_keepers(db: Session, league: League) -> list[dict]:
     for s in db.query(KeeperSeed).filter_by(league_id=league.id):
         seed_prior[s.player_id] = max(seed_prior.get(s.player_id, 0), s.prior_years)
 
+    status: dict = {}
+    for (mid, pid), gws in presence.items():
+        if last_n not in gws:
+            continue
+        cont = keeper_continuity(gws, il.get((mid, pid), set()), last_n)
+        if cont is None:
+            continue
+        acq = classify_acquisition(cont["first_gw"], (mid, pid) in traded_in, cont["continuous"])
+        years = keeper_years_used(seed_prior.get(pid), cont["continuous"], pid in seed_prior)
+        p = players.get(pid)
+        status.setdefault(mid, {})[pid] = {
+            "player": p.name if p else str(pid),
+            "position": p.position if p else None,
+            "acquisition": acq,
+            "keeper_years": years,
+            "eligible": keeper_eligible(years),
+        }
+    return status
+
+
+def get_keepers(db: Session, league: League) -> list[dict]:
+    """Per-manager keeper eligibility for the upcoming selection, derived from
+    roster continuity (drops reset the clock; IL and trades are explained moves),
+    acquisition type, and Option-B seeds. Precomputed read; no FPL calls."""
+    status = _derive_keeper_status(db, league)
+    managers = (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
+    )
     out = []
     for m in managers:
-        items = []
-        for (mid, pid), gws in presence.items():
-            if mid != m.id or last_n not in gws:
-                continue
-            cont = keeper_continuity(gws, il.get((m.id, pid), set()), last_n)
-            if cont is None:
-                continue
-            acq = classify_acquisition(
-                cont["first_gw"], (m.id, pid) in traded_in, cont["continuous"]
-            )
-            years = keeper_years_used(
-                seed_prior.get(pid), cont["continuous"], pid in seed_prior
-            )
-            p = players.get(pid)
-            items.append(
-                {
-                    "player": p.name if p else str(pid),
-                    "position": p.position if p else None,
-                    "acquisition": acq,
-                    "keeper_years": years,
-                    "eligible": keeper_eligible(years),
-                }
-            )
+        items = list(status.get(m.id, {}).values())
         items.sort(key=lambda x: (not x["eligible"], -x["keeper_years"], x["player"]))
         out.append({"manager": m.name, "players": items})
     return out
+
+
+def submit_keepers(
+    db: Session,
+    league: League,
+    *,
+    fpl_manager_id: str,
+    keeper_fpl_ids: list[int],
+    season_year: int,
+    discovery_fpl_id: int | None = None,
+) -> dict:
+    """Validate and persist a manager's keeper selection for `season_year`.
+    Enforces eligibility + caps (<=5, +1 discovery, <=2 waiver). Replaces any
+    prior selection for that manager/season."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    status = _derive_keeper_status(db, league).get(manager.id, {})
+    by_fpl = {p.fpl_id: p for p in db.query(Player)}
+
+    selections = []
+    for fid in keeper_fpl_ids:
+        player = by_fpl.get(fid)
+        if not player:
+            raise RuleViolation(f"player {fid} not found")
+        st = status.get(player.id)
+        if not st:
+            raise RuleViolation(f"{player.name} is not on {manager.name}'s final roster")
+        selections.append({**st, "fpl_id": fid, "player_id": player.id,
+                           "is_discovery": fid == discovery_fpl_id})
+
+    errors = validate_keeper_selection(
+        selections, has_discovery_keeper=discovery_fpl_id is not None
+    )
+    if errors:
+        raise RuleViolation("; ".join(errors))
+
+    db.query(KeeperSelection).filter_by(
+        manager_id=manager.id, season_year=season_year
+    ).delete()
+    for s in selections:
+        db.add(
+            KeeperSelection(
+                league_id=league.id,
+                manager_id=manager.id,
+                player_id=s["player_id"],
+                season_year=season_year,
+                is_discovery=s["is_discovery"],
+            )
+        )
+    db.commit()
+    return {
+        "manager": manager.name,
+        "season_year": season_year,
+        "keepers": [
+            {"player": s["player"], "acquisition": s["acquisition"],
+             "keeper_years": s["keeper_years"], "is_discovery": s["is_discovery"]}
+            for s in selections
+        ],
+    }
+
+
+def get_keeper_selections(db: Session, league: League, season_year: int) -> list[dict]:
+    """Submitted keeper selections for a season, grouped by manager."""
+    rows = (
+        db.query(KeeperSelection, Manager, Player)
+        .join(Manager, Manager.id == KeeperSelection.manager_id)
+        .join(Player, Player.id == KeeperSelection.player_id)
+        .filter(KeeperSelection.league_id == league.id, KeeperSelection.season_year == season_year)
+        .all()
+    )
+    by_manager: dict = {}
+    for sel, m, p in rows:
+        by_manager.setdefault(m.name, []).append(
+            {"player": p.name, "position": p.position, "is_discovery": sel.is_discovery}
+        )
+    return [{"manager": k, "keepers": v} for k, v in sorted(by_manager.items())]

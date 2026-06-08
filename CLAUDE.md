@@ -127,8 +127,14 @@ Write tests for these. They are custom and non-obvious:
   CAVEAT: derivation needs IL data to explain roster gaps; 25/26 has no IL
   records in our system, so legitimate IL absences look like drops — the
   25/26→26/27 report needs commissioner review for gap cases. Accurate going
-  forward. *Phase 2 (TODO):* keeper SELECTION submission + cap validation
-  (≤5, ≤2 waiver, discovery 6th) and the main/discovery drafts.
+  forward. *Phase 2 (done):* keeper SELECTION submission + cap validation
+  (`rules.validate_keeper_selection`, `services.submit_keepers`,
+  `POST /admin/.../keepers`, `GET /v1/.../keeper-selections/{year}`,
+  `keeper_selections` table) — enforces ≤5 keepers (+1 with a discovery keeper),
+  ≤2 waiver-acquired (discovery excluded), all eligible; replaces the prior
+  submission for that season. *Phase 3 (TODO):* main draft (lottery-weighted R1,
+  reverse-standings R2+) and discovery draft (snake, Sept), which also produces
+  the discovery (6th) keeper that raises the cap.
 - **Waivers vs. free agency:** Waiver period = start of a GW until 24h before the
   next GW. Final 24h before GW start = free agency. Enforce limits/eligibility.
 - **Player eligibility:** Player added to FPL *after* the league draft date is
