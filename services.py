@@ -219,6 +219,100 @@ def close_discovery(db: Session, league: League) -> None:
     db.commit()
 
 
+def advance_season(db: Session, old_league: League, new_league: League) -> dict:
+    """Roll the league over to a new season (Preseason). The new league row must
+    already be synced (the route runs sync for the new FPL id first). Carries forward,
+    matched by the stable FPL entry_id (managers.fpl_manager_id):
+      1. identity — display_name + password_hash (fills blanks on the new rows),
+      2. keeper state — for players kept for the new season, a KeeperSeed on the new
+         league with years_remaining decremented by 1 (so the clock ticks),
+      3. the draft-day player-pool snapshot for the new league,
+    then flips `is_current` to the new league and sets it to the preseason phase.
+    Idempotent: safe to re-run."""
+    from models import PlayerPoolSnapshot
+
+    if old_league.id == new_league.id:
+        raise RuleViolation("new season must be a different league")
+
+    old_mgrs = {
+        m.fpl_manager_id: m
+        for m in db.query(Manager).filter_by(league_id=old_league.id)
+    }
+    new_mgrs = {
+        m.fpl_manager_id: m
+        for m in db.query(Manager).filter_by(league_id=new_league.id)
+    }
+    # 1. identity carry (only fill blanks, so re-running can't clobber)
+    carried = 0
+    for entry_id, nm in new_mgrs.items():
+        om = old_mgrs.get(entry_id)
+        if not om:
+            continue
+        if om.display_name and not nm.display_name:
+            nm.display_name = om.display_name
+        if om.password_hash and not nm.password_hash:
+            nm.password_hash = om.password_hash
+        carried += 1
+
+    # 2. keeper carry (decrement remaining for players kept for the new season)
+    status = _derive_keeper_status(db, old_league)
+    seeded = 0
+    for ks in db.query(KeeperSelection).filter_by(
+        league_id=old_league.id, season_year=new_league.season_year
+    ):
+        om = db.get(Manager, ks.manager_id)
+        nm = new_mgrs.get(om.fpl_manager_id) if om else None
+        if not nm:
+            continue
+        prior = (
+            status.get(ks.manager_id, {}).get(ks.player_id, {}).get("years_remaining")
+        )
+        prior = prior if prior is not None else KEEPER_FRESH_REMAINING
+        new_remaining = max(prior - 1, 0)
+        seed = (
+            db.query(KeeperSeed)
+            .filter_by(manager_id=nm.id, player_id=ks.player_id)
+            .one_or_none()
+        )
+        if seed:
+            seed.years_remaining = new_remaining
+            seed.league_id = new_league.id
+            seed.season_year = new_league.season_year
+        else:
+            db.add(KeeperSeed(
+                league_id=new_league.id, manager_id=nm.id, player_id=ks.player_id,
+                years_remaining=new_remaining, season_year=new_league.season_year,
+            ))
+        seeded += 1
+
+    # 3. draft-day player-pool snapshot (skip ids already captured)
+    have = {
+        fid for (fid,) in db.query(PlayerPoolSnapshot.fpl_id)
+        .filter_by(league_id=new_league.id)
+    }
+    snapped = 0
+    for (fid,) in db.query(Player.fpl_id):
+        if fid not in have:
+            db.add(PlayerPoolSnapshot(league_id=new_league.id, fpl_id=fid))
+            snapped += 1
+
+    # 4. flip current + set preseason
+    for lg in db.query(League):
+        lg.is_current = (lg.id == new_league.id)
+    import datetime as _dt
+
+    new_league.phase = PHASE_PRESEASON
+    new_league.phase_manual = False
+    new_league.phase_set_at = _dt.datetime.now(_dt.timezone.utc)
+    db.commit()
+    return {
+        "new_season": new_league.season_year,
+        "managers_carried": carried,
+        "keepers_seeded": seeded,
+        "pool_snapshot": snapped,
+    }
+
+
 def advance_phase_if_due(db: Session, league: League, now=None) -> bool:
     """Auto-advance the time/GW-driven phase transitions during sync (the heartbeat):
     in_season→offseason at GW38, preseason→in_season at GW1, and the Oct-1 discovery

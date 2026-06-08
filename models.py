@@ -737,6 +737,27 @@ class TankingFlagClear(Base):
     )
 
 
+class PlayerPoolSnapshot(Base):
+    """The set of player fpl_ids that existed in the pool at a season's draft (captured
+    at the Preseason rollover). FPL has no reliable 'added date', so this snapshot is
+    how we detect mid-season additions: a synced player NOT in the snapshot was added
+    after the draft (ineligible unless a defender — see player_ineligibility)."""
+
+    __tablename__ = "player_pool_snapshot"
+    __table_args__ = (
+        UniqueConstraint("league_id", "fpl_id", name="uq_pool_snapshot_league_fpl"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    fpl_id: Mapped[int] = mapped_column(Integer, index=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class SyncLog(Base):
     """Audit trail for /admin/sync runs. Not FPL-canonical and not league-custom
     truth — operational metadata so we can see when a sync ran and whether it

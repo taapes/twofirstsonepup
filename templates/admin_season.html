@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Season Rollover{% endblock %}
+{% block content %}
+<h1>Season Rollover <span class="tag">commissioner</span></h1>
+<p class="sub">Advance to a new season once the new FPL <strong>draft league</strong> exists.
+  This syncs the new league (teams, standings, schedule), carries forward each manager's
+  login + keeper clock (matched by FPL entry id, years − 1 for kept players), snapshots
+  the player pool for the ineligible-player rule, and makes the new season current
+  (Pre-season). The previous season stays intact and browsable.</p>
+
+{% if current %}
+<div class="card" style="padding:12px;max-width:560px">
+  <p>Current season: <strong>{{ current.season }}/{{ (current.season + 1) % 100 }}</strong>
+    <span class="tag">league {{ current.fpl }}</span></p>
+  <form method="post" action="/admin/season/advance"
+        onsubmit="return confirm('Advance to the new season? This makes the new league current.')">
+    <label>New season FPL draft league id<br>
+      <input name="new_fpl_league_id" placeholder="e.g. 67890" style="width:220px" required></label>
+    <button type="submit" style="margin-left:8px">Sync &amp; advance</button>
+    <p class="sub">Run this only after the new draft league is set up in FPL (Pre-season).</p>
+  </form>
+</div>
+{% endif %}
+
+<h2>Seasons</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>Season</th><th>League id</th><th>Phase</th><th></th></tr></thead>
+    <tbody>
+      {% for lg in leagues %}
+      <tr>
+        <td>{{ lg.season }}/{{ (lg.season + 1) % 100 }}</td>
+        <td class="sub">{{ lg.fpl }}</td>
+        <td class="tag">{{ lg.phase }}</td>
+        <td>{% if lg.is_current %}<span class="pill">current</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

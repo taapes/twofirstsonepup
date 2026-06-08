@@ -547,6 +547,58 @@ def admin_phase_close_discovery(request: Request, db: Session = Depends(get_db))
     return RedirectResponse("/admin/health", status_code=303)
 
 
+# ---- season rollover (Preseason: sync the new FPL league + carry forward) ----
+@router.get("/admin/season", response_class=HTMLResponse)
+def admin_season(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/season", status_code=303)
+    from models import League as _League
+
+    current = services.current_league(db)
+    leagues = [
+        {"name": lg.name, "fpl": lg.fpl_league_id, "season": lg.season_year,
+         "is_current": lg.is_current, "phase": lg.phase}
+        for lg in db.query(_League).order_by(_League.season_year)
+    ]
+    return templates.TemplateResponse("admin_season.html", {
+        "request": request, "league": current, "is_admin": True,
+        "current": {"name": current.name, "season": current.season_year,
+                    "fpl": current.fpl_league_id} if current else None,
+        "leagues": leagues,
+    })
+
+
+@router.post("/admin/season/advance")
+def admin_season_advance(
+    request: Request, db: Session = Depends(get_db), new_fpl_league_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/season", status_code=303)
+    new_id = new_fpl_league_id.strip()
+    if not new_id:
+        return _err("enter the new season's FPL draft league id")
+    old_league = services.current_league(db)
+    if old_league and str(old_league.fpl_league_id) == new_id:
+        return _err("that's already the current league")
+    # 1. sync the new league id (creates the new league row + managers + schedule)
+    import asyncio
+    import sync as _sync
+
+    try:
+        asyncio.run(_sync.sync_all(fpl_league_id=new_id))
+    except Exception as e:  # network / bad id
+        return _err(f"sync of new league failed: {e}", status_code=502)
+    new_league = services.resolve_league(db, new_id)
+    if not new_league:
+        return _err("new league did not sync (check the id)", status_code=502)
+    # 2. carry forward + flip current + preseason
+    try:
+        services.advance_season(db, old_league, new_league)
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/season", status_code=303)
+
+
 @router.post("/admin/lock")
 def admin_lock(
     request: Request, db: Session = Depends(get_db),
