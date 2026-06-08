@@ -39,12 +39,14 @@ from rules import (
     PAYOUT_STRUCTURE,
     PHASE_IN_SEASON,
     PHASE_OFFSEASON,
+    PHASE_PRESEASON,
     RuleViolation,
     SEASON_LAST_GW,
     TRADE_DEADLINE_DAY,
     TRADE_DEADLINE_MONTH,
     compute_payouts,
     current_tanking_streak,
+    next_phase,
     phase_features,
     h2h_standings,
     il_can_return,
@@ -174,6 +176,39 @@ def phase_context(db: Session, league: League) -> dict:
         "phase_manual": bool(league.phase_manual),
         **feats,
     }
+
+
+def advance_phase_if_due(db: Session, league: League, now=None) -> bool:
+    """Auto-advance the time/GW-driven phase transitions during sync (the heartbeat):
+    in_season→offseason at GW38, preseason→in_season at GW1, and the Oct-1 discovery
+    auto-open. Skipped when the admin has pinned the phase (`phase_manual`). Returns
+    True if anything changed. The fact-gathering is here; the decision is pure
+    (`rules.next_phase`)."""
+    import datetime as _dt
+
+    if league.phase_manual:
+        return False
+    today = now or _dt.date.today()
+    new_macro, open_disc = next_phase(
+        league.phase,
+        gw38_done=gw_finished(db, league, SEASON_LAST_GW),
+        gw1_started=(current_gameweek(db, league) or 0) >= 1,
+        today=today,
+        season_year=league.season_year or today.year,
+        discovery_open=bool(league.discovery_open),
+        discovery_done=bool(league.discovery_done),
+    )
+    changed = False
+    if new_macro != league.phase:
+        league.phase = new_macro
+        changed = True
+    if open_disc and not league.discovery_open:
+        league.discovery_open = True
+        changed = True
+    if changed:
+        league.phase_set_at = _dt.datetime.now(_dt.timezone.utc)
+        db.commit()
+    return changed
 
 
 def fixtures_for_gws(db: Session, league: League, gw_numbers: list[int]) -> dict:

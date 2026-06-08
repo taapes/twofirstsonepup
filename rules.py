@@ -67,6 +67,40 @@ def phase_features(
         }
     raise ValueError(f"unknown phase {macro!r}")
 
+
+def next_phase(
+    macro: str,
+    *,
+    gw38_done: bool,
+    gw1_started: bool,
+    today,
+    season_year: int,
+    discovery_open: bool,
+    discovery_done: bool,
+):
+    """Pure auto-advance decision (no DB). Returns `(new_macro, open_discovery)` where
+    `open_discovery` is True only when the Oct-1 discovery window should auto-open this
+    tick (else None). Only the time/GW-driven transitions live here; admin-confirmed
+    moves (offseason→draft, draft→preseason, closing discovery) are explicit elsewhere.
+    """
+    import datetime as _dt
+
+    new_macro = macro
+    if macro == PHASE_IN_SEASON and gw38_done:
+        new_macro = PHASE_OFFSEASON            # season ended
+    elif macro == PHASE_PRESEASON and gw1_started:
+        new_macro = PHASE_IN_SEASON            # GW1 kicked off
+
+    open_discovery = None
+    if (
+        new_macro == PHASE_IN_SEASON
+        and not discovery_open
+        and not discovery_done
+        and today >= _dt.date(season_year, DISCOVERY_OPEN_MONTH, DISCOVERY_OPEN_DAY)
+    ):
+        open_discovery = True
+    return new_macro, open_discovery
+
 # Anti-tanking (across gameweeks): a manager is flagged when, for >= MIN_WEEKS
 # consecutive gameweeks, each of those gameweeks has >= MIN_ZERO_PLAYERS rostered
 # players (the entire 15-man squad, not just the XI) who recorded 0 real-match

@@ -127,5 +127,13 @@ def home(request: Request, db: Session = Depends(get_db)):
 
 @app.post("/admin/sync", dependencies=[Depends(require_admin)])
 def admin_sync():
+    # Heartbeat: advance the time/GW-driven phase before pulling fresh data.
+    from db import SessionLocal
+
+    advanced = False
+    with SessionLocal() as db:
+        league = services.current_league(db)
+        if league:
+            advanced = services.advance_phase_if_due(db, league)
     asyncio.run(sync_all())
-    return {"ok": True}
+    return {"ok": True, "phase_advanced": advanced}

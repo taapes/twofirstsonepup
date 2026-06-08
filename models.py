@@ -71,6 +71,11 @@ class League(Base):
     discovery_open: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # Set once the admin confirms the discovery draft is complete, so the Oct 1
+    # auto-open won't re-open it for the rest of the season.
+    discovery_done: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     # The active season's league row (one True per franchise). Rollover flips it so
     # no env redeploy is needed; resolve_league falls back to the env when unset.
     is_current: Mapped[bool] = mapped_column(
