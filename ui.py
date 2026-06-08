@@ -487,16 +487,64 @@ def admin_health(request: Request, db: Session = Depends(get_db)):
     managers = (
         db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
     )
+    from rules import PHASES
+
     return templates.TemplateResponse("admin_health.html", {
         "request": request, "league": league, "is_admin": True,
         "checks": services.data_health(db, league),
         "writes_locked": league.writes_locked,
         "keepers_locked": league.keepers_locked,
+        "phase_ctx": services.phase_context(db, league),
+        "phase_manual": league.phase_manual,
+        "discovery_open": league.discovery_open,
+        "phases": PHASES,
         "managers": [
             {"name": m.display, "fpl": m.fpl_manager_id, "has_password": m.password_hash is not None}
             for m in managers
         ],
     })
+
+
+@router.post("/admin/phase/draft")
+def admin_phase_draft(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    services.enter_draft_phase(db, league)
+    return RedirectResponse("/admin/health", status_code=303)
+
+
+@router.post("/admin/phase/set")
+def admin_phase_set(
+    request: Request, db: Session = Depends(get_db),
+    phase: str = Form(...), pin: str = Form(""),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.set_phase(db, league, phase, manual=(pin == "on"))
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/health", status_code=303)
+
+
+@router.post("/admin/phase/unpin")
+def admin_phase_unpin(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    services.set_phase_pin(db, league, False)
+    return RedirectResponse("/admin/health", status_code=303)
+
+
+@router.post("/admin/phase/close-discovery")
+def admin_phase_close_discovery(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    services.close_discovery(db, league)
+    return RedirectResponse("/admin/health", status_code=303)
 
 
 @router.post("/admin/lock")

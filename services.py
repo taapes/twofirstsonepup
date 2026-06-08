@@ -178,6 +178,47 @@ def phase_context(db: Session, league: League) -> dict:
     }
 
 
+def set_phase(db: Session, league: League, macro: str, *, manual: bool = True) -> dict:
+    """Admin override: set the macro phase (and pin it so auto-advance won't move it
+    while `manual` is True). Used for the admin-confirmed transitions and manual fixes."""
+    from rules import PHASES
+
+    if macro not in PHASES:
+        raise RuleViolation(f"unknown phase {macro!r}")
+    import datetime as _dt
+
+    league.phase = macro
+    league.phase_manual = manual
+    league.phase_set_at = _dt.datetime.now(_dt.timezone.utc)
+    db.commit()
+    return {"phase": league.phase, "manual": league.phase_manual}
+
+
+def set_phase_pin(db: Session, league: League, manual: bool) -> None:
+    """Pin/unpin the phase (when unpinned, sync auto-advance resumes)."""
+    league.phase_manual = manual
+    db.commit()
+
+
+def enter_draft_phase(db: Session, league: League) -> dict:
+    """Admin: start the (main) draft. Locks keeper selection and moves to the `draft`
+    phase (pinned). Keeper-year decrement + the new-season carry happen at
+    `advance_season` (Preseason), where they're consumed into the new league row."""
+    from rules import PHASE_DRAFT
+
+    league.keepers_locked = True
+    set_phase(db, league, PHASE_DRAFT, manual=True)
+    return {"phase": league.phase, "keepers_locked": True}
+
+
+def close_discovery(db: Session, league: League) -> None:
+    """Admin: confirm the discovery draft is complete — shut the window and mark it
+    done so the Oct-1 auto-open won't re-open it."""
+    league.discovery_open = False
+    league.discovery_done = True
+    db.commit()
+
+
 def advance_phase_if_due(db: Session, league: League, now=None) -> bool:
     """Auto-advance the time/GW-driven phase transitions during sync (the heartbeat):
     in_season→offseason at GW38, preseason→in_season at GW1, and the Oct-1 discovery

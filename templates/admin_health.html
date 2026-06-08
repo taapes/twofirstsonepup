@@ -3,6 +3,43 @@
 {% block content %}
 <h1>Data Health <span class="tag">commissioner</span></h1>
 
+<h2>League Phase</h2>
+<div class="card" style="padding:12px;max-width:560px">
+  <p>Current phase: <strong>{{ phase_ctx.label }}</strong>
+    <span class="tag">{{ phase_ctx.macro }}</span>
+    {% if phase_manual %}<span class="pill warn">pinned (auto-advance off)</span>{% endif %}
+    {% if phase_ctx.discovery_available %}<span class="pill">discovery open</span>{% endif %}</p>
+  <p class="sub">Time/GW transitions advance automatically during sync
+    (GW38→off-season, GW1→in-season, Oct 1→discovery) unless pinned. The draft and the
+    new-season rollover are confirmed here.</p>
+
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+    <form method="post" action="/admin/phase/draft"
+          onsubmit="return confirm('Start the draft? This locks keeper selection.')">
+      <button type="submit">Start draft</button>
+    </form>
+    <form method="post" action="/admin/phase/close-discovery"
+          onsubmit="return confirm('Confirm the discovery draft is complete?')">
+      <button type="submit">Close discovery draft</button>
+    </form>
+    {% if phase_manual %}
+    <form method="post" action="/admin/phase/unpin"><button type="submit">Unpin (resume auto)</button></form>
+    {% endif %}
+  </div>
+
+  <form method="post" action="/admin/phase/set" style="margin-top:10px">
+    <label>Set phase manually
+      <select name="phase">
+        {% for p in phases %}<option value="{{ p }}" {% if p == phase_ctx.macro %}selected{% endif %}>{{ p }}</option>{% endfor %}
+      </select>
+    </label>
+    <label style="margin-left:8px"><input type="checkbox" name="pin" checked> pin</label>
+    <button type="submit" style="margin-left:8px">Set</button>
+    <p class="sub">Advancing to a new season (Preseason) — syncing the new FPL league and
+      carrying keepers/identity forward — is a separate rollover action (next sub-phase).</p>
+  </form>
+</div>
+
 <h2>Editing Lock</h2>
 <div class="card" style="padding:12px;max-width:480px">
   <p class="sub">When locked, the public can't record picks or trades; you (logged in) still can.
