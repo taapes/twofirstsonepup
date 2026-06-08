@@ -186,32 +186,38 @@ def test_payout_structure_percentages_sum_to_one():
     assert round(sum(PAYOUT_STRUCTURE["pct"].values()), 4) == 1.0
 
 
-# ---- keepers (start-vs-final model; value = years REMAINING) ----
+# ---- keepers (start-vs-final + drop detection; value = years REMAINING) ----
 def test_keeper_kept_from_start_carries_remaining():
-    # started with manager, seed remaining=3 -> ("draft", 3), eligible
-    assert keeper_status(True, False, 3) == ("draft", 3)
+    # started, not dropped, seed 3 -> ("draft", 3)
+    assert keeper_status(True, False, False, 3) == ("draft", 3)
     assert keeper_eligible(3) is True
 
 
 def test_keeper_maxed_zero_remaining():
-    # seed remaining=0 -> ("draft", 0) -> NOT eligible
-    assert keeper_status(True, False, 0) == ("draft", 0)
+    assert keeper_status(True, False, False, 0) == ("draft", 0)
     assert keeper_eligible(0) is False
 
 
 def test_keeper_traded_in_carries_remaining():
-    assert keeper_status(False, True, 2) == ("trade", 2)
+    assert keeper_status(False, True, False, 2) == ("trade", 2)
 
 
-def test_keeper_waiver_pickup_is_fresh():
-    # not started, not traded -> waiver, fresh remaining (KEEPER_FRESH_REMAINING)
-    assert keeper_status(False, False, 3) == ("waiver", KEEPER_FRESH_REMAINING)
-    assert keeper_status(False, False, None) == ("waiver", KEEPER_FRESH_REMAINING)
+def test_keeper_clean_fa_pickup_capped_at_fresh():
+    # not started/traded, was a prior keeper (seed 3) picked off FA -> min(3,2)=2
+    assert keeper_status(False, False, False, 3) == ("waiver", 2)
+    # never a keeper -> fresh
+    assert keeper_status(False, False, False, None) == ("waiver", KEEPER_FRESH_REMAINING)
+
+
+def test_keeper_dropped_then_reacquired_is_waiver_capped():
+    # started (drafted) but DROPPED and re-acquired -> waiver, min(prior, 2)
+    assert keeper_status(True, False, True, 3) == ("waiver", 2)   # 3 -> capped at 2
+    assert keeper_status(True, False, True, 1) == ("waiver", 1)   # lower of 1 and 2
+    assert keeper_status(True, False, True, None) == ("waiver", KEEPER_FRESH_REMAINING)
 
 
 def test_keeper_started_without_seed_is_fresh():
-    # started but not in the sheet -> fresh remaining, draft acquisition
-    assert keeper_status(True, False, None) == ("draft", KEEPER_FRESH_REMAINING)
+    assert keeper_status(True, False, False, None) == ("draft", KEEPER_FRESH_REMAINING)
 
 
 def test_keeper_constants():

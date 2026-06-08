@@ -635,21 +635,29 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
     last_n = gw.number
     players = {p.id: p for p in db.query(Player)}
 
-    # Start-of-season (GW1) and final (last GW) roster membership — the two ends
-    # that bound keeper retention (mid-season gaps are tolerated).
-    start_roster: dict = {}  # manager_id -> set of player_ids at GW1
-    final_candidates: list = []  # (manager_id, player_id) on the last GW roster
+    # Full per-GW roster presence so we can detect a DROP (a gap in a manager's
+    # tenure of a player) vs continuous keeping.
+    presence: dict = {}  # (manager_id, player_id) -> set of GW numbers rostered
     for mid, pid, gnum in (
         db.query(Roster.manager_id, Roster.player_id, Gameweek.number)
         .join(Gameweek, Gameweek.id == Roster.gameweek_id)
-        .filter(Gameweek.league_id == league.id, Gameweek.number.in_([1, last_n]))
+        .filter(Gameweek.league_id == league.id)
         .all()
     ):
-        if gnum == 1:
-            start_roster.setdefault(mid, set()).add(pid)
-        if gnum == last_n:
-            final_candidates.append((mid, pid))
+        presence.setdefault((mid, pid), set()).add(gnum)
 
+    il: dict = {}  # (manager_id, player_id) -> GW numbers covered by the IL (not a drop)
+    for e in (
+        db.query(InjuryList)
+        .join(Manager, Manager.id == InjuryList.manager_id)
+        .filter(Manager.league_id == league.id)
+        .all()
+    ):
+        il.setdefault((e.manager_id, e.player_id), set()).update(
+            range(e.start_gw, (e.end_gw or last_n) + 1)
+        )
+
+    final_candidates = [k for k, gws in presence.items() if last_n in gws]
     traded_in = {
         (t.to_manager, t.player_id)
         for t in db.query(Trade).filter_by(league_id=league.id)
@@ -665,11 +673,20 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
         for s in db.query(KeeperSelection).filter_by(league_id=league.id, season_year=upcoming)
     }
 
+    def _dropped(mid, pid) -> bool:
+        gws = presence[(mid, pid)]
+        il_gws = il.get((mid, pid), set())
+        first = min(gws)
+        # a gap between first appearance and the final GW, not covered by the IL,
+        # means the player was dropped (to FA) and later re-acquired
+        return any(g not in gws and g not in il_gws for g in range(first, last_n + 1))
+
     status: dict = {}
     for mid, pid in final_candidates:
         acq, remaining = keeper_status(
-            pid in start_roster.get(mid, set()),
+            1 in presence[(mid, pid)],   # started_with_manager (on GW1 roster)
             (mid, pid) in traded_in,
+            _dropped(mid, pid),
             seed_remaining.get(pid),
         )
         p = players.get(pid)

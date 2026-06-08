@@ -170,25 +170,28 @@ KEEPER_MAX_WAIVER = 2
 
 
 def keeper_status(
-    started_with_manager: bool, traded_in: bool, seed_remaining,
+    started_with_manager: bool, traded_in: bool, dropped: bool, seed_remaining,
     fresh: int = KEEPER_FRESH_REMAINING,
 ) -> tuple:
-    """Start-vs-final keeper model -> (acquisition, years_remaining).
+    """-> (acquisition, years_remaining).
       - started_with_manager: on this manager's start-of-season (GW1) roster,
       - traded_in: arrived via a trade,
-      - seed_remaining: imported years-remaining for the player (None if not in
-        the sheet, i.e. acquired in-season).
+      - dropped: had a gap in this manager's tenure not covered by the IL (i.e.
+        was dropped to FA and re-acquired),
+      - seed_remaining: the player's imported years-remaining (None if not a prior
+        keeper / acquired in-season).
 
-    A player kept from the start ('draft') or acquired by trade ('trade') carries
-    its imported years_remaining; a waiver/FA pickup ('waiver') starts fresh.
-    Mid-season roster gaps are tolerated (start+final rosters bound retention)."""
+    A player **dropped and re-acquired** — or any FA/waiver pickup — is flagged
+    'waiver' with remaining capped at the LOWER of the prior remaining and the
+    fresh cap (so a dropped drafted player can't keep his full clock). A player
+    held from the draft ('draft') or acquired by trade ('trade') carries the
+    imported remaining (fresh if none)."""
+    if dropped or (not started_with_manager and not traded_in):
+        prev = seed_remaining if seed_remaining is not None else fresh
+        return ("waiver", min(prev, fresh))
     if started_with_manager:
-        acq = "draft"
-    elif traded_in:
-        acq = "trade"
-    else:
-        return ("waiver", fresh)
-    return (acq, seed_remaining if seed_remaining is not None else fresh)
+        return ("draft", seed_remaining if seed_remaining is not None else fresh)
+    return ("trade", seed_remaining if seed_remaining is not None else fresh)
 
 
 def keeper_eligible(years_remaining: int) -> bool:
