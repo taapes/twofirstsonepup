@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ season }}/{{ (season + 1) % 100 }} Season{% endblock %}
+{% block content %}
+<p class="sub"><a href="/seasons">← all seasons</a></p>
+<h1>{{ season }}/{{ (season + 1) % 100 }} Season
+  {% if is_current %}<span class="pill">current</span>{% else %}<span class="tag">archived (read-only)</span>{% endif %}</h1>
+
+<h2>Final Standings</h2>
+<div class="card">
+  {% if standings %}
+  <table>
+    <thead><tr><th class="rank">#</th><th>Manager</th><th class="num">Pts</th><th class="num">W-D-L</th><th class="num">For</th></tr></thead>
+    <tbody>
+      {% for s in standings %}
+      <tr><td class="rank">{{ s.rank }}</td><td>{{ s.manager }}</td>
+        <td class="num">{{ s.total }}</td>
+        <td class="num">{{ s.matches_won }}-{{ s.matches_drawn }}-{{ s.matches_lost }}</td>
+        <td class="num">{{ s.points_for }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">No standings for this season.</div>{% endif %}
+</div>
+
+{% if payouts and payouts.payouts %}
+<h2>Winnings</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>Manager</th><th>Breakdown</th><th class="num">Payout</th><th class="num">Overall</th></tr></thead>
+    <tbody>
+      {% for p in payouts.payouts %}
+      <tr><td>{{ p.manager }}</td>
+        <td class="sub">{{ p.breakdown | map(attribute='label') | join(', ') or "—" }}</td>
+        <td class="num">{{ "%.2f"|format(p.total) }}</td>
+        <td class="num {{ 'pos' if p.net > 0 else ('neg' if p.net < 0 else '') }}">{{ "%+.2f"|format(p.net) }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if cups %}
+<h2>Cups</h2>
+{% for cup in cups %}{% if cup.matches %}
+<div class="card" style="margin-bottom:12px">
+  <table>
+    <thead><tr><th colspan="3">{{ cup.name }}</th></tr></thead>
+    <tbody>
+      {% for m in cup.matches %}
+      <tr><td class="rank">{{ m.round_label }}</td>
+        <td>{{ m.home }}{% if m.winner == m.home %} ✓{% endif %} v {{ m.away }}{% if m.winner == m.away %} ✓{% endif %}</td>
+        <td class="num">{% if m.home_score is not none %}{{ m.home_score }}–{{ m.away_score }}{% else %}—{% endif %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}{% endfor %}
+{% endif %}
+{% endblock %}

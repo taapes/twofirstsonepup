@@ -72,6 +72,7 @@
       <a href="/teams">Teams</a>
       <a href="/trades">Trades</a>
       <a href="/history">History</a>
+      <a href="/seasons">Seasons</a>
       <a href="/picks">Picks</a>
       {% if (phase and phase.keepers_editable) or is_admin %}<a href="/keepers">Keepers</a>{% endif %}
       {% if (phase and phase.draft_available) or is_admin %}<a href="/draft/{{ league.season_year + 1 }}">Draft {{ league.season_year + 1 }}</a>{% endif %}{% endif %}

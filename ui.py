@@ -798,6 +798,40 @@ def history_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/seasons", response_class=HTMLResponse)
+def seasons_page(request: Request, db: Session = Depends(get_db)):
+    """Every season the app has data for (one league row per season). Each links to a
+    read-only summary; the current season is marked."""
+    from models import League as _League
+
+    league = _league_or_404(db)
+    rows = db.query(_League).order_by(_League.season_year.desc()).all()
+    return templates.TemplateResponse("seasons.html", {
+        "request": request, "league": league,
+        "seasons": [
+            {"fpl": lg.fpl_league_id, "season": lg.season_year, "name": lg.name,
+             "is_current": lg.is_current, "phase": lg.phase}
+            for lg in rows
+        ],
+    })
+
+
+@router.get("/season/{fpl_league_id}", response_class=HTMLResponse)
+def season_detail(fpl_league_id: str, request: Request, db: Session = Depends(get_db)):
+    """Read-only summary of one season (standings, winnings, cups) — reuses the same
+    read services with that season's league row."""
+    season = services.resolve_league(db, fpl_league_id)
+    if not season:
+        raise HTTPException(status_code=404, detail="season not found")
+    return templates.TemplateResponse("season_detail.html", {
+        "request": request, "league": _league_or_404(db), "season_league": season,
+        "season": season.season_year, "is_current": season.is_current,
+        "standings": services.get_standings(db, season),
+        "payouts": services.get_payouts(db, season),
+        "cups": services.get_cups(db, season),
+    })
+
+
 @router.get("/trade", response_class=HTMLResponse)
 def trade_page(request: Request, db: Session = Depends(get_db)):
     """Public trade entry — any manager can record a trade (players + picks, no cap)."""

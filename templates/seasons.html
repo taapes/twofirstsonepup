@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Seasons{% endblock %}
+{% block content %}
+<h1>Seasons</h1>
+<p class="sub">Every season the league has played. Each is a complete, frozen snapshot —
+  open one for its final standings, winnings, and cups.</p>
+<div class="card">
+  <table>
+    <thead><tr><th>Season</th><th>Phase</th><th></th></tr></thead>
+    <tbody>
+      {% for s in seasons %}
+      <tr>
+        <td><a href="/season/{{ s.fpl }}">{{ s.season }}/{{ (s.season + 1) % 100 }}</a>
+          {% if s.is_current %}<span class="pill">current</span>{% endif %}</td>
+        <td class="tag">{{ s.phase }}</td>
+        <td class="sub">league {{ s.fpl }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
