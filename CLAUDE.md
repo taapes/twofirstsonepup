@@ -194,10 +194,12 @@ Write tests for these. They are custom and non-obvious:
   cup results. Base pot = entry_fee × managers (25/26 $125; rises 26/27 $150, 27/28
   $175, 28/29 $200). Pct of pot: League 1st 40%, 2nd 15%, 3rd 5%; Cup 1st 25%, 2nd 10%,
   3rd 5%. **Pup Cup winner = $25 × Pup entrants pool** (default 6 → $150). Pupmunity
-  Shield $50 to winner. Last-place fine ($125) + fines added to League 1st. **Side
-  pots** (weekly-entry pool, team-sale clause) are an admin ledger (`side_payouts`,
-  managed on `/admin/standings`) folded into overall winnings via `compute_payouts`'
-  `extra`. Each manager's `net` = payout − buy-in (overall winnings). `services.get_payouts`.
+  Shield $50 to winner. Last-place fine ($125) + fines added to League 1st. **Weekly
+  pool** (auto): the highest `gameweek_points` total each GW wins $10 (split on ties,
+  `services.weekly_winnings`); every manager pays a $42.18 annual entry. **Side pots**
+  (team-sale clause, ad-hoc) are an admin ledger (`side_payouts`, on `/admin/standings`).
+  Both fold into overall winnings via `compute_payouts`' `extra`. Each manager's `net`
+  = payout − buy-in (overall winnings). `services.get_payouts`.
 - **Scoreboard:** `GET /scoreboard` (`services.get_scoreboard`) — current-GW H2H live
   scores; 'Scores' nav link in-season.
 - **Waiver window:** `services.waiver_window` surfaces waivers-vs-free-agency on

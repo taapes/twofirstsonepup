@@ -1639,6 +1639,43 @@ def _side_payout_lines(db: Session, league: League) -> dict:
     return extra
 
 
+def weekly_winnings(db: Session, league: League) -> dict:
+    """Auto weekly pool: the highest gameweek_points total each GW wins
+    PAYOUT_STRUCTURE['weekly_prize'] (split equally on ties). Returns
+    {manager_id: total_won} across all played gameweeks."""
+    by_gw: dict = {}  # gw number -> {manager_id: total}
+    for mid, total, gnum in (
+        db.query(GameweekPoints.manager_id, GameweekPoints.total_points, Gameweek.number)
+        .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+    ):
+        by_gw.setdefault(gnum, {})[mid] = total or 0
+    prize = PAYOUT_STRUCTURE["weekly_prize"]
+    won: dict = {}
+    for scores in by_gw.values():
+        top = max(scores.values(), default=0)
+        if top <= 0:  # unplayed / no data
+            continue
+        winners = [mid for mid, s in scores.items() if s == top]
+        share = prize / len(winners)
+        for mid in winners:
+            won[mid] = won.get(mid, 0.0) + share
+    return won
+
+
+def _weekly_pool_lines(db: Session, league: League) -> dict:
+    """Weekly-pool winnings lines: every manager pays the annual entry; weekly winners
+    get their $10/GW share. {manager_id: [(label, amount)]}."""
+    entry = PAYOUT_STRUCTURE["weekly_entry"]
+    won = weekly_winnings(db, league)
+    extra: dict = {}
+    for m in db.query(Manager).filter_by(league_id=league.id):
+        extra[m.id] = [("Weekly pool entry", -float(entry))]
+    for mid, amt in won.items():
+        extra.setdefault(mid, []).append(("Weekly winnings", round(amt, 2)))
+    return extra
+
+
 def _cup_final_and_third(db: Session, cup: Tournament):
     """Identify the Cup's final vs 3rd-place match: the final is between the two
     semifinal winners; the other round-3 match is the 3rd-place playoff."""
@@ -1768,9 +1805,13 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
     # Pup winner takes the Pup buy-in pool ($25 x entrants); default to the typical
     # 6-team field (bottom 4 + 2 Cup losers) when the entrant count is unknown.
     pup_pool = PAYOUT_STRUCTURE["pup_entry"] * (pup_entrants or 6)
-    # merge side-pot lines (Pupmunity Shield + weekly-entry / team-sale side payouts)
+    # merge side-pot lines (weekly pool + Pupmunity Shield + manual side payouts)
     extra: dict = {}
-    for src in (_shield_lines(db, league), _side_payout_lines(db, league)):
+    for src in (
+        _weekly_pool_lines(db, league),
+        _shield_lines(db, league),
+        _side_payout_lines(db, league),
+    ):
         for mid, lines in src.items():
             extra.setdefault(mid, []).extend(lines)
     raw = compute_payouts(

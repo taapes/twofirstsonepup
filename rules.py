@@ -301,6 +301,8 @@ PAYOUT_STRUCTURE = {
     "pup_cup_winner": 150,  # flat fallback if entrant count is unknown
     "pup_entry": 25,        # each Pup entrant pays this; winner takes the pool
     "shield_entry": 25,     # Pupmunity Shield: each of the 2 teams pays this -> winner
+    "weekly_prize": 10,     # highest score each GW wins this (split on ties)
+    "weekly_entry": 42.18,  # each manager's annual weekly-pool buy-in
 }
 
 # ---- Keepers ----
