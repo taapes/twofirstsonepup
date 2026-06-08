@@ -1025,3 +1025,80 @@ def get_history(db: Session, league: League) -> dict:
             {"year": y, "rows": rows} for y, rows in standings_by_season.items()
         ],
     }
+
+
+# ---- general trade entry (manager-usable, players + picks, no cap) ----
+def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
+    """A manager's tradeable assets: current-roster players + future picks they
+    own (their own un-traded picks + picks acquired), across the next few years."""
+    m = _resolve_manager(db, league, fpl_manager_id)
+    person = m.display
+    persons = [mm.display for mm in db.query(Manager).filter_by(league_id=league.id)]
+
+    players = []
+    gw = latest_gameweek(db, league)
+    if gw is not None:
+        for p in (
+            db.query(Player)
+            .join(Roster, Roster.player_id == Player.id)
+            .filter(Roster.manager_id == m.id, Roster.gameweek_id == gw.id)
+            .order_by(Player.position, Player.name)
+        ):
+            players.append({"fpl_id": p.fpl_id, "name": p.name, "position": p.position})
+
+    upcoming = (league.season_year or 0) + 1
+    picks = []
+    for y in range(upcoming, upcoming + 4):
+        for dt, max_round in (("main", 15), ("discovery", 2)):
+            own = pick_ownership(db, league, y, dt)
+            for rnd in range(1, max_round + 1):
+                for orig in persons:
+                    if own.get((rnd, orig), orig) == person:
+                        suffix = "" if orig == person else f" (orig {orig})"
+                        picks.append({
+                            "year": y, "draft_type": dt, "round": rnd, "original_owner": orig,
+                            "label": f"{y} {dt} R{rnd}{suffix}",
+                            "value": f"{y}:{dt}:{rnd}:{orig}",
+                        })
+    return {"manager": person, "fpl": m.fpl_manager_id, "players": players, "picks": picks}
+
+
+def record_trade(
+    db: Session, league: League, *, a_fpl: str, b_fpl: str,
+    a_players: list, a_picks: list, b_players: list, b_picks: list,
+) -> dict:
+    """Record a trade between two managers: any players + picks each way, no cap.
+    Each asset becomes a Trade row; pick assets reassign ownership via the shared
+    pick_ownership computation. Not admin-gated."""
+    A = _resolve_manager(db, league, a_fpl)
+    B = _resolve_manager(db, league, b_fpl)
+    if A.id == B.id:
+        raise RuleViolation("pick two different managers")
+    by_person = {m.display: m for m in db.query(Manager).filter_by(league_id=league.id)}
+
+    def add_player(frm, to, fpl):
+        p = _resolve_player(db, int(fpl))
+        db.add(Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id, player_id=p.id))
+
+    def add_pick(frm, to, spec):
+        y, dt, rnd, orig = spec.split(":")
+        owner = by_person.get(orig)
+        if not owner:
+            raise RuleViolation(f"unknown pick original owner '{orig}'")
+        db.add(Trade(
+            league_id=league.id, from_manager=frm.id, to_manager=to.id,
+            pick_season_year=int(y), pick_draft_type=dt, pick_round=int(rnd),
+            pick_original_manager=owner.id, draft_pick=f"{y} {dt} R{rnd} (orig {orig})",
+        ))
+
+    for fpl in a_players:
+        add_player(A, B, fpl)
+    for fpl in b_players:
+        add_player(B, A, fpl)
+    for spec in a_picks:
+        add_pick(A, B, spec)
+    for spec in b_picks:
+        add_pick(B, A, spec)
+    db.commit()
+    moved = len(a_players) + len(b_players) + len(a_picks) + len(b_picks)
+    return {"a": A.display, "b": B.display, "assets_moved": moved}

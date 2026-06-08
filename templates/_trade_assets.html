@@ -1,0 +1,17 @@
+<div id="assets-{{ side }}">
+  {% if assets %}
+  <p class="sub">{{ assets.manager }} gives:</p>
+  <strong class="tag">Players</strong>
+  <div style="max-height:180px;overflow:auto;border:1px solid var(--line);border-radius:6px;padding:6px;margin:4px 0 10px">
+    {% for p in assets.players %}
+    <label style="display:block"><input type="checkbox" name="{{ side }}_players" value="{{ p.fpl_id }}"> {{ p.name }} <span class="tag">{{ p.position }}</span></label>
+    {% else %}<span class="sub">No roster players.</span>{% endfor %}
+  </div>
+  <strong class="tag">Picks (ctrl/cmd-click for multiple)</strong>
+  <select name="{{ side }}_picks" multiple size="8" style="width:100%;margin-top:4px">
+    {% for pk in assets.picks %}<option value="{{ pk.value }}">{{ pk.label }}</option>{% endfor %}
+  </select>
+  {% else %}
+  <p class="sub">Select a manager.</p>
+  {% endif %}
+</div>

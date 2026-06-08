@@ -121,6 +121,52 @@ def history_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/trade", response_class=HTMLResponse)
+def trade_page(request: Request, db: Session = Depends(get_db)):
+    """Public trade entry — any manager can record a trade (players + picks, no cap)."""
+    league = _league_or_404(db)
+    managers = (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
+    )
+    return templates.TemplateResponse(
+        "trade.html",
+        {"request": request, "league": league, "is_admin": is_admin(request),
+         "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers]},
+    )
+
+
+@router.get("/trade/assets/{side}", response_class=HTMLResponse)
+def trade_assets(side: str, request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    fpl = request.query_params.get(f"{side}_manager")
+    assets = services.manager_assets(db, league, fpl) if fpl else None
+    return templates.TemplateResponse(
+        "_trade_assets.html", {"request": request, "side": side, "assets": assets}
+    )
+
+
+@router.post("/trade")
+def trade_submit(
+    request: Request,
+    db: Session = Depends(get_db),
+    a_manager: str = Form(...),
+    b_manager: str = Form(...),
+    a_players: list[str] = Form(default=[]),
+    b_players: list[str] = Form(default=[]),
+    a_picks: list[str] = Form(default=[]),
+    b_picks: list[str] = Form(default=[]),
+):
+    league = _league_or_404(db)
+    try:
+        services.record_trade(
+            db, league, a_fpl=a_manager, b_fpl=b_manager,
+            a_players=a_players, a_picks=a_picks, b_players=b_players, b_picks=b_picks,
+        )
+    except RuleViolation as e:
+        return HTMLResponse(f"error: {e}", status_code=400)
+    return RedirectResponse("/trades", status_code=303)
+
+
 @router.get("/trades", response_class=HTMLResponse)
 def trades_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)

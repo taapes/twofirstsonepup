@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Record a Trade{% endblock %}
+{% block content %}
+<h1>Record a Trade</h1>
+<p class="sub">Pick two managers and the players + future picks each one gives. No limit on assets.</p>
+<form method="post" action="/trade">
+  <div class="grid2">
+    <div class="card" style="padding:12px">
+      <label>Manager A
+        <select name="a_manager" required style="width:100%"
+                hx-get="/trade/assets/a" hx-target="#assets-a" hx-trigger="change">
+          <option value="">— select —</option>
+          {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <div id="assets-a" style="margin-top:10px"><p class="sub">Select a manager.</p></div>
+    </div>
+    <div class="card" style="padding:12px">
+      <label>Manager B
+        <select name="b_manager" required style="width:100%"
+                hx-get="/trade/assets/b" hx-target="#assets-b" hx-trigger="change">
+          <option value="">— select —</option>
+          {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}
+        </select>
+      </label>
+      <div id="assets-b" style="margin-top:10px"><p class="sub">Select a manager.</p></div>
+    </div>
+  </div>
+  <p style="margin-top:14px"><button type="submit">Record trade</button>
+     <a href="/trades" class="sub" style="margin-left:10px">cancel</a></p>
+</form>
+{% endblock %}
