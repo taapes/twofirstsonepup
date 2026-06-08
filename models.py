@@ -461,6 +461,26 @@ class SeasonHistory(Base):
     pup_winner: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class DiscoveryResult(Base):
+    """Historical discovery-draft results (per season). Player names are free text
+    (historical, not linked to the FPL player table). Manager is a person name."""
+
+    __tablename__ = "discovery_results"
+    __table_args__ = (
+        UniqueConstraint("league_id", "season", "pick_number", name="uq_discovery_result"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    season: Mapped[str] = mapped_column(String, index=True)  # "25/26"
+    round: Mapped[int] = mapped_column(Integer)
+    pick_number: Mapped[int] = mapped_column(Integer)
+    manager_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    player_name: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
 class FuturePick(Base):
     """Future draft-pick ownership imported from the Future Picks sheet (left grid
     only). One row per pick that has changed hands: original owner -> current

@@ -988,8 +988,9 @@ def next_open_pick(board: list[dict]) -> dict | None:
 
 # ---- league history / honor roll ----
 def get_history(db: Session, league: League) -> dict:
-    """Season-by-season winners + career honor roll + per-season standings."""
-    from models import HistoricalStanding, ManagerHonors, SeasonHistory
+    """Season-by-season winners + career honor roll + per-season standings +
+    discovery-draft results."""
+    from models import DiscoveryResult, HistoricalStanding, ManagerHonors, SeasonHistory
 
     seasons = (
         db.query(SeasonHistory)
@@ -1025,7 +1026,24 @@ def get_history(db: Session, league: League) -> dict:
         "standings_by_season": [
             {"year": y, "rows": rows} for y, rows in standings_by_season.items()
         ],
+        "discovery_by_season": _discovery_by_season(db, league),
     }
+
+
+def _discovery_by_season(db: Session, league: League) -> list[dict]:
+    from models import DiscoveryResult
+
+    by_season: dict = {}
+    for r in (
+        db.query(DiscoveryResult)
+        .filter_by(league_id=league.id)
+        .order_by(DiscoveryResult.season.desc(), DiscoveryResult.pick_number)
+        .all()
+    ):
+        by_season.setdefault(r.season, []).append(
+            {"pick": r.pick_number, "round": r.round, "manager": r.manager_name, "player": r.player_name}
+        )
+    return [{"year": y, "picks": rows} for y, rows in by_season.items()]
 
 
 # ---- general trade entry (manager-usable, players + picks, no cap) ----

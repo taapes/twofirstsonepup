@@ -298,12 +298,55 @@ def import_discovery_picks(commit: bool = False) -> None:
     db.close()
 
 
+def _season_label(raw: str) -> str:
+    m = re.match(r"(\d{4})/(\d{2,4})", raw.strip())
+    return f"{m.group(1)[-2:]}/{m.group(2)[-2:]}" if m else raw.strip()
+
+
+def import_discovery_results(commit: bool = False) -> None:
+    """Discovery Draft CSV -> discovery_results (per-season actual picks). Player
+    names kept as free text. Handles the variable Round-2 column offset."""
+    db = SessionLocal()
+    league = db.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
+    from models import DiscoveryResult
+
+    rows = [r + [""] * 12 for r in csv.reader(open(DISCOVERY))]
+    results = []  # (season, round, pick_number, manager, player)
+    season = None
+    for r in rows:
+        c0 = r[0].strip()
+        if re.match(r"\d{4}/\d{2,4}", c0):
+            season = _season_label(c0)
+            continue
+        if season and c0.isdigit():
+            results.append((season, 1, int(c0), r[1].strip() or None, r[2].strip() or None))
+            for j in range(3, len(r) - 2):  # find R2's pick-number cell (offset varies)
+                if r[j].strip().isdigit():
+                    results.append((season, 2, int(r[j]), r[j + 1].strip() or None, r[j + 2].strip() or None))
+                    break
+
+    if commit:
+        db.query(DiscoveryResult).filter_by(league_id=league.id).delete()
+        for season, rd, pn, mgr, pl in results:
+            db.add(DiscoveryResult(league_id=league.id, season=season, round=rd,
+                                   pick_number=pn, manager_name=mgr, player_name=pl))
+        db.commit()
+        print(f"COMMITTED: {len(results)} discovery picks across "
+              f"{len(set(r[0] for r in results))} seasons")
+    else:
+        for r in results[:10]:
+            print("   ", r)
+        print(f"... ({len(results)} picks across {len(set(r[0] for r in results))} seasons; preview)")
+    db.close()
+
+
 _IMPORTERS = {
     "keepers": import_keeper_seeds,
     "history": import_league_history,
     "standings": import_standings_history,
     "futurepicks": import_future_picks,
     "discovery": import_discovery_picks,
+    "discoveryresults": import_discovery_results,
 }
 
 if __name__ == "__main__":
