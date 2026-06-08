@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Player Data{% endblock %}
+{% block content %}
+<h1>Player Data <span class="tag">commissioner</span></h1>
+<p class="sub">Every player + stat. Click a column header to sort; use the filters to narrow
+  (ownership, IL, keeper acquisition/eligibility, position). <span id="pcount"></span></p>
+
+<div class="card" style="padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:end">
+  <label>Search<br><input id="f-q" type="search" placeholder="name / team / owner" style="width:180px"></label>
+  <label>Position<br><select id="f-pos"><option value="">All</option><option>GKP</option><option>DEF</option><option>MID</option><option>FWD</option></select></label>
+  <label>Ownership<br><select id="f-own"><option value="">All</option><option value="rostered">On a team</option><option value="free">Free agent</option></select></label>
+  <label>On IL<br><select id="f-il"><option value="">All</option><option value="1">On IL</option><option value="0">Not on IL</option></select></label>
+  <label>Keeper<br><select id="f-elig"><option value="">All</option><option value="1">Eligible</option><option value="0">Maxed</option></select></label>
+  <label>Acquired<br><select id="f-acq"><option value="">All</option><option>draft</option><option>trade</option><option>waiver</option></select></label>
+  <label>Eligibility<br><select id="f-inelig"><option value="">All</option><option value="0">Eligible only</option><option value="1">Ineligible only</option></select></label>
+</div>
+
+<div class="card" style="overflow-x:auto;margin-top:10px">
+  <table class="stats" id="ptable">
+    <thead><tr>
+      {% set cols = [
+        ("name","Player","t"),("position","Pos","t"),("team","Team","t"),("status","Avail","t"),
+        ("price","£m","n"),("last_season_points","LS Pts","n"),("total_points","Pts","n"),
+        ("form","Form","n"),("points_per_game","PPG","n"),("goals_scored","G","n"),
+        ("assists","A","n"),("clean_sheets","CS","n"),("bonus","Bon","n"),("minutes","Min","n"),
+        ("ict_index","ICT","n"),("selected_by_percent","Own%","n"),
+        ("owner","Owner","t"),("acquisition","Acq","t"),("keeper_years","Yrs","n"),
+        ("keeper_eligible","Keep?","t"),("on_il","IL","t"),("ineligible","Inelig","t")
+      ] %}
+      {% for key, label, kind in cols %}<th data-sort="{{ kind }}" style="cursor:pointer">{{ label }} <span class="sub">↕</span></th>{% endfor %}
+    </tr></thead>
+    <tbody>
+      {% for p in players %}
+      <tr
+        data-pos="{{ p.position or '' }}"
+        data-rostered="{{ 1 if p.rostered else 0 }}"
+        data-il="{{ 1 if p.on_il else 0 }}"
+        data-elig="{{ '1' if p.keeper_eligible else ('0' if p.keeper_eligible is not none else '') }}"
+        data-acq="{{ p.acquisition or '' }}"
+        data-inelig="{{ 1 if p.ineligible else 0 }}"
+        data-search="{{ (p.name ~ ' ' ~ (p.team or '') ~ ' ' ~ (p.owner or ''))|lower }}">
+        <td>{{ p.name }}</td>
+        <td class="sub">{{ p.position or "—" }}</td>
+        <td class="sub">{{ p.team or "—" }}</td>
+        <td class="sub">{{ p.status or "a" }}{% if p.news %} <span title="{{ p.news }}">⚠</span>{% endif %}</td>
+        <td class="num">{{ "%.1f"|format(p.price) if p.price is not none else "—" }}</td>
+        <td class="num">{{ p.last_season_points if p.last_season_points is not none else "—" }}</td>
+        <td class="num">{{ p.total_points if p.total_points is not none else "—" }}</td>
+        <td class="num">{{ p.form if p.form is not none else "—" }}</td>
+        <td class="num">{{ p.points_per_game if p.points_per_game is not none else "—" }}</td>
+        <td class="num">{{ p.goals_scored if p.goals_scored is not none else "—" }}</td>
+        <td class="num">{{ p.assists if p.assists is not none else "—" }}</td>
+        <td class="num">{{ p.clean_sheets if p.clean_sheets is not none else "—" }}</td>
+        <td class="num">{{ p.bonus if p.bonus is not none else "—" }}</td>
+        <td class="num">{{ p.minutes if p.minutes is not none else "—" }}</td>
+        <td class="num">{{ p.ict_index if p.ict_index is not none else "—" }}</td>
+        <td class="num">{{ p.selected_by_percent if p.selected_by_percent is not none else "—" }}</td>
+        <td class="sub">{{ p.owner or "—" }}</td>
+        <td class="sub">{{ p.acquisition or "—" }}</td>
+        <td class="num">{{ p.keeper_years if p.keeper_years is not none else "—" }}</td>
+        <td>{% if p.keeper_eligible is none %}—{% elif p.keeper_eligible %}<span class="pill ok">yes</span>{% else %}<span class="pill warn">maxed</span>{% endif %}</td>
+        <td>{% if p.on_il %}<span class="pill warn">IL</span>{% else %}—{% endif %}</td>
+        <td>{% if p.ineligible %}<span class="pill warn">no</span>{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<style> table.stats th, table.stats td { white-space:nowrap; } </style>
+<script>
+  (function(){
+    var table = document.getElementById('ptable');
+    var tbody = table.tBodies[0];
+    var rows = Array.prototype.slice.call(tbody.rows);
+    var ctrls = ['f-q','f-pos','f-own','f-il','f-elig','f-acq','f-inelig'].map(function(id){return document.getElementById(id);});
+    function val(id){ return document.getElementById(id).value; }
+    function applyFilters(){
+      var q = val('f-q').toLowerCase().trim(), pos = val('f-pos'), own = val('f-own'),
+          il = val('f-il'), elig = val('f-elig'), acq = val('f-acq'), inelig = val('f-inelig');
+      var shown = 0;
+      rows.forEach(function(r){
+        var ok = true;
+        if (q && r.dataset.search.indexOf(q) < 0) ok = false;
+        if (pos && r.dataset.pos !== pos) ok = false;
+        if (own === 'rostered' && r.dataset.rostered !== '1') ok = false;
+        if (own === 'free' && r.dataset.rostered !== '0') ok = false;
+        if (il && r.dataset.il !== il) ok = false;
+        if (elig && r.dataset.elig !== elig) ok = false;
+        if (acq && r.dataset.acq !== acq) ok = false;
+        if (inelig && r.dataset.inelig !== inelig) ok = false;
+        r.style.display = ok ? '' : 'none';
+        if (ok) shown++;
+      });
+      document.getElementById('pcount').textContent = shown + ' shown';
+    }
+    ctrls.forEach(function(c){ c.addEventListener('input', applyFilters); });
+
+    var dir = {};
+    Array.prototype.forEach.call(table.tHead.rows[0].cells, function(th, i){
+      th.addEventListener('click', function(){
+        var numeric = th.dataset.sort === 'n';
+        dir[i] = !dir[i];
+        var vis = rows.filter(function(r){ return r.style.display !== 'none'; });
+        vis.sort(function(a, b){
+          var x = a.cells[i].textContent.trim(), y = b.cells[i].textContent.trim();
+          if (numeric){
+            var nx = parseFloat(x.replace(/[^0-9.\-]/g,'')); var ny = parseFloat(y.replace(/[^0-9.\-]/g,''));
+            nx = isNaN(nx) ? -Infinity : nx; ny = isNaN(ny) ? -Infinity : ny;
+            return dir[i] ? nx - ny : ny - nx;
+          }
+          return dir[i] ? x.localeCompare(y) : y.localeCompare(x);
+        });
+        vis.forEach(function(r){ tbody.appendChild(r); });
+      });
+    });
+    applyFilters();
+  })();
+</script>
+{% endblock %}

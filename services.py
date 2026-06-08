@@ -1260,6 +1260,51 @@ def get_transactions(db: Session, league: League) -> list[dict]:
     ]
 
 
+def player_portal(db: Session, league: League) -> list[dict]:
+    """Every player with every stat + league context (owner, on-IL, ineligible, keeper
+    acquisition/years/eligibility) for the admin data portal. One row per player."""
+    gw = latest_gameweek(db, league)
+    owner_by_pid: dict = {}
+    if gw:
+        for mid, pid in db.query(Roster.manager_id, Roster.player_id).filter_by(gameweek_id=gw.id):
+            owner_by_pid[pid] = mid
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    il_pids = {
+        e.player_id for e in
+        db.query(InjuryList).join(Manager, Manager.id == InjuryList.manager_id)
+        .filter(Manager.league_id == league.id, InjuryList.status == "active")
+    }
+    inelig = _ineligible_fpl_ids(db, league)
+    kstatus = _derive_keeper_status(db, league)
+
+    def _f(v):  # numeric-ish strings -> float, else None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    rows = []
+    for p in db.query(Player).order_by(Player.name):
+        owner_mid = owner_by_pid.get(p.id)
+        ks = kstatus.get(owner_mid, {}).get(p.id) if owner_mid else None
+        rows.append({
+            "fpl_id": p.fpl_id, "name": p.name, "position": p.position,
+            "team": p.current_team, "status": p.status, "news": p.news,
+            "price": (p.price / 10) if p.price is not None else None,
+            "last_season_points": p.last_season_points, "total_points": p.total_points,
+            "form": _f(p.form), "points_per_game": _f(p.points_per_game),
+            "goals_scored": p.goals_scored, "assists": p.assists,
+            "clean_sheets": p.clean_sheets, "bonus": p.bonus, "minutes": p.minutes,
+            "ict_index": _f(p.ict_index), "selected_by_percent": _f(p.selected_by_percent),
+            "owner": names.get(owner_mid), "rostered": owner_mid is not None,
+            "on_il": p.id in il_pids, "ineligible": p.fpl_id in inelig,
+            "acquisition": ks["acquisition"] if ks else None,
+            "keeper_years": ks["years_remaining"] if ks else None,
+            "keeper_eligible": (ks["eligible"] if ks else None),
+        })
+    return rows
+
+
 def reconcile_absences(db: Session, league: League) -> int:
     """After a sync: auto-close any active IL / international-list entry whose player is
     back on the manager's latest synced roster — i.e. the manager re-added them in the

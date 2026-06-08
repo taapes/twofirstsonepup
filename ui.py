@@ -950,6 +950,18 @@ def admin_cups_override(
     return RedirectResponse("/admin/cups", status_code=303)
 
 
+@router.get("/admin/players", response_class=HTMLResponse)
+def admin_players(request: Request, db: Session = Depends(get_db)):
+    """Commissioner data portal: every player + stat, sortable/filterable client-side."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/players", status_code=303)
+    league = _league_or_404(db)
+    return templates.TemplateResponse("admin_players.html", {
+        "request": request, "league": league, "is_admin": True,
+        "players": services.player_portal(db, league),
+    })
+
+
 @router.get("/cups", response_class=HTMLResponse)
 def cups_page(request: Request, db: Session = Depends(get_db)):
     """Public, read-only cup brackets."""
