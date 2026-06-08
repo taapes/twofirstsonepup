@@ -298,7 +298,8 @@ PAYOUT_STRUCTURE = {
         "cup_2": 0.10,
         "cup_3": 0.05,
     },
-    "pup_cup_winner": 150,  # flat, not a percentage
+    "pup_cup_winner": 150,  # flat fallback if entrant count is unknown
+    "pup_entry": 25,        # each Pup entrant pays this; winner takes the pool
 }
 
 # ---- Keepers ----
@@ -425,6 +426,7 @@ def compute_payouts(
     structure: dict = PAYOUT_STRUCTURE,
     other_fines: float = 0.0,
     fines: dict | None = None,
+    pup_pool: float | None = None,
 ) -> dict:
     """Compute each manager's payout. `recipients` maps slot -> manager key
     (league_1/2/3, cup_1/2/3, pup_cup, last_place); missing/None slots are
@@ -440,7 +442,8 @@ def compute_payouts(
     items: list[tuple] = []  # (manager, label, amount)
     for slot, pct in structure["pct"].items():
         items.append((recipients.get(slot), _PAYOUT_LABELS[slot], round(pot * pct, 2)))
-    items.append((recipients.get("pup_cup"), "Pup Cup winner", float(structure["pup_cup_winner"])))
+    pup_amount = float(pup_pool if pup_pool is not None else structure["pup_cup_winner"])
+    items.append((recipients.get("pup_cup"), "Pup Cup winner", pup_amount))
 
     fines_pool = sum(fines.values())
     collected = structure["last_place_fine"] + other_fines + fines_pool

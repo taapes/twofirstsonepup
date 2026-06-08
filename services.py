@@ -1243,6 +1243,30 @@ def score_cup_round(db: Session, league: League, round_no: int, gw1: int, gw2: i
     return get_cups(db, league)
 
 
+def _historical_cup_winners(db: Session, league: League):
+    """(cup_winner_manager_id, pup_winner_manager_id) from the imported season_history
+    for this league's season — matched to a current manager by display name. Either may
+    be None. Lets old seasons (no live bracket) still pay cup/pup winnings."""
+    from models import SeasonHistory
+
+    sy = league.season_year
+    year_str = f"{sy % 100:02d}/{(sy + 1) % 100:02d}" if sy else None
+    row = (
+        db.query(SeasonHistory)
+        .filter_by(league_id=league.id, year=year_str)
+        .one_or_none()
+        if year_str else None
+    )
+    if not row:
+        return None, None
+    by_name = {}
+    for m in db.query(Manager).filter_by(league_id=league.id):
+        if m.display:
+            by_name[m.display.strip().lower()] = m.id
+    resolve = lambda name: by_name.get(name.strip().lower()) if name else None
+    return resolve(row.cup_winner), resolve(row.pup_winner)
+
+
 def override_cup_match(db: Session, league: League, match_id: str, score_a: int, score_b: int) -> dict:
     """Admin: hand-set a cup match's two scores and recompute its winner. Used for the
     DGW 'first game only' case (and any manual correction), since per-fixture splitting
@@ -1360,16 +1384,37 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
         elif third is not None:
             cups_pending = True
     pup = _get_tournament(db, league, "Pup Cup")
+    pup_entrants = 0
     if pup:
+        pup_entrants = len({
+            mid for m in _round_matches(db, pup, 1) for mid in (m.manager_a, m.manager_b)
+        })
         pup_final = _round_matches(db, pup, 3)
         if pup_final and pup_final[0].winner_id:
             recipients["pup_cup"] = pup_final[0].winner_id
         else:
             cups_pending = True
 
+    # Historical fallback: a finished past season may have no live bracket (cups were
+    # never run in-app), but the winners are recorded in season_history. Resolve
+    # cup_1 / pup_cup from there so old payouts still show. (cup 2nd/3rd aren't tracked
+    # in that table.)
+    if not cup and not pup:
+        hist_cup, hist_pup = _historical_cup_winners(db, league)
+        if hist_cup and "cup_1" not in recipients:
+            recipients["cup_1"] = hist_cup
+        if hist_pup and "pup_cup" not in recipients:
+            recipients["pup_cup"] = hist_pup
+        cups_pending = False
+
     num_managers = db.query(Manager).filter_by(league_id=league.id).count()
     fines = _fines_by_manager_id(db, league)
-    raw = compute_payouts(recipients, num_managers, other_fines=other_fines, fines=fines)
+    # Pup winner takes the Pup buy-in pool ($25 x entrants); default to the typical
+    # 6-team field (bottom 4 + 2 Cup losers) when the entrant count is unknown.
+    pup_pool = PAYOUT_STRUCTURE["pup_entry"] * (pup_entrants or 6)
+    raw = compute_payouts(
+        recipients, num_managers, other_fines=other_fines, fines=fines, pup_pool=pup_pool
+    )
     all_mgrs = db.query(Manager).filter_by(league_id=league.id).all()
     names = {m.id: m.display for m in all_mgrs}
     entry_fee = PAYOUT_STRUCTURE["entry_fee"]
