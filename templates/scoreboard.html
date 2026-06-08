@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Scoreboard{% endblock %}
+{% block content %}
+<h1>Scoreboard{% if board.gameweek %} <span class="tag">GW{{ board.gameweek }}</span>{% endif %}</h1>
+{% if board.matches %}
+<p class="sub">Head-to-head matchups for the gameweek (live points; updates as the sync runs).</p>
+<div class="card">
+  <table>
+    <thead><tr><th>Home</th><th class="num">Score</th><th>Away</th><th></th></tr></thead>
+    <tbody>
+      {% for m in board.matches %}
+      <tr>
+        <td>{{ m.home }}{% if m.leader == m.home %} ▲{% endif %}</td>
+        <td class="num">{{ m.home_score if m.home_score is not none else "—" }} – {{ m.away_score if m.away_score is not none else "—" }}</td>
+        <td>{{ m.away }}{% if m.leader == m.away %} ▲{% endif %}</td>
+        <td class="sub">{% if m.finished %}final{% else %}live{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="empty">No matchups for this gameweek yet.</div>
+{% endif %}
+{% endblock %}

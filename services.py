@@ -119,6 +119,38 @@ def current_gameweek(db: Session, league: League) -> int | None:
     return max((gw.number for _p, gw in gp), default=None)
 
 
+def get_scoreboard(db: Session, league: League, gw_number: int | None = None) -> dict:
+    """Current-GW H2H scoreboard: each matchup with live scores (from gameweek_points,
+    falling back to the match's stored points) and whether it's finished."""
+    gw_number = gw_number or current_gameweek(db, league)
+    if gw_number is None:
+        return {"gameweek": None, "matches": []}
+    gw = (
+        db.query(Gameweek).filter_by(league_id=league.id, number=gw_number).one_or_none()
+    )
+    if not gw:
+        return {"gameweek": gw_number, "matches": []}
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    live = {
+        gp.manager_id: gp.total_points
+        for gp in db.query(GameweekPoints).filter_by(gameweek_id=gw.id)
+    }
+    matches = []
+    for mt in db.query(Match).filter_by(league_id=league.id, gameweek_id=gw.id):
+        hs = live.get(mt.home_manager_id, mt.home_points)
+        as_ = live.get(mt.away_manager_id, mt.away_points)
+        matches.append({
+            "home": names.get(mt.home_manager_id),
+            "away": names.get(mt.away_manager_id),
+            "home_score": hs, "away_score": as_,
+            "finished": bool(mt.finished),
+            "leader": (names.get(mt.home_manager_id) if (hs or 0) > (as_ or 0)
+                       else names.get(mt.away_manager_id) if (as_ or 0) > (hs or 0) else None),
+        })
+    matches.sort(key=lambda x: (x["home"] or ""))
+    return {"gameweek": gw_number, "matches": matches}
+
+
 def gw_finished(db: Session, league: League, number: int) -> bool:
     """Has gameweek `number` finished? (any finished H2H match in that GW)."""
     return (

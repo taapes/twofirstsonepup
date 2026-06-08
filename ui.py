@@ -1019,6 +1019,16 @@ def transactions_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/scoreboard", response_class=HTMLResponse)
+def scoreboard_page(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    gw = request.query_params.get("gw")
+    return templates.TemplateResponse("scoreboard.html", {
+        "request": request, "league": league,
+        "board": services.get_scoreboard(db, league, int(gw) if gw and gw.isdigit() else None),
+    })
+
+
 # ---- draft board ----
 @router.get("/draft/{year}", response_class=HTMLResponse)
 def draft_page(year: int, request: Request, draft_type: str = "main", db: Session = Depends(get_db)):

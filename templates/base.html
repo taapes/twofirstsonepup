@@ -70,6 +70,7 @@
       {% if current_fpl and phase and phase.my_team_available %}<a href="/my-team">My Team</a>
       <a href="/my-team/upcoming">Upcoming</a>{% endif %}
       <a href="/teams">Teams</a>
+      {% if phase and phase.gw_logic_active %}<a href="/scoreboard">Scores</a>{% endif %}
       <a href="/trades">Trades</a>
       <a href="/transactions">Transactions</a>
       <a href="/history">History</a>
