@@ -1655,8 +1655,11 @@ def trade_player(
 def record_pick(
     db: Session, league: League, *, season_year: int, pick_number: int,
     owner_fpl: str, player_fpl_id: int, draft_type: str = "main", round: int = 0,
+    overwrite: bool = False,
 ) -> dict:
-    """Record a selection made at a board slot (live). Upsert by pick number."""
+    """Record a selection at a board slot (live). Upsert by slot. With concurrent
+    devices, a slot that already has a player is NOT silently overwritten — raises
+    RuleViolation (a clean "pick already made") unless `overwrite` (admin correction)."""
     owner = _resolve_manager(db, league, owner_fpl)
     player = _resolve_player(db, player_fpl_id)
     existing = (
@@ -1665,6 +1668,8 @@ def record_pick(
         .one_or_none()
     )
     if existing:
+        if existing.player_id is not None and not overwrite:
+            raise RuleViolation(f"pick {pick_number} has already been made")
         existing.manager_id, existing.player_id = owner.id, player.id
     else:
         db.add(DraftPick(

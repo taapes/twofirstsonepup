@@ -900,6 +900,13 @@ def draft_page(year: int, request: Request, draft_type: str = "main", db: Sessio
     return templates.TemplateResponse("draft.html", _board_ctx(request, db, league, year, draft_type))
 
 
+@router.get("/draft/{year}/board", response_class=HTMLResponse)
+def draft_board_partial(year: int, request: Request, draft_type: str = "main", db: Session = Depends(get_db)):
+    """Board partial for the every-7s poll, so all devices see picks live."""
+    league = _league_or_404(db)
+    return templates.TemplateResponse("_board.html", _board_ctx(request, db, league, year, draft_type))
+
+
 @router.get("/draft/{year}/search", response_class=HTMLResponse)
 def draft_search(
     year: int, request: Request, q: str = "", position: str = "", sort: str = "",
@@ -1036,6 +1043,13 @@ def _discovery_board_response(request, db, league, year):
 def discovery_page(year: int, request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     return templates.TemplateResponse("discovery.html", _discovery_ctx(request, db, league, year))
+
+
+@router.get("/discovery/{year}/board", response_class=HTMLResponse)
+def discovery_board_partial(year: int, request: Request, db: Session = Depends(get_db)):
+    """Discovery board partial for the every-7s poll (live multi-device)."""
+    league = _league_or_404(db)
+    return templates.TemplateResponse("_discovery_board.html", _discovery_ctx(request, db, league, year))
 
 
 @router.get("/discovery/{year}/search", response_class=HTMLResponse)

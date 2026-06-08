@@ -355,6 +355,12 @@ class DraftPick(Base):
     records picks as they're made live. manager_id = the picking (owning) manager."""
 
     __tablename__ = "draft_picks"
+    __table_args__ = (
+        UniqueConstraint(
+            "league_id", "season_year", "draft_type", "pick_number",
+            name="uq_draftpick_slot",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     season_year: Mapped[int] = mapped_column(Integer, index=True, server_default="0")

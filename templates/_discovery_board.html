@@ -1,4 +1,4 @@
-<div id="discovery-board">
+<div id="discovery-board" hx-get="/discovery/{{ year }}/board" hx-trigger="every 7s" hx-swap="outerHTML">
   {% if on_clock %}
   <div class="card on-clock-banner">On the clock — pick {{ on_clock.pick }} (R{{ on_clock.round }}): <strong>{{ on_clock.owner }}</strong></div>
   {% else %}
