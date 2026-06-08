@@ -616,7 +616,11 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
         if cont is None:
             continue
         acq = classify_acquisition(cont["first_gw"], (mid, pid) in traded_in, cont["continuous"])
-        years = keeper_years_used(seed_prior.get(pid), cont["continuous"], pid in seed_prior)
+        # Seed keeper-years apply only to players held from the draft or acquired
+        # by trade (history transfers); a waiver pickup resets the clock even if
+        # the player was previously someone's keeper ("dropped -> lose eligibility").
+        credited = (pid in seed_prior) and acq in ("draft", "trade")
+        years = keeper_years_used(seed_prior.get(pid), cont["continuous"], credited)
         p = players.get(pid)
         status.setdefault(mid, {})[pid] = {
             "player": p.name if p else str(pid),
