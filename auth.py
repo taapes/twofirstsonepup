@@ -46,6 +46,26 @@ def is_demo() -> bool:
     return os.getenv("APP_ENV", "prod") == "demo"
 
 
+# Tucker's stable FPL entry id. Keyed to identity, not the shared admin password,
+# because the admin/commissioner login may be handed to a co-commissioner. Override
+# via OWNER_ENTRY_ID if the owner ever changes.
+_DEFAULT_OWNER_ENTRY_ID = "43908"
+
+
+def owner_entry_id() -> str:
+    return os.getenv("OWNER_ENTRY_ID", _DEFAULT_OWNER_ENTRY_ID)
+
+
+def is_owner(request: Request) -> bool:
+    """True only for the portal owner (Tucker), identified by his logged-in
+    per-manager identity (FPL entry id) — NOT the shared admin password. In the
+    demo sandbox anyone may view."""
+    if is_demo():
+        return True
+    me = current_manager_id(request)
+    return me is not None and str(me) == owner_entry_id()
+
+
 def require_admin_session(request: Request) -> None:
     """Guard for UI write routes. 403 if not logged in (the route can catch and
     redirect to /admin/login)."""

@@ -1,6 +1,13 @@
 """Tests for per-manager auth helpers (pure; no DB). Run: pytest"""
 
-from auth import can_act_as, hash_password, is_logged_in, verify_password
+from auth import (
+    can_act_as,
+    hash_password,
+    is_logged_in,
+    is_owner,
+    owner_entry_id,
+    verify_password,
+)
 
 
 class FakeRequest:
@@ -53,3 +60,32 @@ def test_anonymous_cannot_act_and_is_not_logged_in():
 def test_ids_compared_as_strings():
     req = FakeRequest({"manager_id": "123"})
     assert can_act_as(req, 123)  # int form coerced to str
+
+
+# ---- is_owner (Tucker-only portal gate) ----
+def test_owner_only_matches_owner_entry_id(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    owner = owner_entry_id()
+    assert is_owner(FakeRequest({"manager_id": owner}))
+    assert is_owner(FakeRequest({"manager_id": int(owner)}))  # int coerced to str
+
+
+def test_owner_rejects_admin_password_and_other_managers(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    # a shared admin session alone is NOT the owner
+    assert not is_owner(FakeRequest({"admin": True}))
+    # a different logged-in manager is not the owner
+    assert not is_owner(FakeRequest({"manager_id": "999999"}))
+    assert not is_owner(FakeRequest({}))
+
+
+def test_owner_env_override(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.setenv("OWNER_ENTRY_ID", "777")
+    assert is_owner(FakeRequest({"manager_id": "777"}))
+    assert not is_owner(FakeRequest({"manager_id": "43908"}))
+
+
+def test_owner_open_in_demo(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "demo")
+    assert is_owner(FakeRequest({"manager_id": "anyone"}))

@@ -84,7 +84,8 @@
       <span class="spacer"></span>
       {% if phase and phase.label %}<span class="tag">{{ phase.label }}</span> {% endif %}
       {% if current_name %}<span class="tag">{{ current_name }}</span> {% endif %}
-      {% if is_admin %}<span class="tag">admin</span> <a href="/admin/players">Players</a> <a href="/admin/standings">Adjust</a> <a href="/admin/cups">Cups</a> <a href="/admin/health">Health</a> {% endif %}
+      {% if is_owner %}<a href="/admin/players">Players</a> {% endif %}
+      {% if is_admin %}<span class="tag">admin</span> <a href="/admin/standings">Adjust</a> <a href="/admin/cups">Cups</a> <a href="/admin/health">Health</a> {% endif %}
       {% if is_admin or current_fpl %}<a href="/logout">Log out</a>{% else %}<a href="/admin/login?next={{ request.url.path }}">Commissioner login</a>{% endif %}
     </nav>
     {% endif %}

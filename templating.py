@@ -10,14 +10,19 @@ def _identity(request: Request) -> dict:
     """Inject the logged-in identity into every template so the nav (and any page)
     can show who you are without each route passing it. Read purely from the signed
     session — no DB hit."""
+    from auth import is_demo, owner_entry_id
+
     try:
         session = request.session
     except (AssertionError, AttributeError):
         session = {}
+    me = session.get("manager_id")
+    is_owner = is_demo() or (me is not None and str(me) == owner_entry_id())
     return {
         "is_admin": bool(session.get("admin")),
-        "current_fpl": session.get("manager_id"),
+        "current_fpl": me,
         "current_name": session.get("manager_name"),
+        "is_owner": is_owner,
     }
 
 

@@ -13,6 +13,7 @@ from auth import (
     hash_password,
     is_admin,
     is_demo,
+    is_owner,
     verify_password,
 )
 from db import get_db
@@ -952,12 +953,17 @@ def admin_cups_override(
 
 @router.get("/admin/players", response_class=HTMLResponse)
 def admin_players(request: Request, db: Session = Depends(get_db)):
-    """Commissioner data portal: every player + stat, sortable/filterable client-side."""
-    if not is_admin(request):
-        return RedirectResponse("/admin/login?next=/admin/players", status_code=303)
+    """Owner-only data portal (Tucker): every player + stat, sortable/filterable
+    client-side. Gated on the owner's per-manager identity, not the shared admin
+    password — a co-commissioner with the admin login cannot see it."""
+    if not is_owner(request):
+        if current_manager_id(request):
+            return _forbidden(request, "This page is restricted to the league owner.")
+        return RedirectResponse("/login?next=/admin/players", status_code=303)
     league = _league_or_404(db)
     return templates.TemplateResponse("admin_players.html", {
-        "request": request, "league": league, "is_admin": True,
+        "request": request, "league": league, "is_admin": is_admin(request),
+        "is_owner": True,
         "players": services.player_portal(db, league),
     })
 
