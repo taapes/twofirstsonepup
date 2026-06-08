@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}FPL Draft Keeper{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12" integrity="sha384-ujb1lZYygJmzgSwoxRggbCHcjc0rB2XoQrxeTUQyRjrOnlCoYta87iKBWq3EsdM2" crossorigin="anonymous"></script>
+  <style>
+    :root { --bg:#0f1117; --card:#1a1d27; --line:#2b2f3a; --txt:#e6e8ee; --muted:#9aa0ad; --accent:#37d67a; --warn:#ff6b6b; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+    .wrap { max-width:1100px; margin:0 auto; padding:16px 16px 64px; }
+    h1 { font-size:1.5rem; margin:.2em 0; }
+    h2 { font-size:1.05rem; margin:1.4em 0 .5em; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+    a { color:var(--accent); text-decoration:none; }
+    .sub { color:var(--muted); }
+    .nav { display:flex; gap:16px; align-items:center; padding:10px 0 16px; border-bottom:1px solid var(--line); margin-bottom:18px; }
+    .nav .spacer { flex:1; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-bottom:12px; }
+    table { width:100%; border-collapse:collapse; }
+    th,td { text-align:left; padding:8px 12px; border-bottom:1px solid var(--line); }
+    th { font-size:.72rem; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+    tr:last-child td { border-bottom:0; }
+    td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; }
+    .rank { color:var(--muted); width:3em; }
+    .pill { display:inline-block; padding:1px 7px; border-radius:999px; font-size:.75rem; background:rgba(55,214,122,.13); color:var(--accent); }
+    .pill.warn { background:rgba(255,107,107,.15); color:var(--warn); }
+    .empty { padding:14px; color:var(--muted); }
+    .grid2 { display:grid; grid-template-columns:1.3fr 1fr; gap:18px; align-items:start; }
+    @media (max-width:760px){ .grid2 { grid-template-columns:1fr; } }
+    tr.on-clock td { background:rgba(55,214,122,.10); }
+    .on-clock-banner { padding:10px 12px; color:var(--accent); }
+    button { background:var(--accent); color:#06210f; border:0; border-radius:6px; padding:6px 12px; font-weight:600; cursor:pointer; }
+    button:hover { filter:brightness(1.08); }
+    input, select { background:#0f1117; color:var(--txt); border:1px solid var(--line); border-radius:6px; padding:6px 8px; }
+    details { border-top:1px solid var(--line); padding:8px 0; }
+    details:first-child { border-top:0; }
+    summary { cursor:pointer; color:var(--accent); }
+    details form { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="nav">
+      <a href="/">Home</a>
+      {% if league %}<a href="/draft/{{ league.season_year + 1 }}">Draft {{ league.season_year + 1 }}</a>{% endif %}
+      <span class="spacer"></span>
+      {% if is_admin %}<a href="/admin/logout">Log out</a>{% else %}<a href="/admin/login?next={{ request.url.path }}">Commissioner login</a>{% endif %}
+    </nav>
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

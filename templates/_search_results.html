@@ -1,0 +1,22 @@
+<div id="search-results">
+  {% if results %}
+  <table>
+    <tbody>
+      {% for r in results %}
+      <tr>
+        <td>{{ r.name }}</td>
+        <td class="sub">{{ r.position }} · {{ r.team }}</td>
+        {% if is_admin %}
+        <td class="num">
+          <button hx-post="/draft/{{ year }}/pick" hx-vals='{"player_fpl_id": {{ r.fpl_id }}}'
+                  hx-target="#board" hx-swap="outerHTML">Draft</button>
+        </td>
+        {% else %}<td class="num sub">#{{ r.fpl_id }}</td>{% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No available players match.</p>
+  {% endif %}
+</div>

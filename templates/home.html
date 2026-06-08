@@ -34,7 +34,10 @@
       <p class="sub">No league synced yet. Run a sync to populate data.</p>
     {% else %}
       <h1>{{ league.name }}</h1>
-      <p class="sub">Season {{ league.season_year }}/{{ (league.season_year + 1) % 100 }}</p>
+      <p class="sub">Season {{ league.season_year }}/{{ (league.season_year + 1) % 100 }}
+        · <a href="/draft/{{ league.season_year + 1 }}" style="color:var(--accent)">Draft {{ league.season_year + 1 }}</a>
+        · {% if is_admin %}<a href="/admin/logout" style="color:var(--muted)">log out</a>{% else %}<a href="/admin/login" style="color:var(--muted)">commissioner login</a>{% endif %}
+      </p>
 
       <h2>Standings</h2>
       <div class="card">

@@ -27,3 +27,6 @@ services:
       # dashboard alongside the others for one place to manage env.
       - key: FPL_DRAFT_LEAGUE_ID
         sync: false
+      # Signs the commissioner UI session cookie. Generate a random value.
+      - key: SECRET_KEY
+        generateValue: true

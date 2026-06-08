@@ -852,6 +852,7 @@ def get_draft_board(
             league_id=league.id, season_year=season_year, draft_type=draft_type
         )
     }
+    fpl_by_id = {m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)}
     pnames = {p.id: p.name for p in db.query(Player)}
     out = []
     for b in board:
@@ -860,6 +861,7 @@ def get_draft_board(
             "pick": b["pick"],
             "round": b["round"],
             "owner": names.get(b["owner_id"]),
+            "owner_fpl": fpl_by_id.get(b["owner_id"]),
             "original_owner": names.get(b["original_owner_id"]),
             "traded": b["owner_id"] != b["original_owner_id"],
             "player": pnames.get(dp.player_id) if dp and dp.player_id else None,
@@ -906,3 +908,32 @@ def search_players(
         if p.id not in excluded
     ]
     return out[:limit]
+
+
+# ---- trades view + draft helpers ----
+def get_trades(db: Session, league: League) -> list[dict]:
+    """All trades for the league — synced player trades and commissioner-entered
+    pick/player trades — newest-ish first (by GW then id)."""
+    names = {m.id: m.name for m in db.query(Manager).filter_by(league_id=league.id)}
+    pnames = {p.id: p.name for p in db.query(Player)}
+    rows = db.query(Trade).filter_by(league_id=league.id).all()
+    out = []
+    for t in rows:
+        if t.pick_round is not None:
+            kind, what = "pick", t.draft_pick or f"R{t.pick_round} pick"
+        else:
+            kind, what = "player", pnames.get(t.player_id, "—")
+        out.append({
+            "kind": kind,
+            "what": what,
+            "from": names.get(t.from_manager),
+            "to": names.get(t.to_manager),
+            "gw": t.event_gw,
+        })
+    out.sort(key=lambda x: (x["gw"] is None, x["gw"] or 0), reverse=True)
+    return out
+
+
+def next_open_pick(board: list[dict]) -> dict | None:
+    """The on-the-clock slot: first board pick with no player recorded yet."""
+    return next((b for b in board if not b.get("player")), None)

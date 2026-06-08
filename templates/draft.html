@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}{{ draft_type|capitalize }} Draft {{ year }}{% endblock %}
+{% block content %}
+<h1>{{ draft_type|capitalize }} Draft {{ year }}</h1>
+<div class="grid2">
+  <div>
+    {% include "_board.html" %}
+  </div>
+  <div>
+    <h2>Players</h2>
+    <div class="card" style="padding:12px">
+      <input type="search" name="q" placeholder="Search available players…" autocomplete="off"
+        hx-get="/draft/{{ year }}/search" hx-trigger="keyup changed delay:300ms, draftChanged from:body"
+        hx-target="#search-results" hx-include="[name='position']" style="width:100%">
+      <select name="position" hx-get="/draft/{{ year }}/search" hx-trigger="change"
+        hx-target="#search-results" hx-include="[name='q']" style="margin-top:8px">
+        <option value="">All positions</option>
+        <option>GKP</option><option>DEF</option><option>MID</option><option>FWD</option>
+      </select>
+      <div id="search-results" style="margin-top:10px"><p class="empty">Type to search available players.</p></div>
+    </div>
+
+    {% if is_admin %}
+    <h2>Commissioner</h2>
+    <div class="card" style="padding:12px">
+      <details>
+        <summary>Set round-1 order</summary>
+        <form hx-post="/draft/{{ year }}/order" hx-target="#board" hx-swap="outerHTML">
+          <input name="order" placeholder="comma-separated manager ids, in pick order" style="width:100%">
+          <p class="sub">{% for m in managers %}{{ m.name }} = <code>{{ m.fpl }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</p>
+          <button>Save order</button>
+        </form>
+      </details>
+      <details>
+        <summary>Trade a pick</summary>
+        <form hx-post="/draft/{{ year }}/trade-pick" hx-target="#board" hx-swap="outerHTML">
+          <label>orig owner
+            <select name="original_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
+          <label>round <input name="round" type="number" min="1" max="15" style="width:64px"></label>
+          <label>from
+            <select name="from_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
+          <label>to
+            <select name="to_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
+          <button>Trade pick</button>
+        </form>
+      </details>
+      <details>
+        <summary>Trade a player</summary>
+        <form hx-post="/draft/{{ year }}/trade-player" hx-target="#board" hx-swap="outerHTML">
+          <label>player id <input name="player_fpl_id" type="number" style="width:90px"></label>
+          <label>from
+            <select name="from_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
+          <label>to
+            <select name="to_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
+          <button>Trade player</button>
+        </form>
+      </details>
+    </div>
+    {% else %}
+    <p class="sub"><a href="/admin/login?next=/draft/{{ year }}">Commissioner login</a> to draft and trade.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
