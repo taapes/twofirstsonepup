@@ -98,6 +98,19 @@ class Player(Base):
     is_eligible: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
     )
+    # Rich season stats from the classic FPL bootstrap (canonical; overwritten each
+    # sync). Decimal-ish fields kept as strings exactly as FPL returns them.
+    form: Mapped[str | None] = mapped_column(String, nullable=True)
+    points_per_game: Mapped[str | None] = mapped_column(String, nullable=True)
+    total_points: Mapped[int | None] = mapped_column(Integer, nullable=True)  # this season
+    goals_scored: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    assists: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    clean_sheets: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bonus: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ict_index: Mapped[str | None] = mapped_column(String, nullable=True)
+    selected_by_percent: Mapped[str | None] = mapped_column(String, nullable=True)
+    news: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Gameweek(Base):

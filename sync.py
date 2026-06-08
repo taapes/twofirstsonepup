@@ -104,14 +104,14 @@ async def sync_players():
         session.commit()
         async with httpx.AsyncClient() as client:
             data = await _get_json(client, f"{API_BASE}/bootstrap-static")
-            # Prices aren't in the DRAFT API (no budget). Pull now_cost from the
+            # Prices + rich stats aren't in the DRAFT API. Pull them from the
             # classic FPL bootstrap (same element ids), best-effort.
-            prices: dict = {}
+            classic_by_id: dict = {}
             try:
                 classic = await _get_json(
                     client, "https://fantasy.premierleague.com/api/bootstrap-static/"
                 )
-                prices = {e["id"]: e.get("now_cost") for e in classic.get("elements", [])}
+                classic_by_id = {e["id"]: e for e in classic.get("elements", [])}
             except Exception:
                 pass
 
@@ -126,16 +126,35 @@ async def sync_players():
             for t in data.get("teams", [])
         }
 
+        def _int(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
         for e in data.get("elements", []):
+            c = classic_by_id.get(e["id"], {})
             match = {"fpl_id": e["id"]}
             values = {
                 "name": e.get("web_name") or e.get("second_name") or "",
                 "position": positions.get(e.get("element_type"))
                 or _POSITION_FALLBACK.get(e.get("element_type")),
                 "current_team": teams.get(e.get("team")),
-                "status": e.get("status") or None,
-                "price": prices.get(e["id"]),  # now_cost from classic FPL (tenths)
+                "status": e.get("status") or c.get("status") or None,
+                "price": c.get("now_cost"),  # now_cost from classic FPL (tenths)
                 "last_season_points": e.get("total_points"),
+                # rich season stats from classic bootstrap (best-effort)
+                "form": c.get("form"),
+                "points_per_game": c.get("points_per_game"),
+                "total_points": _int(c.get("total_points")),
+                "goals_scored": _int(c.get("goals_scored")),
+                "assists": _int(c.get("assists")),
+                "clean_sheets": _int(c.get("clean_sheets")),
+                "bonus": _int(c.get("bonus")),
+                "minutes": _int(c.get("minutes")),
+                "ict_index": c.get("ict_index"),
+                "selected_by_percent": c.get("selected_by_percent"),
+                "news": c.get("news") or None,
             }
             _upsert(session, Player, match, values)
 
