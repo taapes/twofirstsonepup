@@ -185,13 +185,16 @@ def draft_page(year: int, request: Request, draft_type: str = "main", db: Sessio
 
 
 @router.get("/draft/{year}/search", response_class=HTMLResponse)
-def draft_search(year: int, request: Request, q: str = "", position: str = "", db: Session = Depends(get_db)):
+def draft_search(
+    year: int, request: Request, q: str = "", position: str = "", sort: str = "",
+    db: Session = Depends(get_db),
+):
     league = _league_or_404(db)
     results = []
-    if q.strip() or position:
+    if q.strip() or position or sort:
         results = services.search_players(
             db, league, q=q.strip() or None, position=position or None,
-            available_year=year, limit=25,
+            sort=sort or None, available_year=year, limit=50,
         )
     return templates.TemplateResponse(
         "_search_results.html", {"request": request, "results": results, "year": year, "is_admin": is_admin(request)}
@@ -204,8 +207,6 @@ def draft_pick(
     pick_number: int | None = Form(None), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
-    if not is_admin(request):
-        return HTMLResponse("login required", status_code=403)
     board = services.get_draft_board(db, league, year)
     slot = (
         services.next_open_pick(board)
@@ -230,8 +231,6 @@ def draft_trade_pick(
     draft_type: str = Form("main"), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
-    if not is_admin(request):
-        return HTMLResponse("login required", status_code=403)
     try:
         services.trade_pick(
             db, league, from_fpl=from_fpl, to_fpl=to_fpl, original_fpl=original_fpl,
@@ -248,8 +247,6 @@ def draft_trade_player(
     player_fpl_id: int = Form(...), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
-    if not is_admin(request):
-        return HTMLResponse("login required", status_code=403)
     try:
         services.trade_player(db, league, from_fpl=from_fpl, to_fpl=to_fpl, player_fpl_id=player_fpl_id)
     except RuleViolation as e:
@@ -261,8 +258,6 @@ def draft_trade_player(
 def draft_set_order(year: int, request: Request, order: str = Form(...), db: Session = Depends(get_db)):
     """`order` is a comma-separated list of fpl_manager_ids in round-1 pick order."""
     league = _league_or_404(db)
-    if not is_admin(request):
-        return HTMLResponse("login required", status_code=403)
     ids = [s.strip() for s in order.split(",") if s.strip()]
     try:
         services.set_draft_order(db, league, ids)

@@ -923,17 +923,26 @@ def search_players(
     q: str | None = None,
     position: str | None = None,
     available_year: int | None = None,
+    sort: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
-    """Search the player pool by name substring (case-insensitive) and/or
-    position. If `available_year` is given, exclude players already kept or
-    already drafted in that season's main draft (i.e. only draftable players)."""
+    """Search the player pool. A name query searches ALL players (position is
+    ignored when `q` is set); `position` alone filters by position. `available_year`
+    excludes already-kept/drafted players. `sort` = 'price' or 'points' (desc),
+    else by name."""
     query = db.query(Player)
     if q:
-        query = query.filter(Player.name.ilike(f"%{q}%"))
-    if position:
+        query = query.filter(Player.name.ilike(f"%{q}%"))  # search all (ignore position)
+    elif position:
         query = query.filter(Player.position == position.upper())
-    players = query.order_by(Player.name).all()
+
+    if sort == "price":
+        query = query.order_by(Player.price.desc().nulls_last(), Player.name)
+    elif sort == "points":
+        query = query.order_by(Player.last_season_points.desc().nulls_last(), Player.name)
+    else:
+        query = query.order_by(Player.name)
+    players = query.all()
 
     excluded: set = set()
     if available_year is not None:
@@ -949,7 +958,11 @@ def search_players(
             excluded.add(pid)
 
     out = [
-        {"fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team}
+        {
+            "fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team,
+            "price": (p.price / 10) if p.price is not None else None,
+            "points": p.last_season_points,
+        }
         for p in players
         if p.id not in excluded
     ]
@@ -1086,7 +1099,7 @@ def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
 
     upcoming = (league.season_year or 0) + 1
     picks = []
-    for y in range(upcoming, upcoming + 4):
+    for y in range(upcoming, upcoming + 6):  # next 6 seasons of future picks
         for dt, max_round in (("main", 15), ("discovery", 2)):
             own = pick_ownership(db, league, y, dt)
             for rnd in range(1, max_round + 1):

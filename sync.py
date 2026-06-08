@@ -104,6 +104,16 @@ async def sync_players():
         session.commit()
         async with httpx.AsyncClient() as client:
             data = await _get_json(client, f"{API_BASE}/bootstrap-static")
+            # Prices aren't in the DRAFT API (no budget). Pull now_cost from the
+            # classic FPL bootstrap (same element ids), best-effort.
+            prices: dict = {}
+            try:
+                classic = await _get_json(
+                    client, "https://fantasy.premierleague.com/api/bootstrap-static/"
+                )
+                prices = {e["id"]: e.get("now_cost") for e in classic.get("elements", [])}
+            except Exception:
+                pass
 
         # Build code -> name lookups from the same payload so stored rows are
         # human-readable rather than raw FPL integer codes.
@@ -124,6 +134,8 @@ async def sync_players():
                 or _POSITION_FALLBACK.get(e.get("element_type")),
                 "current_team": teams.get(e.get("team")),
                 "status": e.get("status") or None,
+                "price": prices.get(e["id"]),  # now_cost from classic FPL (tenths)
+                "last_season_points": e.get("total_points"),
             }
             _upsert(session, Player, match, values)
 

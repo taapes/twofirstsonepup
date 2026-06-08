@@ -80,6 +80,8 @@ class Player(Base):
     position: Mapped[str | None] = mapped_column(String, nullable=True)
     current_team: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str | None] = mapped_column(String, nullable=True)
+    price: Mapped[int | None] = mapped_column(Integer, nullable=True)  # now_cost (x10)
+    last_season_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fpl_added_date: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
     is_eligible: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"

@@ -30,3 +30,6 @@ services:
       # Signs the commissioner UI session cookie. Generate a random value.
       - key: SECRET_KEY
         generateValue: true
+      # Commissioner UI login password (temporary, until proper auth).
+      - key: ADMIN_PASSWORD
+        value: sports

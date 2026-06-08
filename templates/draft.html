@@ -9,19 +9,28 @@
   <div>
     <h2>Players</h2>
     <div class="card" style="padding:12px">
-      <input type="search" name="q" placeholder="Search available players…" autocomplete="off"
+      <input type="search" name="q" placeholder="Search all players…" autocomplete="off"
         hx-get="/draft/{{ year }}/search" hx-trigger="keyup changed delay:300ms, draftChanged from:body"
-        hx-target="#search-results" hx-include="[name='position']" style="width:100%">
-      <select name="position" hx-get="/draft/{{ year }}/search" hx-trigger="change"
-        hx-target="#search-results" hx-include="[name='q']" style="margin-top:8px">
-        <option value="">All positions</option>
-        <option>GKP</option><option>DEF</option><option>MID</option><option>FWD</option>
-      </select>
-      <div id="search-results" style="margin-top:10px"><p class="empty">Type to search available players.</p></div>
+        hx-target="#search-results" hx-include="[name='sort']"
+        oninput="this.closest('.card').querySelector('[name=position]').value=''" style="width:100%">
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <select name="position" hx-get="/draft/{{ year }}/search" hx-trigger="change"
+          hx-target="#search-results" hx-include="[name='sort']"
+          onchange="this.closest('.card').querySelector('[name=q]').value=''">
+          <option value="">All positions</option>
+          <option>GKP</option><option>DEF</option><option>MID</option><option>FWD</option>
+        </select>
+        <select name="sort" hx-get="/draft/{{ year }}/search" hx-trigger="change"
+          hx-target="#search-results" hx-include="[name='q'],[name='position']">
+          <option value="">Sort: name</option>
+          <option value="points">Sort: last-season pts</option>
+          <option value="price">Sort: price</option>
+        </select>
+      </div>
+      <div id="search-results" style="margin-top:10px"><p class="empty">Search, filter by position, or sort to browse players.</p></div>
     </div>
 
-    {% if is_admin %}
-    <h2>Commissioner</h2>
+    <h2>Draft controls</h2>
     <div class="card" style="padding:12px">
       <details>
         <summary>Set round-1 order</summary>
@@ -56,9 +65,6 @@
         </form>
       </details>
     </div>
-    {% else %}
-    <p class="sub"><a href="/admin/login?next=/draft/{{ year }}">Commissioner login</a> to draft and trade.</p>
-    {% endif %}
   </div>
 </div>
 {% endblock %}
