@@ -31,9 +31,14 @@ def injury_list(league_key: str, db: Session = Depends(get_db)):
     return services.get_injury_list(db, _league(db, league_key))
 
 
-@router.get("/leagues/{league_key}/infractions")
+@router.get("/leagues/{league_key}/flags")
+def flags(league_key: str, db: Session = Depends(get_db)):
+    return services.get_flags(db, _league(db, league_key))
+
+
+@router.get("/leagues/{league_key}/infractions")  # back-compat alias
 def infractions(league_key: str, db: Session = Depends(get_db)):
-    return services.get_infractions(db, _league(db, league_key))
+    return services.get_flags(db, _league(db, league_key))
 
 
 @router.get("/leagues/{league_key}/cups")

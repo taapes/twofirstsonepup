@@ -59,4 +59,43 @@
   </table>
   {% else %}<div class="empty">No manual adjustments.</div>{% endif %}
 </div>
+
+<h2>Fines</h2>
+<p class="sub">Fines reduce a manager's overall winnings; the league winner collects
+  the pool of all fines. (The last-place fine is applied automatically.)</p>
+<div class="card" style="padding:12px;max-width:520px">
+  <form method="post" action="/admin/fines/add">
+    <label>Manager
+      <select name="fpl_manager_id" required style="width:100%">
+        {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <label>Amount ($)<br><input name="amount" type="number" min="1" style="width:110px" required></label>
+      <label>GW (opt)<br><input name="gameweek" type="number" min="1" max="38" style="width:80px"></label>
+    </div>
+    <label style="display:block;margin-top:8px">Reason<br>
+      <input name="reason" style="width:100%" placeholder="why this fine"></label>
+    <button type="submit" style="margin-top:8px">Add fine</button>
+  </form>
+</div>
+<div class="card">
+  {% if fines %}
+  <table>
+    <thead><tr><th>When</th><th>Manager</th><th class="num">$</th><th>Reason</th><th class="num">GW</th><th></th></tr></thead>
+    <tbody>
+      {% for f in fines %}
+      <tr><td class="sub">{{ f.when[:16] }}</td><td>{{ f.manager }}</td>
+        <td class="num">{{ f.amount }}</td>
+        <td class="sub">{{ f.reason or "" }}</td>
+        <td class="num">{{ f.gameweek if f.gameweek else "—" }}</td>
+        <td><form method="post" action="/admin/fines/delete" style="display:inline"
+                  onsubmit="return confirm('Remove this fine?')">
+          <input type="hidden" name="fine_id" value="{{ f.id }}">
+          <button type="submit" title="remove">✕</button></form></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">No fines.</div>{% endif %}
+</div>
 {% endblock %}

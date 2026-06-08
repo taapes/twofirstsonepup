@@ -17,9 +17,9 @@
       </thead>
       <tbody>
         {% for s in standings %}
-        <tr>
+        <tr {% if current_fpl and s.fpl == current_fpl %}class="you"{% endif %}>
           <td class="rank">{{ s.rank }}</td>
-          <td>{{ s.manager }}{% if s.adjusted %} <span class="pill warn" title="commissioner-adjusted">✎</span>{% endif %}</td>
+          <td>{{ s.manager }}{% if current_fpl and s.fpl == current_fpl %} <span class="pill">you</span>{% endif %}{% if s.adjusted %} <span class="pill warn" title="commissioner-adjusted">✎</span>{% endif %}</td>
           <td class="num">{{ s.total }}</td>
           <td class="num">{{ s.matches_won }}-{{ s.matches_drawn }}-{{ s.matches_lost }}</td>
           <td class="num">{{ s.points_for }}</td>
@@ -35,36 +35,56 @@
     {% for a in adjustments %}{{ a.manager }}{% if a.total_delta %} {{ "%+d"|format(a.total_delta) }} H2H{% endif %}{% if a.points_for_delta %} {{ "%+d"|format(a.points_for_delta) }} total{% endif %}{% if a.gameweek %} (from GW{{ a.gameweek }}){% endif %}{% if a.note %} — {{ a.note }}{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}</p>
   {% endif %}
 
-  <h2>Anti-Tanking Infractions</h2>
+  <h2>Anti-Tanking Flags</h2>
   <div class="card">
-    {% if infractions %}
-      {% for i in infractions %}
+    {% set ns = namespace(shown=0) %}
+    {% for i in flags %}
+      {# public sees only open (un-cleared) windows; admin sees all w/ controls #}
+      {% set open_windows = i.windows if is_admin else i.windows | rejectattr('cleared') | list %}
+      {% if open_windows %}
+      {% set ns.shown = ns.shown + 1 %}
       <div class="infraction">
         <strong>{{ i.manager }}</strong>
-        {% for w in i.windows %}<span class="pill warn">{{ w }}</span>{% endfor %}
+        {% for w in i.windows %}
+          {% if is_admin %}
+            <span class="pill {{ 'ok' if w.cleared else 'warn' }}">{{ w.label }}{% if w.cleared %} ✓ cleared{% endif %}</span>
+            <form method="post" action="/admin/flags/{{ 'restore' if w.cleared else 'clear' }}" style="display:inline">
+              <input type="hidden" name="fpl_manager_id" value="{{ i.fpl }}">
+              <input type="hidden" name="window" value="{{ w.label }}">
+              <button type="submit" class="mini">{{ 'restore' if w.cleared else 'clear' }}</button>
+            </form>
+          {% elif not w.cleared %}
+            <span class="pill warn">{{ w.label }}</span>
+          {% endif %}
+        {% endfor %}
         <div class="sub" style="margin:.3em 0 0">{{ i.rule }}</div>
       </div>
-      {% endfor %}
-    {% else %}<div class="empty">No infractions flagged.</div>{% endif %}
+      {% endif %}
+    {% endfor %}
+    {% if ns.shown == 0 %}<div class="empty">No flags.</div>{% endif %}
   </div>
 
   {% if payouts and payouts.payouts %}
-  <h2>Payouts</h2>
+  <h2>Winnings</h2>
   <div class="card">
     <table>
-      <thead><tr><th>Manager</th><th>Winnings</th><th class="num">Amount</th></tr></thead>
+      <thead><tr><th>Manager</th><th>Breakdown</th><th class="num">Payout</th><th class="num">Overall</th></tr></thead>
       <tbody>
         {% for p in payouts.payouts %}
-        <tr>
+        <tr {% if current_fpl and p.fpl == current_fpl %}class="you"{% endif %}>
           <td>{{ p.manager }}</td>
-          <td class="sub">{{ p.breakdown | map(attribute='label') | join(', ') }}</td>
+          <td class="sub">{{ p.breakdown | map(attribute='label') | join(', ') or "—" }}</td>
           <td class="num">{{ "%.2f"|format(p.total) }}</td>
+          <td class="num {{ 'pos' if p.net > 0 else ('neg' if p.net < 0 else '') }}">{{ "%+.2f"|format(p.net) }}</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
-  <p class="sub">Base pot ${{ payouts.base_pot }} ({{ payouts.num_managers }} × ${{ payouts.entry_fee }}); plus last-place fine + Pup Cup.</p>
+  <p class="sub">Payout = winnings from the pot/cups + fines collected. Overall = payout
+    − buy-in (${{ payouts.entry_fee }}) − fines owed. Base pot ${{ payouts.base_pot }}
+    ({{ payouts.num_managers }} × ${{ payouts.entry_fee }}){% if payouts.total_fines %};
+    ${{ payouts.total_fines }} in fines this season{% endif %}.</p>
   {% endif %}
 
   {% if cups %}

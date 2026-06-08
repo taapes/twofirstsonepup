@@ -70,13 +70,13 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, db: Session = Depends(get_db)):
-    """Minimal public homepage: standings, infractions, injury list."""
+    """Minimal public homepage: standings, anti-tanking flags, injury list."""
     league = services.resolve_league(db, LEAGUE_ID) if LEAGUE_ID else None
     ctx = {"request": request, "league": league, "is_admin": is_admin(request)}
     if league:
         ctx.update(
             standings=services.get_standings(db, league),
-            infractions=services.get_infractions(db, league),
+            flags=services.get_flags(db, league),
             injury_list=services.get_injury_list(db, league),
             cups=services.get_cups(db, league),
             payouts=services.get_payouts(db, league),

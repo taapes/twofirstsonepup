@@ -419,6 +419,7 @@ def admin_standings(request: Request, db: Session = Depends(get_db)):
         "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
         "standings": services.get_standings(db, league),
         "adjustments": services.get_standing_adjustments(db, league),
+        "fines": services.get_fines(db, league),
     })
 
 
@@ -467,6 +468,71 @@ def admin_reset_password(
     league = _league_or_404(db)
     services.reset_manager_password(db, league, fpl_manager_id)
     return RedirectResponse("/admin/health", status_code=303)
+
+
+# ---- anti-tanking flags (admin clear/restore) ----
+@router.post("/admin/flags/clear")
+def admin_clear_flag(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), window: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.clear_flag(db, league, fpl_manager_id, window)
+    except RuleViolation as e:
+        return HTMLResponse(f"error: {e}", status_code=400)
+    return RedirectResponse("/", status_code=303)
+
+
+@router.post("/admin/flags/restore")
+def admin_restore_flag(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), window: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.restore_flag(db, league, fpl_manager_id, window)
+    except RuleViolation as e:
+        return HTMLResponse(f"error: {e}", status_code=400)
+    return RedirectResponse("/", status_code=303)
+
+
+# ---- fines (admin) ----
+@router.post("/admin/fines/add")
+def admin_add_fine(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), amount: str = Form(...),
+    reason: str = Form(""), gameweek: str = Form(""),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/standings", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.add_fine(
+            db, league, fpl_manager_id=fpl_manager_id, amount=int(amount),
+            reason=reason or None, gameweek=int(gameweek) if gameweek.strip() else None,
+        )
+    except (RuleViolation, ValueError) as e:
+        return HTMLResponse(f"error: {e}", status_code=400)
+    return RedirectResponse("/admin/standings", status_code=303)
+
+
+@router.post("/admin/fines/delete")
+def admin_delete_fine(
+    request: Request, db: Session = Depends(get_db), fine_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/standings", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.delete_fine(db, league, fine_id)
+    except RuleViolation as e:
+        return HTMLResponse(f"error: {e}", status_code=400)
+    return RedirectResponse("/admin/standings", status_code=303)
 
 
 @router.get("/history", response_class=HTMLResponse)

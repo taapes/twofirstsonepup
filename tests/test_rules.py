@@ -9,6 +9,7 @@ from rules import (
     PAYOUT_STRUCTURE,
     SEASON_LAST_GW,
     compute_payouts,
+    current_tanking_streak,
     h2h_standings,
     il_can_return,
     il_same_position,
@@ -82,6 +83,30 @@ def test_multiple_separate_windows():
 def test_thresholds_are_three():
     assert ANTI_TANKING_MIN_ZERO_PLAYERS == 3
     assert ANTI_TANKING_MIN_WEEKS == 3
+
+
+# ---- current_tanking_streak (trailing run ending at latest GW) ----
+def test_streak_counts_trailing_qualifying_run():
+    assert current_tanking_streak({8: 3, 9: 4, 10: 3}) == 3
+
+
+def test_streak_resets_when_latest_gw_clean():
+    assert current_tanking_streak({8: 3, 9: 3, 10: 0}) == 0
+
+
+def test_streak_two_is_at_risk_not_yet_flagged():
+    counts = {9: 3, 10: 3}
+    assert current_tanking_streak(counts) == 2
+    assert tanking_windows(counts) == []  # not flagged until 3
+
+
+def test_streak_breaks_on_gap():
+    # GW8 qualifies, GW9 missing, GW10 qualifies -> trailing run is just GW10
+    assert current_tanking_streak({8: 3, 10: 3}) == 1
+
+
+def test_streak_empty():
+    assert current_tanking_streak({}) == 0
 
 
 # ---- injury list ----
@@ -180,6 +205,17 @@ def test_payout_other_fines_go_to_league_winner():
 def test_payout_skips_missing_slots():
     p = compute_payouts({"league_1": "A"}, num_managers=10)
     assert set(p.keys()) == {"A"}
+
+
+def test_payout_per_manager_fines_and_net():
+    # B owes a $40 fine; the winner A collects it; net subtracts the buy-in.
+    r = {"league_1": "A", "last_place": "C"}
+    p = compute_payouts(r, num_managers=10, fines={"B": 40})
+    assert p["A"]["total"] == 500.0 + 125.0 + 40.0  # 40% + last-place fine + B's fine collected
+    assert p["A"]["net"] == p["A"]["total"] - 125  # minus buy-in
+    assert p["B"]["total"] == -40.0       # owes the fine
+    assert p["B"]["net"] == -40.0 - 125   # plus lost buy-in
+    assert p["C"]["total"] == -125.0      # last-place fine
 
 
 def test_payout_structure_percentages_sum_to_one():

@@ -8,6 +8,44 @@
 {% else %}
 <h1>{{ team.manager }} — My Team
   {% if team.gameweek %}<span class="tag">as of GW{{ team.gameweek }}</span>{% endif %}</h1>
+
+{% if team.status %}
+{% set t = team.status.tanking %}
+<div class="grid2" style="margin-bottom:14px">
+  <div class="card statusbox {{ 'danger' if t.state == 'flagged' else ('warn' if t.state == 'at_risk' else 'ok') }}">
+    <strong>Anti-tanking</strong>
+    {% if t.state == 'flagged' %}
+      <span class="pill warn">FLAGGED</span>
+      <p class="sub">You've tripped the rule ({{ t.min_players }}+ players with 0 minutes for {{ t.threshold }}+ straight GWs).</p>
+    {% elif t.state == 'at_risk' %}
+      <span class="pill warn">AT RISK</span>
+      <p class="sub">{{ t.streak }} straight GW(s) with {{ t.min_players }}+ players at 0 minutes — {{ t.threshold }} in a row trips the flag. One more does it.</p>
+    {% else %}
+      <span class="pill ok">OK</span>
+      <p class="sub">No current anti-tanking risk (current streak {{ t.streak }} of {{ t.threshold }}).</p>
+    {% endif %}
+  </div>
+  <div class="card statusbox">
+    <strong>Injury list</strong>
+    {% if team.status.injury_list %}
+    <table style="margin-top:6px">
+      <tbody>
+        {% for il in team.status.injury_list %}
+        <tr><td>{{ il.player }} <span class="sub">{{ il.position }}</span></td>
+          <td class="num sub">since GW{{ il.start_gw }}</td>
+          <td class="num">{% if il.gws_on_il is not none %}{{ il.gws_on_il }} GW{% if il.gws_on_il != 1 %}s{% endif %}{% else %}—{% endif %}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="sub">No players on the injury list.</p>{% endif %}
+  </div>
+</div>
+<style>
+  .statusbox { padding:12px; }
+  .statusbox.danger { border-color:var(--warn); }
+  .statusbox.warn { border-color:#caa14a; }
+</style>
+{% endif %}
 <p class="sub">Form is FPL's recent-points average; ICT is FPL's
   influence-creativity-threat rating. 🔒 = locked as a keeper for next season.
   ● availability (hover for news).</p>

@@ -665,6 +665,50 @@ class StandingAdjustment(Base):
     )
 
 
+class Fine(Base):
+    """A commissioner-issued fine against a manager (league-custom). Fines reduce a
+    manager's net winnings; the league winner collects the pool of all fines."""
+
+    __tablename__ = "fines"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)  # dollars
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gameweek: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class TankingFlagClear(Base):
+    """A commissioner dismissal of a specific anti-tanking flag (manager + GW
+    window). Cleared flags are hidden from the public homepage but kept as a record;
+    if the underlying window changes on re-sync the flag re-appears for review."""
+
+    __tablename__ = "tanking_flag_clears"
+    __table_args__ = (
+        UniqueConstraint("league_id", "manager_id", "window", name="uq_flag_clear"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    window: Mapped[str] = mapped_column(String, nullable=False)  # e.g. "GW10–12"
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class SyncLog(Base):
     """Audit trail for /admin/sync runs. Not FPL-canonical and not league-custom
     truth — operational metadata so we can see when a sync ran and whether it

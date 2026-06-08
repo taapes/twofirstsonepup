@@ -63,6 +63,28 @@ def is_anti_tanking_infraction(
     return bool(tanking_windows(gw_zero_counts, min_players, min_weeks))
 
 
+def current_tanking_streak(
+    gw_zero_counts: dict[int, int],
+    min_players: int = ANTI_TANKING_MIN_ZERO_PLAYERS,
+) -> int:
+    """Length of the trailing run of consecutive gameweeks (ending at the latest
+    GW present) where >= min_players rostered players posted 0 minutes. Used to warn
+    a manager they're approaching the anti-tanking threshold (a streak of
+    min_weeks trips it). 0 = the latest GW doesn't qualify."""
+    if not gw_zero_counts:
+        return 0
+    gws = sorted(gw_zero_counts)
+    streak = 0
+    prev = None
+    for gw in gws:
+        if gw_zero_counts.get(gw, 0) >= min_players:
+            streak = streak + 1 if prev is not None and gw == prev + 1 else 1
+        else:
+            streak = 0
+        prev = gw
+    return streak
+
+
 # ---- Injury list ----
 # An IL'd player must stay on the IL for at least this many gameweeks before
 # returning; SEASON_LAST_GW forces an automatic return at season end regardless.
@@ -283,24 +305,33 @@ def compute_payouts(
     num_managers: int,
     structure: dict = PAYOUT_STRUCTURE,
     other_fines: float = 0.0,
+    fines: dict | None = None,
 ) -> dict:
     """Compute each manager's payout. `recipients` maps slot -> manager key
     (league_1/2/3, cup_1/2/3, pup_cup, last_place); missing/None slots are
-    skipped. Percentage slots pay a share of the base pot; pup_cup is flat; the
-    last-place fine (+ other fines) is added to league_1, and last_place is shown
-    owing the fine. Returns {manager: {"total", "breakdown":[{label, amount}]}}.
+    skipped. Percentage slots pay a share of the base pot; pup_cup is flat. The
+    league winner (league_1) COLLECTS the pool of fines: the last-place fine, any
+    `other_fines` aggregate, and the per-manager `fines` dict (manager key ->
+    dollars owed); each fined manager is shown owing their fine, and last_place
+    owes the last-place fine. `net` is the payout minus the buy-in (entry fee) —
+    the overall winnings. Returns {manager: {"total", "net", "breakdown":[...]}}.
     """
+    fines = fines or {}
     pot = structure["entry_fee"] * num_managers
     items: list[tuple] = []  # (manager, label, amount)
     for slot, pct in structure["pct"].items():
         items.append((recipients.get(slot), _PAYOUT_LABELS[slot], round(pot * pct, 2)))
     items.append((recipients.get("pup_cup"), "Pup Cup winner", float(structure["pup_cup_winner"])))
 
-    bonus = structure["last_place_fine"] + other_fines
-    if recipients.get("league_1") is not None and bonus:
-        items.append((recipients["league_1"], "Last-place fine + other fines", round(bonus, 2)))
+    fines_pool = sum(fines.values())
+    collected = structure["last_place_fine"] + other_fines + fines_pool
+    if recipients.get("league_1") is not None and collected:
+        items.append((recipients["league_1"], "Fines collected", round(collected, 2)))
     if recipients.get("last_place") is not None:
         items.append((recipients["last_place"], "Last-place fine", -float(structure["last_place_fine"])))
+    for mgr_key, amount in fines.items():
+        if amount:
+            items.append((mgr_key, "Fine(s)", -float(amount)))
 
     out: dict = {}
     for manager, label, amount in items:
@@ -309,4 +340,6 @@ def compute_payouts(
         entry = out.setdefault(manager, {"total": 0.0, "breakdown": []})
         entry["total"] = round(entry["total"] + amount, 2)
         entry["breakdown"].append({"label": label, "amount": amount})
+    for entry in out.values():
+        entry["net"] = round(entry["total"] - structure["entry_fee"], 2)
     return out

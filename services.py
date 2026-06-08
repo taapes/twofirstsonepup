@@ -37,6 +37,7 @@ from rules import (
     RuleViolation,
     SEASON_LAST_GW,
     compute_payouts,
+    current_tanking_streak,
     h2h_standings,
     il_can_return,
     il_same_position,
@@ -134,6 +135,7 @@ def get_standings(db: Session, league: League) -> list[dict]:
     for s, m in rows:
         out.append({
             "manager": m.display,
+            "fpl": m.fpl_manager_id,
             "total": (s.total or 0) + dt.get(m.id, 0),
             "points_for": (s.points_for or 0) + dpf.get(m.id, 0),
             "points_against": s.points_against,
@@ -319,6 +321,50 @@ def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None
         "fpl": manager.fpl_manager_id,
         "gameweek": gw.number if gw else None,
         "players": out_players,
+        "status": _manager_status(db, league, manager),
+    }
+
+
+def _manager_status(db: Session, league: League, manager: Manager) -> dict:
+    """A manager's standing on the league's risk rules: anti-tanking (current
+    0-minute streak vs. the threshold) and active injury-list players with how many
+    gameweeks they've been on the IL."""
+    counts = (
+        _tanking_counts_by_manager(db, league).get(manager.id, {}).get("counts", {})
+    )
+    streak = current_tanking_streak(counts)
+    flagged = bool(tanking_windows(counts))
+    if flagged:
+        tank_state = "flagged"
+    elif streak >= ANTI_TANKING_MIN_WEEKS - 1 and streak > 0:
+        tank_state = "at_risk"
+    else:
+        tank_state = "ok"
+
+    cur = current_gameweek(db, league)
+    il_rows = (
+        db.query(InjuryList, Player)
+        .join(Player, Player.id == InjuryList.player_id)
+        .filter(InjuryList.manager_id == manager.id, InjuryList.status == "active")
+        .all()
+    )
+    il = []
+    for entry, p in il_rows:
+        gws_on = None
+        if cur is not None and entry.start_gw is not None:
+            gws_on = max(cur - entry.start_gw + 1, 0)
+        il.append({
+            "player": p.name, "position": p.position,
+            "start_gw": entry.start_gw, "end_gw": entry.end_gw, "gws_on_il": gws_on,
+        })
+    return {
+        "tanking": {
+            "state": tank_state,
+            "streak": streak,
+            "threshold": ANTI_TANKING_MIN_WEEKS,
+            "min_players": ANTI_TANKING_MIN_ZERO_PLAYERS,
+        },
+        "injury_list": il,
     }
 
 
@@ -419,12 +465,8 @@ def _window_label(window: list[int]) -> str:
     return f"GW{window[0]}–{window[-1]}"
 
 
-def get_infractions(db: Session, league: League) -> list[dict]:
-    """Anti-tanking infractions across all synced gameweeks (precomputed read).
-
-    Flags a manager when >=3 of their rostered players posted 0 minutes in each
-    of >=3 consecutive gameweeks. Reads minutes from gameweek_points.player_points.
-    """
+def _tanking_counts_by_manager(db: Session, league: League) -> dict:
+    """manager_id -> {"manager": Manager, "counts": {gw_number: zero_minute_count}}."""
     rows = (
         db.query(GameweekPoints, Gameweek, Manager)
         .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
@@ -432,27 +474,126 @@ def get_infractions(db: Session, league: League) -> list[dict]:
         .filter(Manager.league_id == league.id)
         .all()
     )
-    # manager id -> {"name": str, "counts": {gw_number: zero_minute_count}}
     per_manager: dict = {}
     for gp, gw, m in rows:
-        entry = per_manager.setdefault(m.id, {"name": m.display, "counts": {}})
+        entry = per_manager.setdefault(m.id, {"manager": m, "counts": {}})
         entry["counts"][gw.number] = zero_minute_count(gp.player_points or [])
+    return per_manager
 
-    infractions = []
-    for info in per_manager.values():
+
+def get_flags(db: Session, league: League) -> list[dict]:
+    """Anti-tanking flags across all synced gameweeks (precomputed read). Flags a
+    manager when >=3 of their rostered players posted 0 minutes in each of >=3
+    consecutive gameweeks. Each window carries `cleared` (commissioner-dismissed).
+    """
+    from models import TankingFlagClear
+
+    cleared = {
+        (c.manager_id, c.window)
+        for c in db.query(TankingFlagClear).filter_by(league_id=league.id)
+    }
+    rule = (
+        f"{ANTI_TANKING_MIN_ZERO_PLAYERS}+ rostered players with 0 minutes "
+        f"for {ANTI_TANKING_MIN_WEEKS}+ straight GWs"
+    )
+    flags = []
+    for mid, info in _tanking_counts_by_manager(db, league).items():
         windows = tanking_windows(info["counts"])
-        if windows:
-            infractions.append(
-                {
-                    "manager": info["name"],
-                    "windows": [_window_label(w) for w in windows],
-                    "rule": (
-                        f"{ANTI_TANKING_MIN_ZERO_PLAYERS}+ rostered players with "
-                        f"0 minutes for {ANTI_TANKING_MIN_WEEKS}+ straight GWs"
-                    ),
-                }
-            )
-    return sorted(infractions, key=lambda i: i["manager"])
+        if not windows:
+            continue
+        flags.append({
+            "manager": info["manager"].display,
+            "fpl": info["manager"].fpl_manager_id,
+            "rule": rule,
+            "windows": [
+                {"label": _window_label(w), "cleared": (mid, _window_label(w)) in cleared}
+                for w in windows
+            ],
+        })
+    return sorted(flags, key=lambda f: f["manager"])
+
+
+# back-compat alias (older callers / JSON route)
+get_infractions = get_flags
+
+
+def clear_flag(db: Session, league: League, fpl_manager_id: str, window: str) -> None:
+    """Commissioner dismisses an anti-tanking flag (manager + GW window)."""
+    from models import TankingFlagClear
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    exists = (
+        db.query(TankingFlagClear)
+        .filter_by(league_id=league.id, manager_id=manager.id, window=window)
+        .one_or_none()
+    )
+    if not exists:
+        db.add(TankingFlagClear(league_id=league.id, manager_id=manager.id, window=window))
+        db.commit()
+
+
+def restore_flag(db: Session, league: League, fpl_manager_id: str, window: str) -> None:
+    """Undo a flag dismissal."""
+    from models import TankingFlagClear
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    db.query(TankingFlagClear).filter_by(
+        league_id=league.id, manager_id=manager.id, window=window
+    ).delete()
+    db.commit()
+
+
+# ---- fines (commissioner-issued; feed payouts + net winnings) ----
+def add_fine(
+    db: Session, league: League, *, fpl_manager_id: str, amount: int,
+    reason: str | None = None, gameweek: int | None = None,
+) -> dict:
+    from models import Fine
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    if not amount:
+        raise RuleViolation("enter a non-zero fine amount")
+    db.add(Fine(league_id=league.id, manager_id=manager.id, amount=amount,
+                reason=reason, gameweek=gameweek))
+    db.commit()
+    return {"manager": manager.display, "amount": amount}
+
+
+def delete_fine(db: Session, league: League, fine_id: str) -> None:
+    from models import Fine
+
+    row = db.query(Fine).filter_by(league_id=league.id, id=fine_id).one_or_none()
+    if not row:
+        raise RuleViolation("fine not found")
+    db.delete(row)
+    db.commit()
+
+
+def get_fines(db: Session, league: League) -> list[dict]:
+    """All fines (the evidence log), newest first."""
+    from models import Fine
+
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    rows = (
+        db.query(Fine).filter_by(league_id=league.id)
+        .order_by(Fine.created_at.desc()).all()
+    )
+    return [
+        {"id": str(f.id), "manager": names.get(f.manager_id), "amount": f.amount,
+         "reason": f.reason, "gameweek": f.gameweek,
+         "when": f.created_at.isoformat() if f.created_at else None}
+        for f in rows
+    ]
+
+
+def _fines_by_manager_id(db: Session, league: League) -> dict:
+    """manager_id -> total dollars fined (for payouts)."""
+    from models import Fine
+
+    totals: dict = {}
+    for f in db.query(Fine).filter_by(league_id=league.id):
+        totals[f.manager_id] = totals.get(f.manager_id, 0) + f.amount
+    return totals
 
 
 # ---- injury list (admin-managed writes) ----
@@ -764,10 +905,14 @@ def get_cups(db: Session, league: League) -> list[dict]:
 
 
 def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
-    """Season-end payouts from final standings + cup results (precomputed read).
+    """Season-end payouts + overall winnings from final standings + cup results
+    (precomputed read).
 
     Resolves recipient slots (league 1/2/3 + last from standings; cup 1/2/3 and
     pup champion from the brackets) and applies the configured payout structure.
+    Pulls per-manager fines from the fines table (winner collects the pool); each
+    manager's `net` is their payout minus the buy-in (overall winnings). Every
+    manager is listed (those with no payout show net = -entry_fee - fines).
     """
     by_rank = sorted(
         db.query(Standing, Manager)
@@ -801,17 +946,32 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
             recipients["pup_cup"] = pup_final[0].winner_id
 
     num_managers = db.query(Manager).filter_by(league_id=league.id).count()
-    raw = compute_payouts(recipients, num_managers, other_fines=other_fines)
-    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    payouts = sorted(
-        ({"manager": names.get(mid, str(mid)), **info} for mid, info in raw.items()),
-        key=lambda x: -x["total"],
-    )
+    fines = _fines_by_manager_id(db, league)
+    raw = compute_payouts(recipients, num_managers, other_fines=other_fines, fines=fines)
+    all_mgrs = db.query(Manager).filter_by(league_id=league.id).all()
+    names = {m.id: m.display for m in all_mgrs}
+    entry_fee = PAYOUT_STRUCTURE["entry_fee"]
+    # Every manager appears: those without a payout still lost their buy-in (+ fines).
+    payouts = []
+    for m in all_mgrs:
+        info = raw.get(m.id)
+        if info:
+            payouts.append({"manager": m.display, "fpl": m.fpl_manager_id, **info})
+        else:
+            owed = fines.get(m.id, 0)
+            payouts.append({
+                "manager": m.display, "fpl": m.fpl_manager_id,
+                "total": -float(owed) if owed else 0.0,
+                "net": round(-entry_fee - owed, 2),
+                "breakdown": ([{"label": "Fine(s)", "amount": -float(owed)}] if owed else []),
+            })
+    payouts.sort(key=lambda x: -x["net"])
     return {
-        "entry_fee": PAYOUT_STRUCTURE["entry_fee"],
+        "entry_fee": entry_fee,
         "num_managers": num_managers,
-        "base_pot": PAYOUT_STRUCTURE["entry_fee"] * num_managers,
+        "base_pot": entry_fee * num_managers,
         "total_paid": round(sum(p["total"] for p in payouts), 2),
+        "total_fines": sum(fines.values()),
         "payouts": payouts,
     }
 
