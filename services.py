@@ -1087,8 +1087,8 @@ def place_on_intl(
     db: Session, league: League, *, fpl_manager_id: str, away_fpl_id: int,
     replacement_fpl_id: int, start_gw: int, tournament: str | None = None,
 ) -> dict:
-    """Replace a player away at a national-team cup. One active entry per manager; one
-    replacement for the whole absence (no same-position rule, unlike the IL). Keeper
+    """Replace a player away at a national-team cup with a same-position replacement.
+    One active entry per manager; one replacement for the whole absence. Keeper
     eligibility is preserved while away (covered in the keeper-drop derivation)."""
     from models import InternationalList
 
@@ -1097,6 +1097,11 @@ def place_on_intl(
     replacement = _resolve_player(db, replacement_fpl_id)
     if away.id == replacement.id:
         raise RuleViolation("replacement must be a different player")
+    if not il_same_position(away.position, replacement.position):
+        raise RuleViolation(
+            f"replacement is {replacement.position}, must match the away "
+            f"player's position {away.position}"
+        )
     existing = (
         db.query(InternationalList).filter_by(manager_id=manager.id, status="active").first()
     )

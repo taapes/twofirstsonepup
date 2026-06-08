@@ -198,7 +198,7 @@ Write tests for these. They are custom and non-obvious:
   manager's `net` = payout − buy-in (overall winnings). `services.get_payouts`. Weekly
   entry + team-sale clause still separate pools, not in this calc.
 - **Injury / International lists:** IL (same-position replacement, 4-GW min stay) and
-  the **international list** (AFCON/Asia Cup: no min stay, no same-position rule; one
+  the **international list** (AFCON/Asia Cup: same-position replacement, no min stay; one
   replacement per absence; re-add when the nation is eliminated) both preserve keeper
   eligibility — their gameweeks are folded into the "covered" set in
   `_derive_keeper_status` so an absence never counts as a drop. Manager self-service on

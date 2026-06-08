@@ -116,7 +116,7 @@
         <select name="away_fpl_id" required style="width:100%">
           {% for p in team.players %}<option value="{{ p.fpl_id }}">{{ p.name }} · {{ p.position }}</option>{% endfor %}
         </select></label>
-      <label style="display:block;margin-top:6px">Replacement<br>
+      <label style="display:block;margin-top:6px">Replacement (same position)<br>
         <input list="intlPlayers" name="replacement_name" placeholder="search by name" autocomplete="off" style="width:100%" required>
         <input type="hidden" name="replacement_fpl_id"></label>
       <label style="display:block;margin-top:6px">Tournament
