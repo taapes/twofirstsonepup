@@ -47,6 +47,11 @@
 </head>
 <body>
   <div class="wrap">
+    {% if app_env and app_env != "prod" %}
+    <div style="background:#7a3b00;color:#ffd9a8;padding:6px 12px;border-radius:6px;margin-bottom:10px;font-weight:600">
+      ⚠ {{ app_env|upper }} ENVIRONMENT — not the live league site.
+    </div>
+    {% endif %}
     <nav class="nav">
       <a href="/">Home</a>
       {% if league %}<a href="/teams">Teams</a>
@@ -55,7 +60,7 @@
       <a href="/picks">Picks</a>
       <a href="/draft/{{ league.season_year + 1 }}">Draft {{ league.season_year + 1 }}</a>{% endif %}
       <span class="spacer"></span>
-      {% if is_admin %}<a href="/admin/logout">Log out</a>{% else %}<a href="/admin/login?next={{ request.url.path }}">Commissioner login</a>{% endif %}
+      {% if is_admin %}<a href="/admin/standings">Adjust</a> <a href="/admin/health">Health</a> <a href="/admin/logout">Log out</a>{% else %}<a href="/admin/login?next={{ request.url.path }}">Commissioner login</a>{% endif %}
     </nav>
     {% block content %}{% endblock %}
   </div>

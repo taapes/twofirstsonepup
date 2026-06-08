@@ -44,6 +44,11 @@ class League(Base):
     name: Mapped[str] = mapped_column(String)
     season_year: Mapped[int] = mapped_column(Integer)
     draft_date: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
+    # When true, public edits (draft picks, trades) are frozen; commissioner can
+    # still write. Toggled from the admin tools.
+    writes_locked: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
 
 
 class Manager(Base):

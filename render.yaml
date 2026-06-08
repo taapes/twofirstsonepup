@@ -33,3 +33,6 @@ services:
       # Commissioner UI login password (temporary, until proper auth).
       - key: ADMIN_PASSWORD
         value: sports
+      # Environment label; a non-"prod" value shows a TEST banner site-wide.
+      - key: APP_ENV
+        value: prod

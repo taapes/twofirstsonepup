@@ -187,6 +187,28 @@ Write tests for these. They are custom and non-obvious:
   final's GWs). `GET /v1/.../payouts`, `services.get_payouts`. Weekly entry and
   team-sale clause are separate pools, not in this calc yet.
 
+## Testing ahead of the season & data quality
+
+Three layers protect the live data when testing before the draft:
+
+1. **Neon test branch (true isolation — preferred).** In the Neon console, branch
+   `main` (instant copy-on-write of all data). Point a local run or a separate
+   Render service at the branch's connection string and set `APP_ENV=test` (shows
+   a TEST banner site-wide so it's never mistaken for prod). Test freely; reset or
+   delete the branch when done. Prod is untouched.
+2. **Snapshot/restore (`snapshot.py`).** `save` dumps the whole app DB to a JSON
+   file; `restore` reloads it exactly — revert fake drafts/trades on the live DB
+   if you test there. `snapshots/` is gitignored.
+3. **Editing lock.** `leagues.writes_locked` (toggled at `/admin/health`) freezes
+   public picks/trades; the logged-in commissioner can still write. Use it to
+   keep data clean outside the live-draft window.
+
+**Data-quality aids:** idempotent upsert sync; the two-truths boundary (sync never
+overwrites custom data); trade reconciliation (site+FPL dedupe); the standings
+audit log; `GET /admin/health` runs integrity checks (roster sizes, standings
+coverage, unseeded keepers, malformed pick trades). Public writes are
+unauthenticated by design — no per-user accountability yet.
+
 ## Working style
 
 - Work in scoped chunks, one feature area per session — never the whole app.

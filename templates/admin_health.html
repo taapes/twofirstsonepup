@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Data Health{% endblock %}
+{% block content %}
+<h1>Data Health <span class="tag">commissioner</span></h1>
+
+<h2>Editing Lock</h2>
+<div class="card" style="padding:12px;max-width:480px">
+  <p class="sub">When locked, the public can't record picks or trades; you (logged in) still can.
+     Use this to freeze edits outside the live draft window.</p>
+  <form method="post" action="/admin/lock">
+    <label><input type="checkbox" name="lock" {% if writes_locked %}checked{% endif %}> Lock public editing</label>
+    <button type="submit" style="margin-left:10px">Save</button>
+  </form>
+  <p class="sub">Currently: <strong>{{ "LOCKED" if writes_locked else "open" }}</strong></p>
+</div>
+
+<h2>Checks</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead>
+    <tbody>
+      {% for c in checks %}
+      <tr>
+        <td>{{ c.check }}</td>
+        <td>{% if c.ok %}<span class="pill">OK</span>{% else %}<span class="pill warn">FAIL</span>{% endif %}</td>
+        <td class="sub">{{ c.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

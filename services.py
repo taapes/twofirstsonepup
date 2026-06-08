@@ -1211,3 +1211,65 @@ def record_trade(
     db.commit()
     moved = len(a_players) + len(b_players) + len(a_picks) + len(b_picks)
     return {"a": A.display, "b": B.display, "assets_moved": moved}
+
+
+# ---- data-quality health checks (commissioner ops) ----
+def data_health(db: Session, league: League) -> list[dict]:
+    """Run lightweight data-integrity checks; returns [{check, ok, detail}]."""
+    from models import Gameweek, GameweekPoints, KeeperSeed
+
+    checks = []
+
+    def add(name, ok, detail=""):
+        checks.append({"check": name, "ok": bool(ok), "detail": detail})
+
+    mgrs = db.query(Manager).filter_by(league_id=league.id).all()
+    add("10 managers", len(mgrs) == 10, f"{len(mgrs)} found")
+
+    missing_person = [m.name for m in mgrs if not m.display_name]
+    add("all managers have a person name", not missing_person,
+        ", ".join(missing_person) if missing_person else "ok")
+
+    sc = db.query(Standing).filter_by(league_id=league.id).count()
+    add("standings row per manager", sc == len(mgrs), f"{sc}/{len(mgrs)}")
+
+    gwp = (
+        db.query(GameweekPoints)
+        .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+        .count()
+    )
+    add("gameweek points populated", gwp > 0, f"{gwp} rows")
+
+    gw = latest_gameweek(db, league)
+    bad_rosters = []
+    if gw is not None:
+        counts: dict = {}
+        for (mid,) in db.query(Roster.manager_id).filter_by(gameweek_id=gw.id):
+            counts[mid] = counts.get(mid, 0) + 1
+        names = {m.id: m.display for m in mgrs}
+        bad_rosters = [f"{names.get(m.id)}={counts.get(m.id, 0)}" for m in mgrs if counts.get(m.id, 0) != 15]
+    add(f"15-man rosters (GW{gw.number if gw else '?'})", not bad_rosters,
+        ", ".join(bad_rosters) if bad_rosters else "all 15")
+
+    # players on the latest roster with no keeper seed (they default to fresh)
+    seeded = {pid for (pid,) in db.query(KeeperSeed.player_id).filter_by(league_id=league.id)}
+    on_roster = (
+        {pid for (pid,) in db.query(Roster.player_id).filter_by(gameweek_id=gw.id)}
+        if gw is not None else set()
+    )
+    unseeded = on_roster - seeded
+    add("rostered players have a keeper seed", not unseeded,
+        f"{len(unseeded)} without a seed" if unseeded else "ok")
+
+    # pick trades must name an original owner
+    bad_picks = (
+        db.query(Trade)
+        .filter(Trade.league_id == league.id, Trade.pick_round.isnot(None),
+                Trade.pick_original_manager.is_(None))
+        .count()
+    )
+    add("pick trades have an original owner", bad_picks == 0,
+        f"{bad_picks} malformed" if bad_picks else "ok")
+
+    return checks

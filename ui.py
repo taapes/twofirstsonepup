@@ -40,6 +40,16 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
     }
 
 
+def _writes_allowed(request: Request, league) -> bool:
+    """Public writes (picks/trades) allowed unless the commissioner has locked
+    editing; the logged-in commissioner can always write."""
+    return (not league.writes_locked) or is_admin(request)
+
+
+def _locked_response():
+    return HTMLResponse("Editing is locked by the commissioner.", status_code=423)
+
+
 def _board_response(request, db, league, year, draft_type="main"):
     """Render the board partial + tell HTMX the draft changed (so search refreshes)."""
     resp = templates.TemplateResponse("_board.html", _board_ctx(request, db, league, year, draft_type))
@@ -109,6 +119,28 @@ def picks_page(request: Request, db: Session = Depends(get_db)):
         {"request": request, "league": league, "is_admin": is_admin(request),
          "future_picks": services.get_future_picks(db, league)},
     )
+
+
+@router.get("/admin/health", response_class=HTMLResponse)
+def admin_health(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    return templates.TemplateResponse("admin_health.html", {
+        "request": request, "league": league, "is_admin": True,
+        "checks": services.data_health(db, league),
+        "writes_locked": league.writes_locked,
+    })
+
+
+@router.post("/admin/lock")
+def admin_lock(request: Request, db: Session = Depends(get_db), lock: str = Form("")):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    league.writes_locked = lock == "on"
+    db.commit()
+    return RedirectResponse("/admin/health", status_code=303)
 
 
 @router.get("/admin/standings", response_class=HTMLResponse)
@@ -194,6 +226,8 @@ def trade_submit(
     b_picks: list[str] = Form(default=[]),
 ):
     league = _league_or_404(db)
+    if not _writes_allowed(request, league):
+        return _locked_response()
     try:
         services.record_trade(
             db, league, a_fpl=a_manager, b_fpl=b_manager,
@@ -244,6 +278,8 @@ def draft_pick(
     pick_number: int | None = Form(None), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
+    if not _writes_allowed(request, league):
+        return _locked_response()
     board = services.get_draft_board(db, league, year)
     slot = (
         services.next_open_pick(board)
@@ -268,6 +304,8 @@ def draft_trade_pick(
     draft_type: str = Form("main"), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
+    if not _writes_allowed(request, league):
+        return _locked_response()
     try:
         services.trade_pick(
             db, league, from_fpl=from_fpl, to_fpl=to_fpl, original_fpl=original_fpl,
@@ -284,6 +322,8 @@ def draft_trade_player(
     player_fpl_id: int = Form(...), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
+    if not _writes_allowed(request, league):
+        return _locked_response()
     try:
         services.trade_player(db, league, from_fpl=from_fpl, to_fpl=to_fpl, player_fpl_id=player_fpl_id)
     except RuleViolation as e:
@@ -295,6 +335,8 @@ def draft_trade_player(
 def draft_set_order(year: int, request: Request, order: str = Form(...), db: Session = Depends(get_db)):
     """`order` is a comma-separated list of fpl_manager_ids in round-1 pick order."""
     league = _league_or_404(db)
+    if not _writes_allowed(request, league):
+        return _locked_response()
     ids = [s.strip() for s in order.split(",") if s.strip()]
     try:
         services.set_draft_order(db, league, ids)
