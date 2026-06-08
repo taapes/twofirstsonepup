@@ -146,7 +146,10 @@ Write tests for these. They are custom and non-obvious:
 - **Player eligibility:** Player added to FPL *after* the league draft date is
   ineligible (`players.is_eligible = false`). Surface in the ineligible report.
 - **Injury list:** One IL player per manager. Minimum 4-GW stay. Replacement must
-  be same position. Returns after GW38 or via waiver. Admin-managed.
+  be same position. Returns after GW38 or via waiver. **Manager self-service**
+  (`POST /il/place|return|release`, gated by `can_act_as`; reuses `place_on_il`/
+  `return_from_il`) on the My Team page, with an end-of-season "add back or release"
+  prompt; admin can still act for anyone.
 - **Anti-tanking:** Flag a manager when >=3 of their ROSTERED players (the whole
   15-man squad, not just the XI) record 0 minutes in each of >=3 CONSECUTIVE
   gameweeks. Across-gameweek rule, players may differ week to week. Thresholds
@@ -175,9 +178,11 @@ Write tests for these. They are custom and non-obvious:
   Implemented as auto-generated single-elim brackets seeded from H2H standings
   through GW28: Cup = top-2 byes (QF 3v6/4v5 -> SF vs seeds 1,2 -> Final); the
   two Cup QF losers feed the Pup Cup SFs (Pup play-in 7v10/8v9 first). Ties break
-  to the better seed. Admin: `POST /admin/.../cups/generate` then
-  `.../cups/score-round` per round (gw1, gw2). See `services.generate_cups` /
-  `score_cup_round`.
+  to the better seed. Run from the **browser** at `GET /admin/cups` (generate +
+  score each round); the JSON `POST /admin/.../cups/generate` + `.../cups/score-round`
+  still exist. See `services.generate_cups` / `score_cup_round`. Cup/Pup winnings flow
+  into payouts only once the final round is scored (`get_payouts` sets `cups_pending`
+  otherwise; the homepage Winnings table shows a "results pending" note).
 - **Payouts:** Config-driven (`rules.PAYOUT_STRUCTURE`), auto-calculated from
   final standings + cup results. Base pot = entry_fee × managers (25/26 $125;
   rises 26/27 $150, 27/28 $175, 28/29 $200). Pct of pot: League 1st 40%, 2nd
@@ -232,6 +237,11 @@ login surface. HTMX logged-out requests get an `HX-Redirect` (full nav, not a sw
   (`services.delete_standing_adjustment`, `POST /admin/standings/delete`).
 - The **editing lock** (`leagues.writes_locked`, toggled at `/admin/health`) still
   layers on top: when locked, only admin can write picks/trades.
+- **Hardening** (see `SECURITY.md`): secure/`same_site=lax` cookies (HTTPS-only via
+  `SESSION_HTTPS_ONLY`), a `SECRET_KEY` start-up guard in prod, `hmac.compare_digest`
+  for the admin password/token, security headers (`SecurityHeadersMiddleware`),
+  `text/plain` error responses (`_err`), and bounded numeric input (`_safe_int`).
+  Env vars + the secret-rotation runbook live in `SECURITY.md`.
 
 **My Team pages:** `/my-team` (your current squad with rich FPL stats — form, PPG,
 season pts, G/A/CS/bonus/min, ICT, ownership, availability, keeper badges, a
