@@ -42,6 +42,12 @@
     .teamgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:12px; }
     .yrs { color:var(--muted); font-variant-numeric:tabular-nums; }
     .tag { font-size:.7rem; color:var(--muted); }
+    tr.taken-row td { opacity:.55; }
+    ol.reorder { list-style:none; margin:6px 0; padding:0; display:block; width:100%; }
+    ol.reorder li { display:flex; align-items:center; gap:8px; padding:5px 8px; margin:3px 0; background:#0f1117; border:1px solid var(--line); border-radius:6px; }
+    ol.reorder .grip { color:var(--muted); width:1.6em; font-variant-numeric:tabular-nums; }
+    ol.reorder .oname { flex:1; }
+    ol.reorder .movers button { padding:2px 8px; }
   </style>
   {% block head %}{% endblock %}
 </head>

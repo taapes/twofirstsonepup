@@ -28,6 +28,35 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
     managers = (
         db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
     )
+    mgr_opts = [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers]
+    fpl_by_person = {m.display: m.fpl_manager_id for m in managers}
+
+    # current round-1 order (commissioner-set) for the visual reorder control,
+    # falling back to alphabetical so there's always something to drag
+    r1 = services.get_draft_order(db, league)
+    r1_order = r1 if r1 else mgr_opts
+
+    # tradeable pick slots, grouped by round, with current holder derived
+    pick_slots: dict = {}
+    for b in board:
+        key = (b["round"], b["original_owner"])
+        if key in pick_slots:
+            continue
+        pick_slots[key] = {
+            "round": b["round"],
+            "original_owner": b["original_owner"],
+            "original_fpl": fpl_by_person.get(b["original_owner"]),
+            "current_owner": b["owner"],
+            "current_fpl": b["owner_fpl"],
+        }
+    picks_by_round: dict = {}
+    for slot in pick_slots.values():
+        picks_by_round.setdefault(slot["round"], []).append(slot)
+    pick_rounds = [
+        {"round": r, "picks": sorted(picks_by_round[r], key=lambda s: s["original_owner"])}
+        for r in sorted(picks_by_round)
+    ]
+
     return {
         "request": request,
         "league": league,
@@ -35,7 +64,10 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
         "draft_type": draft_type,
         "board": board,
         "on_clock": services.next_open_pick(board),
-        "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
+        "managers": mgr_opts,
+        "r1_order": r1_order,
+        "pick_rounds": pick_rounds,
+        "players": services.list_players(db, league),
         "is_admin": is_admin(request),
     }
 
@@ -333,7 +365,7 @@ def draft_search(
     if q.strip() or position or sort:
         results = services.search_players(
             db, league, q=q.strip() or None, position=position or None,
-            sort=sort or None, available_year=year, limit=50,
+            sort=sort or None, available_year=year, include_taken=True, limit=50,
         )
     return templates.TemplateResponse(
         "_search_results.html", {"request": request, "results": results, "year": year, "is_admin": is_admin(request)}
@@ -367,13 +399,27 @@ def draft_pick(
 
 @router.post("/draft/{year}/trade-pick", response_class=HTMLResponse)
 def draft_trade_pick(
-    year: int, request: Request, from_fpl: str = Form(...), to_fpl: str = Form(...),
-    original_fpl: str = Form(...), round: int = Form(...),
+    year: int, request: Request, pick: str = Form(...), to_fpl: str = Form(...),
     draft_type: str = Form("main"), db: Session = Depends(get_db),
 ):
+    """`pick` is the combined "<original_fpl>:<round>" slot id; the current holder
+    (from) is derived from live pick ownership so the form only needs pick + to."""
     league = _league_or_404(db)
     if not _writes_allowed(request, league):
         return _locked_response()
+    try:
+        original_fpl, round_str = pick.rsplit(":", 1)
+        round = int(round_str)
+    except ValueError:
+        return HTMLResponse("error: malformed pick", status_code=400)
+    # current holder of this (original owner, round) slot
+    orig_person = services._resolve_manager(db, league, original_fpl).display
+    board = services.get_draft_board(db, league, year, draft_type)
+    cur = next(
+        (b for b in board if b["round"] == round and b["original_owner"] == orig_person),
+        None,
+    )
+    from_fpl = cur["owner_fpl"] if cur else original_fpl
     try:
         services.trade_pick(
             db, league, from_fpl=from_fpl, to_fpl=to_fpl, original_fpl=original_fpl,

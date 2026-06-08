@@ -840,6 +840,26 @@ def set_draft_order(db: Session, league: League, fpl_manager_ids: list[str]) -> 
     return [{"pick": i, "manager": m.display} for i, m in enumerate(managers, start=1)]
 
 
+def get_draft_order(db: Session, league: League) -> list[dict]:
+    """The current commissioner-set round-1 order as [{name, fpl}] in pick order
+    (empty if not set yet)."""
+    return [
+        {"name": m.display, "fpl": m.fpl_manager_id}
+        for m in _r1_order_managers(db, league)
+    ]
+
+
+def list_players(db: Session, league: League) -> list[dict]:
+    """All players as [{fpl_id, label}] for name-based pickers (label disambiguates
+    duplicate names by team)."""
+    rows = db.query(Player).order_by(Player.name).all()
+    return [
+        {"fpl_id": p.fpl_id,
+         "label": f"{p.name} · {p.current_team}" if p.current_team else p.name}
+        for p in rows
+    ]
+
+
 def trade_pick(
     db: Session, league: League, *, from_fpl: str, to_fpl: str, original_fpl: str,
     round: int, season_year: int, draft_type: str = "main",
@@ -1021,12 +1041,15 @@ def search_players(
     position: str | None = None,
     available_year: int | None = None,
     sort: str | None = None,
+    include_taken: bool = False,
     limit: int = 50,
 ) -> list[dict]:
     """Search the player pool. A name query searches ALL players (position is
     ignored when `q` is set); `position` alone filters by position. `available_year`
-    excludes already-kept/drafted players. `sort` = 'price' or 'points' (desc),
-    else by name."""
+    marks already-kept/drafted players: by default they're excluded, but with
+    `include_taken` they're returned flagged (`taken` + `taken_by`) so a search can
+    surface "already drafted" instead of empty results. `sort` = 'price', 'points',
+    or 'team' (else by name)."""
     query = db.query(Player)
     if q:
         query = query.filter(Player.name.ilike(f"%{q}%"))  # search all (ignore position)
@@ -1037,32 +1060,37 @@ def search_players(
         query = query.order_by(Player.price.desc().nulls_last(), Player.name)
     elif sort == "points":
         query = query.order_by(Player.last_season_points.desc().nulls_last(), Player.name)
+    elif sort == "team":
+        query = query.order_by(Player.current_team.asc().nulls_last(), Player.name)
     else:
         query = query.order_by(Player.name)
     players = query.all()
 
-    excluded: set = set()
+    taken: dict = {}  # player_id -> label of who has them ("kept" / "drafted: X")
     if available_year is not None:
-        for (pid,) in db.query(KeeperSelection.player_id).filter_by(
+        names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+        for pid, mid in db.query(KeeperSelection.player_id, KeeperSelection.manager_id).filter_by(
             league_id=league.id, season_year=available_year
         ):
-            excluded.add(pid)
-        for (pid,) in (
-            db.query(DraftPick.player_id)
+            taken[pid] = f"kept: {names.get(mid, '?')}"
+        for pid, mid in (
+            db.query(DraftPick.player_id, DraftPick.manager_id)
             .filter_by(league_id=league.id, season_year=available_year, draft_type="main")
             .filter(DraftPick.player_id.isnot(None))
         ):
-            excluded.add(pid)
+            taken[pid] = f"drafted: {names.get(mid, '?')}"
 
-    out = [
-        {
+    out = []
+    for p in players:
+        is_taken = p.id in taken
+        if is_taken and not include_taken:
+            continue
+        out.append({
             "fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team,
             "price": (p.price / 10) if p.price is not None else None,
             "points": p.last_season_points,
-        }
-        for p in players
-        if p.id not in excluded
-    ]
+            "taken": is_taken, "taken_by": taken.get(p.id),
+        })
     return out[:limit]
 
 

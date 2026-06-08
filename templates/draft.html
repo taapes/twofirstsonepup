@@ -25,6 +25,7 @@
           <option value="">Sort: name</option>
           <option value="points">Sort: last-season pts</option>
           <option value="price">Sort: price</option>
+          <option value="team">Sort: team</option>
         </select>
       </div>
       <div id="search-results" style="margin-top:10px"><p class="empty">Search, filter by position, or sort to browse players.</p></div>
@@ -34,20 +35,38 @@
     <div class="card" style="padding:12px">
       <details>
         <summary>Set round-1 order</summary>
-        <form hx-post="/draft/{{ year }}/order" hx-target="#board" hx-swap="outerHTML">
-          <input name="order" placeholder="comma-separated manager ids, in pick order" style="width:100%">
-          <p class="sub">{% for m in managers %}{{ m.name }} = <code>{{ m.fpl }}</code>{% if not loop.last %} · {% endif %}{% endfor %}</p>
+        <p class="sub">Drag with the ↑/↓ buttons to set the pick order, then save.</p>
+        <form hx-post="/draft/{{ year }}/order" hx-target="#board" hx-swap="outerHTML"
+              onsubmit="syncOrder(this)">
+          <ol id="orderList" class="reorder">
+            {% for m in r1_order %}
+            <li data-fpl="{{ m.fpl }}">
+              <span class="grip">{{ loop.index }}.</span>
+              <span class="oname">{{ m.name }}</span>
+              <span class="movers">
+                <button type="button" onclick="moveRow(this,-1)" title="up">↑</button>
+                <button type="button" onclick="moveRow(this,1)" title="down">↓</button>
+              </span>
+            </li>
+            {% endfor %}
+          </ol>
+          <input type="hidden" name="order" id="orderField">
           <button>Save order</button>
         </form>
       </details>
       <details>
         <summary>Trade a pick</summary>
         <form hx-post="/draft/{{ year }}/trade-pick" hx-target="#board" hx-swap="outerHTML">
-          <label>orig owner
-            <select name="original_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
-          <label>round <input name="round" type="number" min="1" max="15" style="width:64px"></label>
-          <label>from
-            <select name="from_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
+          <label>pick
+            <select name="pick" style="max-width:100%">
+              {% for rnd in pick_rounds %}
+              <optgroup label="Round {{ rnd.round }}">
+                {% for p in rnd.picks %}
+                <option value="{{ p.original_fpl }}:{{ p.round }}">R{{ p.round }} · {{ p.original_owner }}{% if p.current_owner != p.original_owner %} (now {{ p.current_owner }}){% endif %}</option>
+                {% endfor %}
+              </optgroup>
+              {% endfor %}
+            </select></label>
           <label>to
             <select name="to_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
           <button>Trade pick</button>
@@ -55,8 +74,11 @@
       </details>
       <details>
         <summary>Trade a player</summary>
-        <form hx-post="/draft/{{ year }}/trade-player" hx-target="#board" hx-swap="outerHTML">
-          <label>player id <input name="player_fpl_id" type="number" style="width:90px"></label>
+        <form hx-post="/draft/{{ year }}/trade-player" hx-target="#board" hx-swap="outerHTML"
+              onsubmit="return resolvePlayer(this)">
+          <label>player
+            <input list="playerList" name="player_name" placeholder="search by name" autocomplete="off" style="width:100%">
+            <input type="hidden" name="player_fpl_id"></label>
           <label>from
             <select name="from_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
           <label>to
@@ -65,6 +87,28 @@
         </form>
       </details>
     </div>
+    <datalist id="playerList">
+      {% for p in players %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.label }}"></option>{% endfor %}
+    </datalist>
+    <script>
+      function moveRow(btn, dir) {
+        var li = btn.closest('li'), list = li.parentNode;
+        if (dir < 0 && li.previousElementSibling) list.insertBefore(li, li.previousElementSibling);
+        if (dir > 0 && li.nextElementSibling) list.insertBefore(li.nextElementSibling, li);
+        [].forEach.call(list.children, function(row, i){ row.querySelector('.grip').textContent = (i+1) + '.'; });
+      }
+      function syncOrder(form) {
+        var ids = [].map.call(form.querySelectorAll('#orderList li'), function(li){ return li.dataset.fpl; });
+        form.querySelector('#orderField').value = ids.join(',');
+      }
+      function resolvePlayer(form) {
+        var name = form.querySelector('[name=player_name]').value;
+        var opt = document.querySelector('#playerList option[value="' + name.replace(/"/g,'\\"') + '"]');
+        if (!opt) { alert('Pick a player from the list.'); return false; }
+        form.querySelector('[name=player_fpl_id]').value = opt.dataset.fpl;
+        return true;
+      }
+    </script>
   </div>
 </div>
 {% endblock %}
