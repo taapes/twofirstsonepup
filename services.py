@@ -34,16 +34,14 @@ from rules import (
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
     RuleViolation,
-    classify_acquisition,
     compute_payouts,
     h2h_standings,
     il_can_return,
     il_same_position,
     ROSTER_SIZE,
     generate_draft_slots,
-    keeper_continuity,
     keeper_eligible,
-    keeper_years_used,
+    keeper_status,
     match_winner,
     tanking_windows,
     validate_keeper_selection,
@@ -580,47 +578,36 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
     last_n = gw.number
     players = {p.id: p for p in db.query(Player)}
 
-    presence: dict = {}  # (manager_id, player_id) -> set of GW numbers rostered
+    # Start-of-season (GW1) and final (last GW) roster membership — the two ends
+    # that bound keeper retention (mid-season gaps are tolerated).
+    start_roster: dict = {}  # manager_id -> set of player_ids at GW1
+    final_candidates: list = []  # (manager_id, player_id) on the last GW roster
     for mid, pid, gnum in (
         db.query(Roster.manager_id, Roster.player_id, Gameweek.number)
         .join(Gameweek, Gameweek.id == Roster.gameweek_id)
-        .filter(Gameweek.league_id == league.id)
+        .filter(Gameweek.league_id == league.id, Gameweek.number.in_([1, last_n]))
         .all()
     ):
-        presence.setdefault((mid, pid), set()).add(gnum)
-
-    il: dict = {}  # (manager_id, player_id) -> set of GW numbers on IL
-    for e in (
-        db.query(InjuryList)
-        .join(Manager, Manager.id == InjuryList.manager_id)
-        .filter(Manager.league_id == league.id)
-        .all()
-    ):
-        il.setdefault((e.manager_id, e.player_id), set()).update(
-            range(e.start_gw, (e.end_gw or last_n) + 1)
-        )
+        if gnum == 1:
+            start_roster.setdefault(mid, set()).add(pid)
+        if gnum == last_n:
+            final_candidates.append((mid, pid))
 
     traded_in = {
         (t.to_manager, t.player_id)
         for t in db.query(Trade).filter_by(league_id=league.id)
     }
-    seed_prior: dict = {}  # player_id -> prior_years (history transfers via trade)
+    seed_prior: dict = {}  # player_id -> keeper years entering the season
     for s in db.query(KeeperSeed).filter_by(league_id=league.id):
         seed_prior[s.player_id] = max(seed_prior.get(s.player_id, 0), s.prior_years)
 
     status: dict = {}
-    for (mid, pid), gws in presence.items():
-        if last_n not in gws:
-            continue
-        cont = keeper_continuity(gws, il.get((mid, pid), set()), last_n)
-        if cont is None:
-            continue
-        acq = classify_acquisition(cont["first_gw"], (mid, pid) in traded_in, cont["continuous"])
-        # Seed keeper-years apply only to players held from the draft or acquired
-        # by trade (history transfers); a waiver pickup resets the clock even if
-        # the player was previously someone's keeper ("dropped -> lose eligibility").
-        credited = (pid in seed_prior) and acq in ("draft", "trade")
-        years = keeper_years_used(seed_prior.get(pid), cont["continuous"], credited)
+    for mid, pid in final_candidates:
+        acq, years = keeper_status(
+            pid in start_roster.get(mid, set()),
+            (mid, pid) in traded_in,
+            seed_prior.get(pid),
+        )
         p = players.get(pid)
         status.setdefault(mid, {})[pid] = {
             "player": p.name if p else str(pid),

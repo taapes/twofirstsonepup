@@ -168,45 +168,25 @@ KEEPER_MAX_YEARS = 4
 KEEPER_MAX_WAIVER = 2
 
 
-def keeper_continuity(presence_gws: set, il_gws: set, last_gw: int) -> dict | None:
-    """Whether a player was held continuously through the season end.
+def keeper_status(started_with_manager: bool, traded_in: bool, seed_prior) -> tuple:
+    """Start-vs-final keeper model. Determines a GW38 roster player's acquisition
+    and keeper-years for the manager who holds them, from three signals:
+      - started_with_manager: on this manager's start-of-season (GW1) roster,
+      - traded_in: arrived to this manager via a trade,
+      - seed_prior: keeper years entering the season (None if never a keeper).
 
-    `presence_gws`: GWs the player was on the manager's roster. `il_gws`: GWs he
-    was on that manager's injury list (an explained absence). Returns None if he
-    isn't on the roster at `last_gw` (not a keeper candidate), else the first GW
-    held and whether continuous (gaps allowed only when covered by the IL).
-    A non-continuous hold means he was dropped and re-acquired -> clock resets.
-    """
-    if last_gw not in presence_gws:
-        return None
-    first = min(presence_gws)
-    for gw in range(first, last_gw + 1):
-        if gw not in presence_gws and gw not in il_gws:
-            return {"first_gw": first, "continuous": False}
-    return {"first_gw": first, "continuous": True}
-
-
-def classify_acquisition(first_gw: int, traded_in: bool, continuous: bool) -> str:
-    """How the player came to the manager: 'draft' (rostered from GW1), 'trade'
-    (arrived via a trade), or 'waiver' (arrived mid-season, or re-acquired after a
-    drop). Only waiver keepers count toward KEEPER_MAX_WAIVER."""
-    if not continuous:
-        return "waiver"
-    if traded_in:
-        return "trade"
-    return "draft" if first_gw == 1 else "waiver"
-
-
-def keeper_years_used(prior_years, continuous: bool, was_kept_this_season: bool) -> int:
-    """Seasons the player has been kept entering the next selection. `prior_years`
-    is the Option-B seed (None if never a keeper before). A dropped (non-continuous)
-    player resets to 0. A continuously-held player who was a keeper this season
-    (has a seed) counts seed+1; one drafted fresh this season counts 0."""
-    if not continuous:
-        return 0
-    if was_kept_this_season:
-        return (prior_years or 0) + 1
-    return 0
+    A player kept from the start ('draft') or acquired by trade ('trade') carries
+    the seed: years = seed_prior + 1. A waiver pickup resets to 0 ('waiver').
+    This tolerates mid-season roster gaps (e.g. injuries) — unlike GW-by-GW
+    continuity — since the start+final rosters bound retention. Returns
+    (acquisition, keeper_years_used)."""
+    if started_with_manager:
+        acq = "draft"
+    elif traded_in:
+        acq = "trade"
+    else:
+        return ("waiver", 0)
+    return (acq, (seed_prior + 1) if seed_prior is not None else 0)
 
 
 def keeper_eligible(years_used: int, max_years: int = KEEPER_MAX_YEARS) -> bool:

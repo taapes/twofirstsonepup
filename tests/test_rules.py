@@ -8,16 +8,14 @@ from rules import (
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
     SEASON_LAST_GW,
-    classify_acquisition,
     compute_payouts,
     h2h_standings,
     il_can_return,
     il_same_position,
     is_anti_tanking_infraction,
     generate_draft_slots,
-    keeper_continuity,
     keeper_eligible,
-    keeper_years_used,
+    keeper_status,
     match_winner,
     tanking_windows,
     validate_keeper_selection,
@@ -188,49 +186,37 @@ def test_payout_structure_percentages_sum_to_one():
     assert round(sum(PAYOUT_STRUCTURE["pct"].values()), 4) == 1.0
 
 
-# ---- keepers ----
-def test_keeper_continuity_held_all_season():
-    c = keeper_continuity(set(range(1, 39)), set(), 38)
-    assert c == {"first_gw": 1, "continuous": True}
-
-
-def test_keeper_not_on_final_roster_is_not_candidate():
-    assert keeper_continuity({1, 2, 3}, set(), 38) is None
-
-
-def test_keeper_gap_covered_by_il_is_continuous():
-    presence = set(range(1, 39)) - {10, 11, 12}  # off roster GW10-12
-    assert keeper_continuity(presence, {10, 11, 12}, 38)["continuous"] is True
-
-
-def test_keeper_unexplained_gap_is_drop():
-    presence = set(range(1, 39)) - {10, 11, 12}  # off roster, NOT on IL
-    assert keeper_continuity(presence, set(), 38)["continuous"] is False
-
-
-def test_keeper_acquired_midseason_is_waiver():
-    c = keeper_continuity(set(range(20, 39)), set(), 38)  # first appears GW20
-    assert c == {"first_gw": 20, "continuous": True}
-    assert classify_acquisition(20, traded_in=False, continuous=True) == "waiver"
-
-
-def test_classify_acquisition():
-    assert classify_acquisition(1, traded_in=False, continuous=True) == "draft"
-    assert classify_acquisition(15, traded_in=True, continuous=True) == "trade"
-    assert classify_acquisition(1, traded_in=False, continuous=False) == "waiver"  # dropped+re-added
-
-
-def test_keeper_years_and_eligibility():
-    # drafted fresh this season, never a keeper -> 0 used, eligible
-    assert keeper_years_used(None, continuous=True, was_kept_this_season=False) == 0
-    # kept this season with 2 prior seed years -> 3 used, still eligible (<4)
-    assert keeper_years_used(2, continuous=True, was_kept_this_season=True) == 3
+# ---- keepers (start-vs-final model) ----
+def test_keeper_kept_from_start_with_seed():
+    # started with manager + 2 prior seed years -> 3 used, eligible (<4)
+    assert keeper_status(True, False, 2) == ("draft", 3)
     assert keeper_eligible(3) is True
-    # 3 prior + this season = 4 used -> NOT eligible to keep again
-    assert keeper_years_used(3, continuous=True, was_kept_this_season=True) == 4
+
+
+def test_keeper_drafted_fresh_from_start():
+    # started with manager, no seed (drafted this season) -> 0, eligible
+    assert keeper_status(True, False, None) == ("draft", 0)
+
+
+def test_keeper_maxed_after_four():
+    # started + 3 prior -> 4 used -> NOT eligible
+    assert keeper_status(True, False, 3) == ("draft", 4)
     assert keeper_eligible(4) is False
-    # dropped -> resets regardless of seed
-    assert keeper_years_used(3, continuous=False, was_kept_this_season=True) == 0
+
+
+def test_keeper_traded_in_carries_history():
+    # arrived via trade with 2 prior seed years -> history transfers (trade, 3)
+    assert keeper_status(False, True, 2) == ("trade", 3)
+
+
+def test_keeper_waiver_pickup_resets():
+    # not started, not traded -> waiver pickup resets even if previously a keeper
+    assert keeper_status(False, False, 3) == ("waiver", 0)
+    assert keeper_status(False, False, None) == ("waiver", 0)
+
+
+def test_keeper_started_takes_precedence_over_seed_absence():
+    assert keeper_status(True, True, None)[0] == "draft"  # start beats trade flag
 
 
 def test_keeper_constants():
