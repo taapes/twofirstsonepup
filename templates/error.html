@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ status_code }} — {{ title or "Error" }}{% endblock %}
+{% block content %}
+<div style="max-width:520px;margin:8vh auto 0;text-align:center">
+  <h1 style="font-size:3rem;margin:0">{{ status_code }}</h1>
+  <p class="sub" style="font-size:1.1rem">{{ message }}</p>
+  <p style="margin-top:18px"><a href="/" class="who-btn" style="display:inline-block;padding:10px 18px;border:1px solid var(--line);border-radius:8px;text-decoration:none">← Back to home</a></p>
+</div>
+{% endblock %}
