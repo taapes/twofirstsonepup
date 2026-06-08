@@ -101,6 +101,16 @@ def team_page(fpl_manager_id: str, request: Request, db: Session = Depends(get_d
     )
 
 
+@router.get("/history", response_class=HTMLResponse)
+def history_page(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    return templates.TemplateResponse(
+        "history.html",
+        {"request": request, "league": league, "is_admin": is_admin(request),
+         "history": services.get_history(db, league)},
+    )
+
+
 @router.get("/trades", response_class=HTMLResponse)
 def trades_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)

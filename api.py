@@ -64,6 +64,11 @@ def draft_board(
     return services.get_draft_board(db, _league(db, league_key), season_year, draft_type)
 
 
+@router.get("/leagues/{league_key}/history")
+def history(league_key: str, db: Session = Depends(get_db)):
+    return services.get_history(db, _league(db, league_key))
+
+
 @router.get("/leagues/{league_key}/players")
 def players(
     league_key: str,

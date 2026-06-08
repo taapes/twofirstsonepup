@@ -928,3 +928,31 @@ def get_trades(db: Session, league: League) -> list[dict]:
 def next_open_pick(board: list[dict]) -> dict | None:
     """The on-the-clock slot: first board pick with no player recorded yet."""
     return next((b for b in board if not b.get("player")), None)
+
+
+# ---- league history / honor roll ----
+def get_history(db: Session, league: League) -> dict:
+    """Season-by-season winners + career title/cup honor roll (imported)."""
+    from models import ManagerHonors, SeasonHistory
+
+    seasons = (
+        db.query(SeasonHistory)
+        .filter_by(league_id=league.id)
+        .order_by(SeasonHistory.year.desc())
+        .all()
+    )
+    honors = (
+        db.query(ManagerHonors)
+        .filter_by(league_id=league.id)
+        .order_by(ManagerHonors.titles.desc(), ManagerHonors.cups.desc(), ManagerHonors.manager_name)
+        .all()
+    )
+    return {
+        "seasons": [
+            {"year": s.year, "league": s.league_winner, "cup": s.cup_winner, "pup": s.pup_winner}
+            for s in seasons
+        ],
+        "honors": [
+            {"manager": h.manager_name, "titles": h.titles, "cups": h.cups} for h in honors
+        ],
+    }

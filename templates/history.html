@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}League History{% endblock %}
+{% block content %}
+<h1>League History</h1>
+
+<h2>Honor Roll</h2>
+<div class="card">
+  {% if history.honors %}
+  <table>
+    <thead><tr><th>Manager</th><th class="num">Titles</th><th class="num">Cups</th></tr></thead>
+    <tbody>
+      {% for h in history.honors %}
+      <tr><td>{{ h.manager }}</td><td class="num">{{ h.titles }}</td><td class="num">{{ h.cups }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">No honors recorded.</div>{% endif %}
+</div>
+
+<h2>Champions by Season</h2>
+<div class="card">
+  {% if history.seasons %}
+  <table>
+    <thead><tr><th>Season</th><th>League</th><th>Cup</th><th>Pup Cup</th></tr></thead>
+    <tbody>
+      {% for s in history.seasons %}
+      <tr>
+        <td>{{ s.year }}</td>
+        <td>{{ s.league or "—" }}</td>
+        <td>{{ s.cup or "—" }}</td>
+        <td>{{ s.pup or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">No season history recorded.</div>{% endif %}
+</div>
+{% endblock %}

@@ -11,11 +11,12 @@ import re
 import unicodedata
 
 from db import SessionLocal
-from models import KeeperSeed, Manager, Player
+from models import KeeperSeed, League, Manager, ManagerHonors, Player, SeasonHistory
 from settings import LEAGUE_ID
 
 HISTORY_DIR = "history"
 CURRENT_TEAMS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Current Teams.csv"
+LEAGUE_HISTORY = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - League History.csv"
 
 # Sheet player name -> our players.name (web_name). For accents/typos/abbrev that
 # normalized matching can't bridge. Confirmed against the DB + the commissioner.
@@ -59,7 +60,7 @@ def import_keeper_seeds(commit: bool = False) -> None:
     """Current Teams -> KeeperSeed.prior_years (= keeper years entering 25/26).
     Only players with years>=1 are seeded (years=0 = drafted fresh, no seed)."""
     db = SessionLocal()
-    league = db.query(__import__("models").League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
+    league = db.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
     mgr_by_person = {m.display_name: m for m in db.query(Manager).filter_by(league_id=league.id) if m.display_name}
     players = db.query(Player).all()
     by_norm = {}
@@ -109,6 +110,51 @@ def import_keeper_seeds(commit: bool = False) -> None:
     db.close()
 
 
+def import_league_history(commit: bool = False) -> None:
+    """League History CSV -> season_history (year + winners) and manager_honors
+    (career title/cup tally). Replaces existing rows for this league."""
+    db = SessionLocal()
+    league = db.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
+    rows = [r + [""] * 8 for r in csv.reader(open(LEAGUE_HISTORY))][1:]  # skip header
+
+    seasons, honors = [], []
+    for r in rows:
+        year = r[0].strip()
+        if re.match(r"\d\d/\d\d", year):  # left half: a season result
+            seasons.append((year, r[1].strip() or None, r[2].strip() or None, r[3].strip() or None))
+        person = r[5].strip()
+        if person:  # right half: a career tally row
+            titles = int(r[6]) if r[6].strip().isdigit() else 0
+            cups = int(r[7]) if r[7].strip().isdigit() else 0
+            honors.append((person, titles, cups))
+
+    if commit:
+        db.query(SeasonHistory).filter_by(league_id=league.id).delete()
+        db.query(ManagerHonors).filter_by(league_id=league.id).delete()
+        for year, lw, cw, pw in seasons:
+            db.add(SeasonHistory(league_id=league.id, year=year,
+                                 league_winner=lw, cup_winner=cw, pup_winner=pw))
+        for person, titles, cups in honors:
+            db.add(ManagerHonors(league_id=league.id, manager_name=person,
+                                 titles=titles, cups=cups))
+        db.commit()
+        print(f"COMMITTED: {len(seasons)} seasons, {len(honors)} honor tallies")
+    else:
+        print(f"seasons ({len(seasons)}):")
+        for s in seasons:
+            print("   ", s)
+        print(f"honors ({len(honors)}):")
+        for h in honors:
+            print("   ", h)
+        print("(preview only — pass commit=True to write)")
+    db.close()
+
+
 if __name__ == "__main__":
     import sys
-    import_keeper_seeds(commit="--commit" in sys.argv)
+    commit = "--commit" in sys.argv
+    target = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else "keepers"
+    if target == "history":
+        import_league_history(commit=commit)
+    else:
+        import_keeper_seeds(commit=commit)

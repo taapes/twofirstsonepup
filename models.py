@@ -441,6 +441,44 @@ class Match(Base):
     )
 
 
+class SeasonHistory(Base):
+    """Historical season results (one row per season), imported from the league
+    sheet. Winners are stored as person names (text, not FKs) since some are past
+    members no longer in the league."""
+
+    __tablename__ = "season_history"
+    __table_args__ = (
+        UniqueConstraint("league_id", "year", name="uq_season_history_league_year"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    year: Mapped[str] = mapped_column(String)  # e.g. "25/26"
+    league_winner: Mapped[str | None] = mapped_column(String, nullable=True)
+    cup_winner: Mapped[str | None] = mapped_column(String, nullable=True)
+    pup_winner: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class ManagerHonors(Base):
+    """Career title/cup tally per person, imported from the sheet. Manually
+    maintained there (predates the per-season rows we have), so stored as-is."""
+
+    __tablename__ = "manager_honors"
+    __table_args__ = (
+        UniqueConstraint("league_id", "manager_name", name="uq_honors_league_manager"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_name: Mapped[str] = mapped_column(String)  # person name
+    titles: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    cups: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
 class SyncLog(Base):
     """Audit trail for /admin/sync runs. Not FPL-canonical and not league-custom
     truth — operational metadata so we can see when a sync ran and whether it
