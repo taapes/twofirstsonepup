@@ -658,6 +658,13 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
     for s in db.query(KeeperSeed).filter_by(league_id=league.id):
         seed_remaining[s.player_id] = s.years_remaining
 
+    # submitted keepers for the upcoming season (so rosters can flag them locked)
+    upcoming = (league.season_year or 0) + 1
+    kept = {
+        (s.manager_id, s.player_id): s.is_discovery
+        for s in db.query(KeeperSelection).filter_by(league_id=league.id, season_year=upcoming)
+    }
+
     status: dict = {}
     for mid, pid in final_candidates:
         acq, remaining = keeper_status(
@@ -672,6 +679,8 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
             "acquisition": acq,
             "years_remaining": remaining,
             "eligible": keeper_eligible(remaining),
+            "kept": (mid, pid) in kept,  # submitted keeper for next season
+            "kept_discovery": kept.get((mid, pid), False),
         }
     return status
 

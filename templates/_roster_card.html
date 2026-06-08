@@ -4,7 +4,7 @@
     <tbody>
       {% for p in t.players %}
       <tr>
-        <td>{{ p.player }}</td>
+        <td>{{ p.player }}{% if p.kept %} <span class="pill" title="locked keeper for next season">🔒 keeper{% if p.kept_discovery %} (disc){% endif %}</span>{% endif %}</td>
         <td class="tag">{{ p.position }} · {{ p.acquisition }}</td>
         <td class="num">
           {% if p.years_remaining > 0 %}{{ p.years_remaining }} left{% else %}<span class="pill warn">max</span>{% endif %}

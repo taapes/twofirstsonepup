@@ -7,6 +7,7 @@
       {% for p in candidates.players %}
       <tr>
         <td><input type="checkbox" name="keeper_fpl_ids" value="{{ p.fpl_id }}"
+                   data-acq="{{ p.acquisition }}" onchange="limitWaiver(this)"
                    {% if p.selected %}checked{% endif %} {% if not p.eligible %}disabled{% endif %}></td>
         <td>{{ p.player }} <span class="tag">{{ p.position }} · {{ p.acquisition }}</span></td>
         <td class="num">{% if p.eligible %}{{ p.years_remaining }}{% else %}<span class="pill warn">max</span>{% endif %}</td>

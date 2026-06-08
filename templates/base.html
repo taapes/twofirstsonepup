@@ -65,5 +65,14 @@
     </nav>
     {% block content %}{% endblock %}
   </div>
+  <script>
+    // Keeper selection: cap FA/waiver-acquired keepers at 2.
+    function limitWaiver(cb) {
+      if (cb.checked && cb.dataset.acq === 'waiver') {
+        var n = document.querySelectorAll("input[name='keeper_fpl_ids'][data-acq='waiver']:checked").length;
+        if (n > 2) { cb.checked = false; alert('At most 2 FA/waiver-acquired keepers allowed.'); }
+      }
+    }
+  </script>
 </body>
 </html>
