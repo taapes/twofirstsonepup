@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Discovery Draft {{ year }}{% endblock %}
+{% block content %}
+<h1>Discovery Draft <span class="tag">{{ year }}/{{ (year + 1) % 100 }}</span></h1>
+<p class="sub">Snake draft, 2 picks per manager (reverse-standings order). A picked player
+  who later joins the Premier League becomes that manager's bonus 6th keeper.</p>
+<div class="grid2">
+  <div>{% include "_discovery_board.html" %}</div>
+  <div>
+    <h2>Players</h2>
+    <div class="card" style="padding:12px">
+      {% if discovery_available %}
+      <input type="search" name="q" placeholder="Search players…" autocomplete="off"
+        hx-get="/discovery/{{ year }}/search" hx-trigger="keyup changed delay:300ms, discoveryChanged from:body"
+        hx-target="#discovery-results" style="width:100%">
+      <div id="discovery-results" style="margin-top:10px"><p class="empty">Search for a player to discovery-draft.</p></div>
+      {% else %}
+      <p class="sub">The discovery draft isn't open right now.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

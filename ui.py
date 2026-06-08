@@ -1011,3 +1011,70 @@ def draft_set_order(year: int, request: Request, order: str = Form(...), db: Ses
     except RuleViolation as e:
         return _err(e)
     return _board_response(request, db, league, year)
+
+
+# ---- discovery draft (snake, 2 picks/manager; gated by discovery_open) ----
+def _discovery_ctx(request: Request, db: Session, league, year: int) -> dict:
+    board = services.get_discovery_board(db, league, year)
+    on_clock = services.next_open_pick(board)
+    return {
+        "request": request, "league": league, "year": year, "board": board,
+        "on_clock": on_clock,
+        "can_pick": bool(on_clock) and can_act_as(request, on_clock.get("owner_fpl")),
+        "discovery_available": services.phase_context(db, league)["discovery_available"] or is_admin(request),
+        "is_admin": is_admin(request),
+    }
+
+
+def _discovery_board_response(request, db, league, year):
+    resp = templates.TemplateResponse("_discovery_board.html", _discovery_ctx(request, db, league, year))
+    resp.headers["HX-Trigger"] = "discoveryChanged"
+    return resp
+
+
+@router.get("/discovery/{year}", response_class=HTMLResponse)
+def discovery_page(year: int, request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    return templates.TemplateResponse("discovery.html", _discovery_ctx(request, db, league, year))
+
+
+@router.get("/discovery/{year}/search", response_class=HTMLResponse)
+def discovery_search(year: int, request: Request, q: str = "", db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    results = (
+        services.search_players(
+            db, league, q=q.strip() or None, available_year=year,
+            include_taken=True, draft_type="discovery", sort="points", limit=50,
+        )
+        if q.strip() else []
+    )
+    on_clock = services.next_open_pick(services.get_discovery_board(db, league, year))
+    can_pick = bool(on_clock) and can_act_as(request, on_clock.get("owner_fpl"))
+    return templates.TemplateResponse(
+        "_discovery_results.html",
+        {"request": request, "results": results, "year": year, "can_pick": can_pick},
+    )
+
+
+@router.post("/discovery/{year}/pick", response_class=HTMLResponse)
+def discovery_pick(
+    year: int, request: Request, player_fpl_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    league = _league_or_404(db)
+    if not _feature_allowed(request, db, league, "discovery_available"):
+        return _locked_response("The discovery draft")
+    board = services.get_discovery_board(db, league, year)
+    slot = services.next_open_pick(board)
+    if slot and slot.get("owner_fpl"):
+        if not can_act_as(request, slot["owner_fpl"]):
+            return _forbidden(request, "It's not your discovery pick to make.")
+        try:
+            services.record_pick(
+                db, league, season_year=year, pick_number=slot["pick"],
+                owner_fpl=slot["owner_fpl"], player_fpl_id=player_fpl_id,
+                draft_type="discovery", round=slot["round"],
+            )
+        except RuleViolation:
+            pass
+    return _discovery_board_response(request, db, league, year)

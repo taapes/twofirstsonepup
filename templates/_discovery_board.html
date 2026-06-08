@@ -1,0 +1,22 @@
+<div id="discovery-board">
+  {% if on_clock %}
+  <div class="card on-clock-banner">On the clock — pick {{ on_clock.pick }} (R{{ on_clock.round }}): <strong>{{ on_clock.owner }}</strong></div>
+  {% else %}
+  <div class="card empty">Discovery draft complete — both rounds filled.</div>
+  {% endif %}
+  <div class="card">
+    <table>
+      <thead><tr><th class="rank">#</th><th class="num">R</th><th>Manager</th><th>Player</th></tr></thead>
+      <tbody>
+        {% for b in board %}
+        <tr class="{% if on_clock and b.pick == on_clock.pick %}on-clock{% endif %}">
+          <td class="rank">{{ b.pick }}</td>
+          <td class="num">{{ b.round }}</td>
+          <td>{{ b.owner }}</td>
+          <td>{% if b.player %}{{ b.player }}{% elif on_clock and b.pick == on_clock.pick %}<span class="sub">on the clock</span>{% else %}<span class="sub">—</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

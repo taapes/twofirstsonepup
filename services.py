@@ -1800,6 +1800,7 @@ def search_players(
     available_year: int | None = None,
     sort: str | None = None,
     include_taken: bool = False,
+    draft_type: str = "main",
     limit: int = 50,
 ) -> list[dict]:
     """Search the player pool. A name query searches ALL players (position is
@@ -1834,7 +1835,7 @@ def search_players(
             taken[pid] = f"kept: {names.get(mid, '?')}"
         for pid, mid in (
             db.query(DraftPick.player_id, DraftPick.manager_id)
-            .filter_by(league_id=league.id, season_year=available_year, draft_type="main")
+            .filter_by(league_id=league.id, season_year=available_year, draft_type=draft_type)
             .filter(DraftPick.player_id.isnot(None))
         ):
             taken[pid] = f"drafted: {names.get(mid, '?')}"
@@ -1877,6 +1878,43 @@ def get_trades(db: Session, league: League) -> list[dict]:
             "source": "FPL" if t.fpl_trade_id else "site",
         })
     out.sort(key=lambda x: (x["gw"] is None, x["gw"] or 0), reverse=True)
+    return out
+
+
+DISCOVERY_PICKS_PER_MANAGER = 2
+
+
+def get_discovery_board(db: Session, league: League, season_year: int) -> list[dict]:
+    """The discovery-draft board: a 2-round SNAKE over reverse-standings order (worst
+    team picks first; round 2 reverses). All managers pick; no keepers/free picks.
+    Overlays recorded discovery picks (DraftPick, draft_type='discovery')."""
+    order = _reverse_standings_managers(db, league)
+    if not order:
+        order = db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    fpl_by_id = {m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)}
+
+    slots = []
+    for rnd in range(1, DISCOVERY_PICKS_PER_MANAGER + 1):
+        seq = order if rnd % 2 == 1 else list(reversed(order))
+        for m in seq:
+            slots.append((rnd, m.id))
+
+    picks = {
+        dp.pick_number: dp
+        for dp in db.query(DraftPick).filter_by(
+            league_id=league.id, season_year=season_year, draft_type="discovery"
+        )
+    }
+    pnames = {p.id: p.name for p in db.query(Player)}
+    out = []
+    for i, (rnd, mid) in enumerate(slots, start=1):
+        dp = picks.get(i)
+        out.append({
+            "pick": i, "round": rnd,
+            "owner": names.get(mid), "owner_fpl": fpl_by_id.get(mid),
+            "player": pnames.get(dp.player_id) if dp and dp.player_id else None,
+        })
     return out
 
 
