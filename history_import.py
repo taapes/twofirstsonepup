@@ -29,6 +29,7 @@ LEAGUE_HISTORY = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Le
 STANDINGS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - League History - Standings.csv"
 FUTURE_PICKS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Future Picks.csv"
 DISCOVERY = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Discovery Draft.csv"
+CUP = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - The Cup.csv"
 
 # Person-name abbreviations used in the discovery grid.
 _PERSON_ALIAS = {"KF": "Kevin F", "KT": "Kevin T", "KS": "Kevin S"}
@@ -340,6 +341,52 @@ def import_discovery_results(commit: bool = False) -> None:
     db.close()
 
 
+def import_cups(commit: bool = False) -> None:
+    """The Cup CSV -> cup_matches. Three round-column groups (R1 @col2, SF @col7,
+    Final @col12), each: 'SEED - Manager', GW1, GW2, Total. Cup vs Pup split on
+    the 'Pup Cup' marker. Tolerant of missing scores / partial years. Cup year N
+    belongs to season (N-1)/N."""
+    db = SessionLocal()
+    league = db.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
+    from models import CupMatch
+
+    rows = [r + [""] * 18 for r in csv.reader(open(CUP))]
+    entries = []  # (season, bracket, round, slot, seed, manager, gw1, gw2, total)
+    season, bracket, slot = None, "cup", {}
+    for r in rows:
+        msea = re.match(r"(\d{4}) Cup", r[0].strip())
+        if msea:
+            y = int(msea.group(1))
+            season = f"{(y - 1) % 100:02d}/{y % 100:02d}"
+            bracket, slot = "cup", {}
+            continue
+        if not season:
+            continue
+        if any("pup cup" in (c or "").strip().lower() for c in r):
+            bracket = "pup"
+        for rnd, lc in ((1, 1), (2, 6), (3, 11)):  # label cols (scores at lc+1..+3)
+            mt = re.match(r"(\d+)\s*-\s*(.+)", r[lc].strip())
+            if mt:
+                k = (bracket, rnd)
+                slot[k] = slot.get(k, 0) + 1
+                entries.append((season, bracket, rnd, slot[k], int(mt.group(1)),
+                                _person(mt.group(2)), _int(r[lc + 1]), _int(r[lc + 2]), _int(r[lc + 3])))
+
+    if commit:
+        db.query(CupMatch).filter_by(league_id=league.id).delete()
+        for season, br, rnd, sl, seed, mgr, g1, g2, tot in entries:
+            db.add(CupMatch(league_id=league.id, season=season, bracket=br, round=rnd,
+                            slot=sl, seed=seed, manager_label=mgr, gw1=g1, gw2=g2, total=tot))
+        db.commit()
+        print(f"COMMITTED: {len(entries)} cup entries across "
+              f"{len(set(e[0] for e in entries))} seasons")
+    else:
+        for e in entries[:14]:
+            print("   ", e)
+        print(f"... ({len(entries)} entries; preview)")
+    db.close()
+
+
 _IMPORTERS = {
     "keepers": import_keeper_seeds,
     "history": import_league_history,
@@ -347,6 +394,7 @@ _IMPORTERS = {
     "futurepicks": import_future_picks,
     "discovery": import_discovery_picks,
     "discoveryresults": import_discovery_results,
+    "cups": import_cups,
 }
 
 if __name__ == "__main__":

@@ -36,6 +36,25 @@
   {% else %}<div class="empty">No season history recorded.</div>{% endif %}
 </div>
 
+{% if history.cups_by_season %}
+<h2>Cup Brackets by Season</h2>
+{% for season in history.cups_by_season %}
+<details class="card" style="padding:8px 12px">
+  <summary>{{ season.year }}</summary>
+  <table style="margin-top:8px">
+    <thead><tr><th>Bracket</th><th>Round</th><th>Team</th><th class="num">Total</th></tr></thead>
+    <tbody>
+      {% for r in season.rows %}
+      <tr><td class="tag">{{ r.bracket }}</td><td class="tag">{{ r.round }}</td>
+        <td>{% if r.seed %}{{ r.seed }} - {% endif %}{{ r.manager or "—" }}</td>
+        <td class="num">{{ r.total if r.total is not none else "—" }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endfor %}
+{% endif %}
+
 {% if history.discovery_by_season %}
 <h2>Discovery Draft by Season</h2>
 {% for season in history.discovery_by_season %}

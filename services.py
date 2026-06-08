@@ -1027,7 +1027,27 @@ def get_history(db: Session, league: League) -> dict:
             {"year": y, "rows": rows} for y, rows in standings_by_season.items()
         ],
         "discovery_by_season": _discovery_by_season(db, league),
+        "cups_by_season": _cups_by_season(db, league),
     }
+
+
+def _cups_by_season(db: Session, league: League) -> list[dict]:
+    from models import CupMatch
+
+    by_season: dict = {}
+    for c in (
+        db.query(CupMatch)
+        .filter_by(league_id=league.id)
+        .order_by(CupMatch.season.desc(), CupMatch.bracket, CupMatch.round, CupMatch.slot)
+        .all()
+    ):
+        label = "Cup" if c.bracket == "cup" else "Pup Cup"
+        rd = {1: "R1", 2: "Semi", 3: "Final"}.get(c.round, f"R{c.round}")
+        by_season.setdefault(c.season, []).append({
+            "bracket": label, "round": rd, "seed": c.seed,
+            "manager": c.manager_label, "total": c.total,
+        })
+    return [{"year": y, "rows": rows} for y, rows in by_season.items()]
 
 
 def _discovery_by_season(db: Session, league: League) -> list[dict]:

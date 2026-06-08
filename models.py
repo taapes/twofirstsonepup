@@ -461,6 +461,28 @@ class SeasonHistory(Base):
     pup_winner: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class CupMatch(Base):
+    """Historical cup/pup-cup bracket entries (one row per team per round), parsed
+    from the (inconsistent, free-text) Cup sheet. Manager kept as a text label;
+    scores may be missing. `slot` preserves matchup pairing order within a round."""
+
+    __tablename__ = "cup_matches"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    season: Mapped[str] = mapped_column(String, index=True)  # "25/26"
+    bracket: Mapped[str] = mapped_column(String)  # "cup" | "pup"
+    round: Mapped[int] = mapped_column(Integer)  # 1=R1, 2=SF, 3=Final
+    slot: Mapped[int] = mapped_column(Integer)  # order within (bracket, round)
+    seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    manager_label: Mapped[str | None] = mapped_column(String, nullable=True)
+    gw1: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gw2: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class DiscoveryResult(Base):
     """Historical discovery-draft results (per season). Player names are free text
     (historical, not linked to the FPL player table). Manager is a person name."""
