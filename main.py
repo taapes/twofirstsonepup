@@ -121,6 +121,7 @@ def home(request: Request, db: Session = Depends(get_db)):
             cups=services.get_cups(db, league),
             payouts=services.get_payouts(db, league),
             adjustments=services.get_standing_adjustments(db, league),
+            ineligible=services.ineligible_players(db, league),
         )
     return templates.TemplateResponse("home.html", ctx)
 
@@ -142,6 +143,11 @@ def admin_sync(force: bool = False):
 
     if plan == "full":
         asyncio.run(sync_all())
+        # after a full pull, re-evaluate post-draft (non-DEF) additions
+        with SessionLocal() as db:
+            league = services.current_league(db)
+            if league:
+                services.flag_ineligible(db, league)
     elif plan == "live":
         # only the GW-changing pulls while matches are live
         async def _live():

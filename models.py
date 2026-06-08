@@ -758,6 +758,27 @@ class PlayerPoolSnapshot(Base):
     )
 
 
+class PlayerIneligibility(Base):
+    """A player ruled ineligible for a season (league-custom; we never mutate the
+    global canonical Player row). Currently: a non-defender added to FPL after the
+    season's draft (not in the player_pool_snapshot)."""
+
+    __tablename__ = "player_ineligibility"
+    __table_args__ = (
+        UniqueConstraint("league_id", "fpl_id", name="uq_ineligibility_league_fpl"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    fpl_id: Mapped[int] = mapped_column(Integer, index=True)
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class SyncLog(Base):
     """Audit trail for /admin/sync runs. Not FPL-canonical and not league-custom
     truth — operational metadata so we can see when a sync ran and whether it

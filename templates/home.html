@@ -128,6 +128,21 @@
     {% else %}<div class="empty">No players on the injury list.</div>{% endif %}
   </div>
 
+  {% if ineligible %}
+  <h2>Ineligible Players</h2>
+  <div class="card">
+    <p class="sub">Added to FPL after the draft and not a defender — ineligible to draft or keep this season.</p>
+    <table>
+      <thead><tr><th>Player</th><th>Pos</th><th>Team</th></tr></thead>
+      <tbody>
+        {% for p in ineligible %}
+        <tr><td>{{ p.name }}</td><td class="sub">{{ p.position }}</td><td class="sub">{{ p.team }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
   <p class="sub" style="margin-top:32px">Precomputed from the FPL Draft API · league {{ league.fpl_league_id }}</p>
 {% endif %}
 {% endblock %}

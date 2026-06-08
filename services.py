@@ -221,6 +221,63 @@ def close_discovery(db: Session, league: League) -> None:
     db.commit()
 
 
+def flag_ineligible(db: Session, league: League) -> int:
+    """Flag players added to FPL after this season's draft (not in the pool snapshot)
+    and not defenders, as ineligible for the league. No-op if no snapshot was taken
+    (e.g. seasons before the snapshot existed). Returns the number newly flagged."""
+    from models import PlayerIneligibility, PlayerPoolSnapshot
+
+    snapshot = {
+        fid for (fid,) in db.query(PlayerPoolSnapshot.fpl_id).filter_by(league_id=league.id)
+    }
+    if not snapshot:
+        return 0
+    already = {
+        fid for (fid,) in db.query(PlayerIneligibility.fpl_id).filter_by(league_id=league.id)
+    }
+    added = 0
+    for p in db.query(Player):
+        if p.fpl_id in snapshot or p.fpl_id in already:
+            continue
+        if (p.position or "").upper() == "DEF":  # defenders added later stay eligible
+            continue
+        db.add(PlayerIneligibility(
+            league_id=league.id, fpl_id=p.fpl_id,
+            reason="added to FPL after the draft (non-defender)",
+        ))
+        added += 1
+    if added:
+        db.commit()
+    return added
+
+
+def ineligible_players(db: Session, league: League) -> list[dict]:
+    """The league's ineligible players (post-draft non-defender additions), for the
+    report + to exclude from draft/keeper search."""
+    from models import PlayerIneligibility
+
+    rows = (
+        db.query(PlayerIneligibility, Player)
+        .join(Player, Player.fpl_id == PlayerIneligibility.fpl_id)
+        .filter(PlayerIneligibility.league_id == league.id)
+        .order_by(Player.name)
+        .all()
+    )
+    return [
+        {"fpl_id": p.fpl_id, "name": p.name, "position": p.position,
+         "team": p.current_team, "reason": il.reason}
+        for il, p in rows
+    ]
+
+
+def _ineligible_fpl_ids(db: Session, league: League) -> set:
+    from models import PlayerIneligibility
+
+    return {
+        fid for (fid,) in db.query(PlayerIneligibility.fpl_id).filter_by(league_id=league.id)
+    }
+
+
 def sync_plan(db: Session, league: League, now=None) -> str:
     """Decide what a sync run should do right now: 'full' | 'live' | 'skip'. Gathers
     the facts (was there a full sync today? is a PL match live? does a GW start today?)
@@ -1767,6 +1824,7 @@ def search_players(
         query = query.order_by(Player.name)
     players = query.all()
 
+    inelig = _ineligible_fpl_ids(db, league)  # post-draft non-DEF additions
     taken: dict = {}  # player_id -> label of who has them ("kept" / "drafted: X")
     if available_year is not None:
         names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
@@ -1783,14 +1841,16 @@ def search_players(
 
     out = []
     for p in players:
-        is_taken = p.id in taken
+        ineligible = p.fpl_id in inelig
+        is_taken = (p.id in taken) or ineligible
         if is_taken and not include_taken:
             continue
+        taken_by = "ineligible (post-draft)" if ineligible else taken.get(p.id)
         out.append({
             "fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team,
             "price": (p.price / 10) if p.price is not None else None,
             "points": p.last_season_points,
-            "taken": is_taken, "taken_by": taken.get(p.id),
+            "taken": is_taken, "taken_by": taken_by, "ineligible": ineligible,
         })
     return out[:limit]
 
