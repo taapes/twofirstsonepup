@@ -28,6 +28,15 @@ CURRENT_TEAMS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Cur
 LEAGUE_HISTORY = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - League History.csv"
 STANDINGS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - League History - Standings.csv"
 FUTURE_PICKS = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Future Picks.csv"
+DISCOVERY = f"{HISTORY_DIR}/The Greatest FPL Draft League in the World - Discovery Draft.csv"
+
+# Person-name abbreviations used in the discovery grid.
+_PERSON_ALIAS = {"KF": "Kevin F", "KT": "Kevin T", "KS": "Kevin S"}
+
+
+def _person(name: str) -> str:
+    name = (name or "").strip()
+    return _PERSON_ALIAS.get(name, name)
 
 # Sheet player name -> our players.name (web_name). For accents/typos/abbrev that
 # normalized matching can't bridge. Confirmed against the DB + the commissioner.
@@ -243,11 +252,58 @@ def import_future_picks(commit: bool = False) -> None:
     db.close()
 
 
+def import_discovery_picks(commit: bool = False) -> None:
+    """Discovery Draft CSV -> future_picks (draft_type='discovery'). Parses the
+    ownership grid (rows: original-owner manager; columns: YEAR R1/R2; cell =
+    current owner). Free-text trade descriptions and historical results are
+    ignored here."""
+    db = SessionLocal()
+    league = db.query(League).filter_by(fpl_league_id=str(LEAGUE_ID)).one()
+    known = {m.display_name for m in db.query(Manager).filter_by(league_id=league.id) if m.display_name}
+    rows = [r + [""] * 26 for r in csv.reader(open(DISCOVERY))]
+
+    # locate the grid header (cells like "2026 R1") and its column -> (year, round)
+    col_yr, mgr_col, header_idx = {}, None, None
+    for i, r in enumerate(rows):
+        yrcols = {c: v.strip() for c, v in enumerate(r) if re.match(r"\d{4} R\d", v.strip())}
+        if len(yrcols) >= 6:
+            header_idx = i
+            for c, v in yrcols.items():
+                y, rd = v.split(" R")
+                col_yr[c] = (int(y), int(rd))
+            mgr_col = min(col_yr) - 1  # manager column is just left of the year cols
+            break
+
+    picks = []  # (year, round, original_owner, owner)
+    for r in rows[header_idx + 1:]:
+        orig = _person(r[mgr_col])
+        if orig not in known:
+            continue
+        for c, (y, rd) in col_yr.items():
+            owner = _person(r[c])
+            if owner and owner in known:
+                picks.append((y, rd, orig, owner))
+
+    if commit:
+        db.query(FuturePick).filter_by(league_id=league.id, draft_type="discovery").delete()
+        for y, rd, orig, owner in picks:
+            db.add(FuturePick(league_id=league.id, season_year=y, draft_type="discovery",
+                              round=rd, original_owner=orig, owner=owner))
+        db.commit()
+        print(f"COMMITTED: {len(picks)} discovery future picks")
+    else:
+        for p in picks:
+            print("   ", p)
+        print(f"({len(picks)} discovery picks; preview only)")
+    db.close()
+
+
 _IMPORTERS = {
     "keepers": import_keeper_seeds,
     "history": import_league_history,
     "standings": import_standings_history,
     "futurepicks": import_future_picks,
+    "discovery": import_discovery_picks,
 }
 
 if __name__ == "__main__":

@@ -903,13 +903,15 @@ def get_future_picks(db: Session, league: League) -> list[dict]:
     }
     out = []
     for y in sorted(years):
-        own = pick_ownership(db, league, y)
-        picks = [
-            {"round": rnd, "original_owner": orig, "owner": owner}
-            for (rnd, orig), owner in sorted(own.items(), key=lambda kv: (kv[0][0], kv[0][1]))
-        ]
-        if picks:
-            out.append({"year": y, "picks": picks})
+        entry = {"year": y}
+        for dt in ("main", "discovery"):
+            own = pick_ownership(db, league, y, dt)
+            entry[dt] = [
+                {"round": rnd, "original_owner": orig, "owner": owner}
+                for (rnd, orig), owner in sorted(own.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+            ]
+        if entry["main"] or entry["discovery"]:
+            out.append(entry)
     return out
 
 
