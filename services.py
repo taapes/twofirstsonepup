@@ -230,12 +230,20 @@ def phase_context(db: Session, league: League) -> dict:
         discovery_open=bool(league.discovery_open),
         gw_logic=(macro == PHASE_IN_SEASON),
     )
+    from auth import is_demo
+
+    if is_demo():
+        # Demo sandbox: unlock everything so testers can explore every feature
+        # (draft, discovery, trades, keepers, cups, …) regardless of the season phase.
+        feats = {k: True for k in feats}
     return {
         "macro": macro,
-        "label": _phase_label(macro, bool(league.discovery_open), trades_off, cups_available),
+        "label": ("Demo — all features on" if is_demo()
+                  else _phase_label(macro, bool(league.discovery_open), trades_off, cups_available)),
         "current_gw": current_gameweek(db, league),
         "discovery_open": bool(league.discovery_open),
         "phase_manual": bool(league.phase_manual),
+        "demo": is_demo(),
         **feats,
     }
 

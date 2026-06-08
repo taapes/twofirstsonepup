@@ -85,10 +85,10 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
 def _feature_allowed(
     request: Request, db: Session, league, flag: str, *, lock_attr: str = "writes_locked"
 ) -> bool:
-    """Is a phase-gated feature available for a write? Admin always bypasses; else the
-    manual lock (`writes_locked`/`keepers_locked`) must be off AND the current phase
-    must enable `flag` (see services.phase_context / rules.phase_features)."""
-    if is_admin(request):
+    """Is a phase-gated feature available for a write? Admin (and the demo sandbox)
+    always bypass; else the manual lock (`writes_locked`/`keepers_locked`) must be off
+    AND the current phase must enable `flag` (see services.phase_context)."""
+    if is_admin(request) or is_demo():
         return True
     if getattr(league, lock_attr, False):
         return False
