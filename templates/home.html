@@ -8,7 +8,7 @@
   <h1>{{ league.name }}</h1>
   <p class="sub">Season {{ league.season_year }}/{{ (league.season_year + 1) % 100 }}</p>
 
-  <h2>Standings</h2>
+  <h2>Standings{% if is_admin %} <a href="/admin/standings" class="sub" style="font-size:.7rem">adjust →</a>{% endif %}</h2>
   <div class="card">
     {% if standings %}
     <table>
@@ -19,7 +19,7 @@
         {% for s in standings %}
         <tr>
           <td class="rank">{{ s.rank }}</td>
-          <td>{{ s.manager }}</td>
+          <td>{{ s.manager }}{% if s.adjusted %} <span class="pill warn" title="commissioner-adjusted">✎</span>{% endif %}</td>
           <td class="num">{{ s.total }}</td>
           <td class="num">{{ s.matches_won }}-{{ s.matches_drawn }}-{{ s.matches_lost }}</td>
           <td class="num">{{ s.points_for }}</td>
@@ -30,6 +30,10 @@
     </table>
     {% else %}<div class="empty">No standings synced yet.</div>{% endif %}
   </div>
+  {% if adjustments %}
+  <p class="sub">✎ = commissioner-adjusted.
+    {% for a in adjustments %}{{ a.manager }} {{ a.field }} {{ a.old }}→{{ a.new }}{% if a.note %} ({{ a.note }}){% endif %}{% if not loop.last %}; {% endif %}{% endfor %}</p>
+  {% endif %}
 
   <h2>Anti-Tanking Infractions</h2>
   <div class="card">

@@ -44,6 +44,7 @@ def home(request: Request, db: Session = Depends(get_db)):
             injury_list=services.get_injury_list(db, league),
             cups=services.get_cups(db, league),
             payouts=services.get_payouts(db, league),
+            adjustments=services.get_standing_adjustments(db, league),
         )
     return templates.TemplateResponse("home.html", ctx)
 

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Adjust Standings{% endblock %}
+{% block content %}
+<h1>Adjust Standings <span class="tag">commissioner</span></h1>
+<p class="sub">Manually edit a manager's H2H points or total (for) points. Every change is logged below.</p>
+
+<div class="card" style="padding:12px;max-width:520px">
+  <form method="post" action="/admin/standings/adjust">
+    <label>Manager
+      <select name="fpl_manager_id" required style="width:100%">
+        {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <label>H2H points (total)<br><input name="total" type="number" style="width:120px"></label>
+      <label>Total points (for)<br><input name="points_for" type="number" style="width:120px"></label>
+    </div>
+    <label style="display:block;margin-top:8px">Note (reason)<br>
+      <input name="note" style="width:100%" placeholder="why this adjustment"></label>
+    <p class="sub">Leave a field blank to keep it unchanged.</p>
+    <button type="submit">Apply adjustment</button>
+  </form>
+</div>
+
+<h2>Current Standings</h2>
+<div class="card">
+  <table>
+    <thead><tr><th class="rank">#</th><th>Manager</th><th class="num">H2H</th><th class="num">For</th></tr></thead>
+    <tbody>
+      {% for s in standings %}
+      <tr><td class="rank">{{ s.rank }}</td>
+        <td>{{ s.manager }}{% if s.adjusted %} <span class="pill warn">✎ adjusted</span>{% endif %}</td>
+        <td class="num">{{ s.total }}</td><td class="num">{{ s.points_for }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h2>Adjustment Log (evidence)</h2>
+<div class="card">
+  {% if adjustments %}
+  <table>
+    <thead><tr><th>When</th><th>Manager</th><th>Field</th><th class="num">Old</th><th class="num">New</th><th>Note</th></tr></thead>
+    <tbody>
+      {% for a in adjustments %}
+      <tr><td class="sub">{{ a.when[:16] }}</td><td>{{ a.manager }}</td><td class="tag">{{ a.field }}</td>
+        <td class="num">{{ a.old if a.old is not none else "—" }}</td>
+        <td class="num">{{ a.new if a.new is not none else "—" }}</td>
+        <td class="sub">{{ a.note or "" }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">No manual adjustments.</div>{% endif %}
+</div>
+{% endblock %}

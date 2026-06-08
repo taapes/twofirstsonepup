@@ -572,6 +572,29 @@ class ManagerHonors(Base):
     cups: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
+class StandingAdjustment(Base):
+    """Audit log of commissioner manual edits to a manager's standings (H2H points
+    `total` or season `points_for`). Provides the evidence trail; the standings
+    view flags managers that have any adjustment."""
+
+    __tablename__ = "standing_adjustments"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    field: Mapped[str] = mapped_column(String)  # "total" | "points_for"
+    old_value: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    new_value: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class SyncLog(Base):
     """Audit trail for /admin/sync runs. Not FPL-canonical and not league-custom
     truth — operational metadata so we can see when a sync ran and whether it

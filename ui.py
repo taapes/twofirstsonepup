@@ -111,6 +111,43 @@ def picks_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.get("/admin/standings", response_class=HTMLResponse)
+def admin_standings(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/standings", status_code=303)
+    league = _league_or_404(db)
+    managers = (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
+    )
+    return templates.TemplateResponse("admin_standings.html", {
+        "request": request, "league": league, "is_admin": True,
+        "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
+        "standings": services.get_standings(db, league),
+        "adjustments": services.get_standing_adjustments(db, league),
+    })
+
+
+@router.post("/admin/standings/adjust")
+def admin_standings_adjust(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), total: str = Form(""),
+    points_for: str = Form(""), note: str = Form(""),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/standings", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.adjust_standing(
+            db, league, fpl_manager_id=fpl_manager_id,
+            total=int(total) if total.strip() else None,
+            points_for=int(points_for) if points_for.strip() else None,
+            note=note or None,
+        )
+    except (RuleViolation, ValueError) as e:
+        return HTMLResponse(f"error: {e}", status_code=400)
+    return RedirectResponse("/admin/standings", status_code=303)
+
+
 @router.get("/history", response_class=HTMLResponse)
 def history_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)

@@ -64,6 +64,8 @@ def latest_gameweek(db: Session, league: League) -> Gameweek | None:
 
 
 def get_standings(db: Session, league: League) -> list[dict]:
+    from models import StandingAdjustment
+
     rows = (
         db.query(Standing, Manager)
         .join(Manager, Manager.id == Standing.manager_id)
@@ -71,6 +73,10 @@ def get_standings(db: Session, league: League) -> list[dict]:
         .order_by(Standing.rank_sort.asc().nulls_last(), Standing.rank.asc())
         .all()
     )
+    adjusted = {
+        mid for (mid,) in db.query(StandingAdjustment.manager_id)
+        .filter_by(league_id=league.id).distinct()
+    }
     return [
         {
             "rank": s.rank,
@@ -82,8 +88,59 @@ def get_standings(db: Session, league: League) -> list[dict]:
             "matches_won": s.matches_won,
             "matches_drawn": s.matches_drawn,
             "matches_lost": s.matches_lost,
+            "adjusted": m.id in adjusted,  # commissioner manually edited
         }
         for s, m in rows
+    ]
+
+
+def adjust_standing(
+    db: Session, league: League, *, fpl_manager_id: str,
+    total: int | None = None, points_for: int | None = None, note: str | None = None,
+) -> dict:
+    """Commissioner manual edit of a manager's H2H points (`total`) and/or season
+    `points_for`. Logs each changed field to standing_adjustments (the evidence)."""
+    from models import StandingAdjustment
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    standing = (
+        db.query(Standing).filter_by(league_id=league.id, manager_id=manager.id).one_or_none()
+    )
+    if not standing:
+        raise RuleViolation(f"no standings row for {manager.display}")
+    changes = []
+    for field, new in (("total", total), ("points_for", points_for)):
+        if new is None:
+            continue
+        old = getattr(standing, field)
+        if old == new:
+            continue
+        db.add(StandingAdjustment(league_id=league.id, manager_id=manager.id,
+                                  field=field, old_value=old, new_value=new, note=note))
+        setattr(standing, field, new)
+        changes.append({"field": field, "old": old, "new": new})
+    db.commit()
+    return {"manager": manager.display, "changes": changes}
+
+
+def get_standing_adjustments(db: Session, league: League) -> list[dict]:
+    """The audit trail of manual standings edits (evidence)."""
+    from models import StandingAdjustment
+
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    rows = (
+        db.query(StandingAdjustment)
+        .filter_by(league_id=league.id)
+        .order_by(StandingAdjustment.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "manager": names.get(a.manager_id), "field": a.field,
+            "old": a.old_value, "new": a.new_value, "note": a.note,
+            "when": a.created_at.isoformat() if a.created_at else None,
+        }
+        for a in rows
     ]
 
 
