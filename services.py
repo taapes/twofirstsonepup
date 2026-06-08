@@ -865,3 +865,44 @@ def get_draft_board(
             "player": pnames.get(dp.player_id) if dp and dp.player_id else None,
         })
     return out
+
+
+# ---- player search (for the draft board / pick + trade entry) ----
+def search_players(
+    db: Session,
+    league: League,
+    *,
+    q: str | None = None,
+    position: str | None = None,
+    available_year: int | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    """Search the player pool by name substring (case-insensitive) and/or
+    position. If `available_year` is given, exclude players already kept or
+    already drafted in that season's main draft (i.e. only draftable players)."""
+    query = db.query(Player)
+    if q:
+        query = query.filter(Player.name.ilike(f"%{q}%"))
+    if position:
+        query = query.filter(Player.position == position.upper())
+    players = query.order_by(Player.name).all()
+
+    excluded: set = set()
+    if available_year is not None:
+        for (pid,) in db.query(KeeperSelection.player_id).filter_by(
+            league_id=league.id, season_year=available_year
+        ):
+            excluded.add(pid)
+        for (pid,) in (
+            db.query(DraftPick.player_id)
+            .filter_by(league_id=league.id, season_year=available_year, draft_type="main")
+            .filter(DraftPick.player_id.isnot(None))
+        ):
+            excluded.add(pid)
+
+    out = [
+        {"fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team}
+        for p in players
+        if p.id not in excluded
+    ]
+    return out[:limit]

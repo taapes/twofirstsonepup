@@ -62,3 +62,20 @@ def draft_board(
     db: Session = Depends(get_db),
 ):
     return services.get_draft_board(db, _league(db, league_key), season_year, draft_type)
+
+
+@router.get("/leagues/{league_key}/players")
+def players(
+    league_key: str,
+    q: str | None = None,
+    position: str | None = None,
+    available_year: int | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """Search the player pool by name/position; pass available_year to show only
+    players still draftable (not kept or already drafted that season)."""
+    return services.search_players(
+        db, _league(db, league_key), q=q, position=position,
+        available_year=available_year, limit=limit,
+    )
