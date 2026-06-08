@@ -36,3 +36,39 @@ services:
       # Environment label; a non-"prod" value shows a TEST banner site-wide.
       - key: APP_ENV
         value: prod
+
+  # --- Demo sandbox: same code, separate Neon branch DB, passwordless login. ---
+  # Point DATABASE_URL at a Neon BRANCH of prod (instant copy); prod is untouched.
+  - type: web
+    name: twofirstsonepup-demo
+    runtime: python
+    plan: free
+    autoDeploy: true
+    region: oregon
+    healthCheckPath: /health
+
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      alembic upgrade head
+
+    startCommand: |
+      uvicorn main:app --host 0.0.0.0 --port 10000
+
+    envVars:
+      # Neon DEMO BRANCH connection string (NOT prod). Set in the dashboard.
+      - key: DATABASE_URL
+        sync: false
+      # demo mode: enables passwordless "pick any manager" login + DEMO banner
+      - key: APP_ENV
+        value: demo
+      - key: SESSION_HTTPS_ONLY
+        value: "1"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: SYNC_AUTH_TOKEN
+        sync: false
+      - key: ADMIN_PASSWORD
+        value: demo
+      - key: FPL_DRAFT_LEAGUE_ID
+        sync: false

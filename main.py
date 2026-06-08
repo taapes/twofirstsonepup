@@ -28,7 +28,7 @@ from ui import router as ui_router
 # behind the "Who are you?" screen at /who.
 _GATE_EXEMPT_PREFIXES = ("/v1", "/static")
 _GATE_EXEMPT_PATHS = {
-    "/health", "/who", "/login", "/logout", "/set-password",
+    "/health", "/who", "/login", "/demo-login", "/logout", "/set-password",
     "/admin/login", "/admin/logout", "/favicon.ico",
 }
 

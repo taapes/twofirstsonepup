@@ -60,7 +60,8 @@
   <div class="wrap">
     {% if app_env and app_env != "prod" %}
     <div style="background:#7a3b00;color:#ffd9a8;padding:6px 12px;border-radius:6px;margin-bottom:10px;font-weight:600">
-      ⚠ {{ app_env|upper }} ENVIRONMENT — not the live league site.
+      {% if app_env == "demo" %}🧪 DEMO — sandbox, anyone can play; data may reset. Not the live league.
+      {% else %}⚠ {{ app_env|upper }} ENVIRONMENT — not the live league site.{% endif %}
     </div>
     {% endif %}
     {% if not hide_nav %}

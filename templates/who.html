@@ -3,13 +3,24 @@
 {% block content %}
 <div style="max-width:560px;margin:6vh auto 0">
   <h1>Who are you?</h1>
+  {% if demo %}
+  <p class="sub">Demo sandbox — pick any team to jump in (no password). Data may reset.</p>
+  {% else %}
   <p class="sub">Pick your team to sign in. You can only edit your own team.</p>
+  {% endif %}
   <div class="card" style="padding:14px">
     <div class="who-grid">
       {% for m in managers %}
+      {% if demo %}
+      <form method="post" action="/demo-login" style="margin:0">
+        <input type="hidden" name="manager_id" value="{{ m.fpl }}">
+        <button type="submit" class="who-btn" style="width:100%;cursor:pointer">{{ m.name }}</button>
+      </form>
+      {% else %}
       <a class="who-btn" href="/login?manager_id={{ m.fpl }}">
         {{ m.name }}{% if m.needs_password %} <span class="tag">set password</span>{% endif %}
       </a>
+      {% endif %}
       {% endfor %}
     </div>
     <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">

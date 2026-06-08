@@ -12,6 +12,7 @@ from auth import (
     current_manager_id,
     hash_password,
     is_admin,
+    is_demo,
     verify_password,
 )
 from db import get_db
@@ -159,11 +160,30 @@ def who(request: Request, db: Session = Depends(get_db)):
     )
     return templates.TemplateResponse("who.html", {
         "request": request, "league": league, "is_admin": is_admin(request), "hide_nav": True,
+        "demo": is_demo(),
         "managers": [
             {"name": m.display, "fpl": m.fpl_manager_id, "needs_password": m.password_hash is None}
             for m in managers
         ],
     })
+
+
+@router.post("/demo-login")
+def demo_login(request: Request, db: Session = Depends(get_db), manager_id: str = Form(...)):
+    """Demo sandbox only: log straight in as the chosen manager, no password. Returns
+    404 in any non-demo environment so the live site always requires a password."""
+    if not is_demo():
+        raise HTTPException(status_code=404, detail="not found")
+    league = _league_or_404(db)
+    m = (
+        db.query(Manager).filter_by(league_id=league.id, fpl_manager_id=str(manager_id)).one_or_none()
+    )
+    if not m:
+        raise HTTPException(status_code=404, detail="manager not found")
+    request.session.clear()
+    request.session["manager_id"] = m.fpl_manager_id
+    request.session["manager_name"] = m.display
+    return RedirectResponse("/", status_code=303)
 
 
 @router.get("/login", response_class=HTMLResponse)

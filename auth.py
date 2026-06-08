@@ -40,6 +40,12 @@ def is_admin(request: Request) -> bool:
     return bool(request.session.get("admin"))
 
 
+def is_demo() -> bool:
+    """Demo sandbox mode (APP_ENV=demo): enables passwordless 'pick any manager'
+    login. Never true in prod, so the live site always requires a password."""
+    return os.getenv("APP_ENV", "prod") == "demo"
+
+
 def require_admin_session(request: Request) -> None:
     """Guard for UI write routes. 403 if not logged in (the route can catch and
     redirect to /admin/login)."""
