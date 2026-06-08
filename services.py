@@ -8,6 +8,8 @@ synced/normalized rows. Shared by the JSON API (api.py) and the homepage
 from sqlalchemy.orm import Session
 
 from models import (
+    DraftLottery,
+    DraftPick,
     Gameweek,
     GameweekPoints,
     InjuryList,
@@ -37,6 +39,8 @@ from rules import (
     h2h_standings,
     il_can_return,
     il_same_position,
+    ROSTER_SIZE,
+    generate_draft_slots,
     keeper_continuity,
     keeper_eligible,
     keeper_years_used,
@@ -713,3 +717,151 @@ def get_keeper_selections(db: Session, league: League, season_year: int) -> list
             {"player": p.name, "position": p.position, "is_discovery": sel.is_discovery}
         )
     return [{"manager": k, "keepers": v} for k, v in sorted(by_manager.items())]
+
+
+# ---- drafts (board generation + commissioner-entered pick/player trades) ----
+def _reverse_standings_managers(db: Session, league: League) -> list[Manager]:
+    rows = (
+        db.query(Standing, Manager)
+        .join(Manager, Manager.id == Standing.manager_id)
+        .filter(Standing.league_id == league.id)
+        .all()
+    )
+    rows.sort(key=lambda sm: -(sm[0].rank or 0))  # worst (10th) first
+    return [m for _, m in rows]
+
+
+def _r1_order_managers(db: Session, league: League) -> list[Manager]:
+    rows = (
+        db.query(DraftLottery, Manager)
+        .join(Manager, Manager.id == DraftLottery.manager_id)
+        .filter(DraftLottery.league_id == league.id, DraftLottery.pick_result.isnot(None))
+        .all()
+    )
+    rows.sort(key=lambda x: x[0].pick_result)
+    return [m for _, m in rows]
+
+
+def set_draft_order(db: Session, league: League, fpl_manager_ids: list[str]) -> list[dict]:
+    """Commissioner sets the round-1 pick order (the externally-run lottery result)."""
+    managers = [_resolve_manager(db, league, fid) for fid in fpl_manager_ids]
+    db.query(DraftLottery).filter_by(league_id=league.id).delete()
+    for i, m in enumerate(managers, start=1):
+        db.add(DraftLottery(league_id=league.id, manager_id=m.id, pick_result=i))
+    db.commit()
+    return [{"pick": i, "manager": m.name} for i, m in enumerate(managers, start=1)]
+
+
+def trade_pick(
+    db: Session, league: League, *, from_fpl: str, to_fpl: str, original_fpl: str,
+    round: int, season_year: int, draft_type: str = "main",
+) -> dict:
+    """Record a draft-pick trade (commissioner-entered, live). Reassigns ownership
+    of the (season, draft_type, round) slot originally belonging to original_fpl."""
+    frm = _resolve_manager(db, league, from_fpl)
+    to = _resolve_manager(db, league, to_fpl)
+    orig = _resolve_manager(db, league, original_fpl)
+    label = f"{season_year} {draft_type} R{round} (orig {orig.name})"
+    db.add(
+        Trade(
+            league_id=league.id, from_manager=frm.id, to_manager=to.id,
+            pick_original_manager=orig.id, pick_round=round,
+            pick_season_year=season_year, pick_draft_type=draft_type, draft_pick=label,
+        )
+    )
+    db.commit()
+    return {"from": frm.name, "to": to.name, "pick": label}
+
+
+def trade_player(
+    db: Session, league: League, *, from_fpl: str, to_fpl: str, player_fpl_id: int
+) -> dict:
+    """Record a commissioner-entered player trade (e.g. mid-draft, outside the
+    FPL feed)."""
+    frm = _resolve_manager(db, league, from_fpl)
+    to = _resolve_manager(db, league, to_fpl)
+    player = _resolve_player(db, player_fpl_id)
+    db.add(Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id, player_id=player.id))
+    db.commit()
+    return {"from": frm.name, "to": to.name, "player": player.name}
+
+
+def record_pick(
+    db: Session, league: League, *, season_year: int, pick_number: int,
+    owner_fpl: str, player_fpl_id: int, draft_type: str = "main", round: int = 0,
+) -> dict:
+    """Record a selection made at a board slot (live). Upsert by pick number."""
+    owner = _resolve_manager(db, league, owner_fpl)
+    player = _resolve_player(db, player_fpl_id)
+    existing = (
+        db.query(DraftPick)
+        .filter_by(league_id=league.id, season_year=season_year, draft_type=draft_type, pick_number=pick_number)
+        .one_or_none()
+    )
+    if existing:
+        existing.manager_id, existing.player_id = owner.id, player.id
+    else:
+        db.add(DraftPick(
+            league_id=league.id, season_year=season_year, draft_type=draft_type,
+            pick_number=pick_number, round=round, manager_id=owner.id,
+            player_id=player.id, source="draft",
+        ))
+    db.commit()
+    return {"pick": pick_number, "owner": owner.name, "player": player.name}
+
+
+def get_draft_board(
+    db: Session, league: League, season_year: int, draft_type: str = "main"
+) -> list[dict]:
+    """The draft board: slots in pick order with current owner (after pick trades)
+    and any recorded selection. Computed from the R1 order + reverse standings +
+    free-keeper counts, so it reflects trades the moment they're entered."""
+    names = {m.id: m.name for m in db.query(Manager).filter_by(league_id=league.id)}
+    r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
+    rev = _reverse_standings_managers(db, league)
+
+    keeper_counts: dict = {}
+    for sel in db.query(KeeperSelection).filter_by(league_id=league.id, season_year=season_year):
+        keeper_counts[sel.manager_id] = keeper_counts.get(sel.manager_id, 0) + 1
+
+    slots = generate_draft_slots(
+        [m.id for m in r1], [m.id for m in rev], keeper_counts, ROSTER_SIZE
+    )
+    board = [
+        {"pick": i, "round": s["round"], "original_owner_id": s["manager"], "owner_id": s["manager"]}
+        for i, s in enumerate(slots, start=1)
+    ]
+    by_slot = {(b["round"], b["original_owner_id"]): b for b in board}
+
+    # apply pick trades in entry order (latest move of a slot wins)
+    for t in (
+        db.query(Trade)
+        .filter(Trade.league_id == league.id, Trade.pick_round.isnot(None),
+                Trade.pick_season_year == season_year, Trade.pick_draft_type == draft_type)
+        .order_by(Trade.id)
+        .all()
+    ):
+        slot = by_slot.get((t.pick_round, t.pick_original_manager))
+        if slot:
+            slot["owner_id"] = t.to_manager
+
+    # overlay recorded picks by pick number
+    picks = {
+        dp.pick_number: dp
+        for dp in db.query(DraftPick).filter_by(
+            league_id=league.id, season_year=season_year, draft_type=draft_type
+        )
+    }
+    pnames = {p.id: p.name for p in db.query(Player)}
+    out = []
+    for b in board:
+        dp = picks.get(b["pick"])
+        out.append({
+            "pick": b["pick"],
+            "round": b["round"],
+            "owner": names.get(b["owner_id"]),
+            "original_owner": names.get(b["original_owner_id"]),
+            "traded": b["owner_id"] != b["original_owner_id"],
+            "player": pnames.get(dp.player_id) if dp and dp.player_id else None,
+        })
+    return out

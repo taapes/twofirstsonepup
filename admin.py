@@ -55,6 +55,34 @@ class SubmitKeepersRequest(BaseModel):
     discovery_fpl_id: int | None = None
 
 
+class SetDraftOrderRequest(BaseModel):
+    fpl_manager_ids: list[str]  # round-1 pick order
+
+
+class TradePickRequest(BaseModel):
+    from_fpl: str
+    to_fpl: str
+    original_fpl: str  # whose pick slot it originally is
+    round: int
+    season_year: int
+    draft_type: str = "main"
+
+
+class TradePlayerRequest(BaseModel):
+    from_fpl: str
+    to_fpl: str
+    player_fpl_id: int
+
+
+class RecordPickRequest(BaseModel):
+    season_year: int
+    pick_number: int
+    owner_fpl: str
+    player_fpl_id: int
+    draft_type: str = "main"
+    round: int = 0
+
+
 @router.post("/leagues/{league_key}/injury-list")
 def place_on_il(
     league_key: str, body: PlaceOnILRequest, db: Session = Depends(get_db)
@@ -141,6 +169,59 @@ def submit_keepers(
             keeper_fpl_ids=body.keeper_fpl_ids,
             season_year=body.season_year,
             discovery_fpl_id=body.discovery_fpl_id,
+        )
+    except RuleViolation as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/leagues/{league_key}/draft/order")
+def set_draft_order(
+    league_key: str, body: SetDraftOrderRequest, db: Session = Depends(get_db)
+):
+    """Set the round-1 pick order (commissioner provides the lottery result)."""
+    league = _league(db, league_key)
+    try:
+        return services.set_draft_order(db, league, body.fpl_manager_ids)
+    except RuleViolation as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/leagues/{league_key}/draft/trade-pick")
+def trade_pick(league_key: str, body: TradePickRequest, db: Session = Depends(get_db)):
+    """Record a draft-pick trade (reassigns that slot's owner on the board)."""
+    league = _league(db, league_key)
+    try:
+        return services.trade_pick(
+            db, league, from_fpl=body.from_fpl, to_fpl=body.to_fpl,
+            original_fpl=body.original_fpl, round=body.round,
+            season_year=body.season_year, draft_type=body.draft_type,
+        )
+    except RuleViolation as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/leagues/{league_key}/draft/trade-player")
+def trade_player(league_key: str, body: TradePlayerRequest, db: Session = Depends(get_db)):
+    """Record a commissioner-entered player trade (outside the FPL feed)."""
+    league = _league(db, league_key)
+    try:
+        return services.trade_player(
+            db, league, from_fpl=body.from_fpl, to_fpl=body.to_fpl,
+            player_fpl_id=body.player_fpl_id,
+        )
+    except RuleViolation as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/leagues/{league_key}/draft/record-pick")
+def record_pick(league_key: str, body: RecordPickRequest, db: Session = Depends(get_db)):
+    """Record a selection made at a board slot (live)."""
+    league = _league(db, league_key)
+    try:
+        return services.record_pick(
+            db, league, season_year=body.season_year, pick_number=body.pick_number,
+            owner_fpl=body.owner_fpl, player_fpl_id=body.player_fpl_id,
+            draft_type=body.draft_type, round=body.round,
         )
     except RuleViolation as e:
         raise HTTPException(status_code=400, detail=str(e))

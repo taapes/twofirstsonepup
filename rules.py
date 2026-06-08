@@ -254,6 +254,35 @@ def validate_keeper_selection(
     return errors
 
 
+# ---- Drafts ----
+ROSTER_SIZE = 15
+
+
+def generate_draft_slots(
+    r1_order: list,
+    reverse_order: list,
+    keeper_counts: dict,
+    roster_size: int = ROSTER_SIZE,
+) -> list[dict]:
+    """Ordered (round, manager) pick slots BEFORE any pick trades.
+
+    Round 1 uses `r1_order` (commissioner-set); rounds 2+ use `reverse_order`
+    (reverse standings). Keepers are free: a manager with K keepers makes
+    roster_size-K picks, i.e. holds a slot in rounds 1..(roster_size-K) and drops
+    out of the latest rounds once their 15-man roster is full. Manager keys are
+    opaque (ids or names). Returns dicts {round, manager} in overall pick order.
+    """
+    picks_needed = {m: roster_size - keeper_counts.get(m, 0) for m in r1_order}
+    max_round = max(picks_needed.values(), default=0)
+    slots = []
+    for rnd in range(1, max_round + 1):
+        order = r1_order if rnd == 1 else reverse_order
+        for m in order:
+            if picks_needed.get(m, 0) >= rnd:
+                slots.append({"round": rnd, "manager": m})
+    return slots
+
+
 _PAYOUT_LABELS = {
     "league_1": "1st place — League",
     "league_2": "2nd place — League",

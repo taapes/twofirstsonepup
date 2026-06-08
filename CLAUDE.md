@@ -153,8 +153,17 @@ Write tests for these. They are custom and non-obvious:
 - **Discovery draft:** Snake, 2 picks/manager, held in September. If a picked
   player joins the PL during the year they become a bonus (6th) keeper — only
   one bonus keeper allowed.
-- **Main draft:** Round 1 lottery-weighted (10th place = 40%, etc.); rounds 2+
-  reverse standings. Keepers submitted pre-draft.
+- **Main draft:** Lottery mechanics are OUT of the app — the commissioner sets
+  the round-1 order (`POST /admin/.../draft/order`, stored in `draft_lottery`).
+  Rounds 2+ = reverse standings. Keepers are FREE: a manager makes 15−keepers
+  picks (holds slots in rounds 1..(15−K)). The board is computed on read
+  (`services.get_draft_board`, `GET /v1/.../draft/{year}`) from order + keeper
+  counts + pick trades, so it reflects trades live. **Pick trades** (draft AND
+  discovery picks) and ad-hoc player trades are commissioner-entered (not in the
+  FPL feed): `POST /admin/.../draft/trade-pick|trade-player`; a pick trade
+  reassigns the (season, type, round, original-owner) slot's owner. Selections
+  recorded live via `.../draft/record-pick`. *TODO:* discovery draft order
+  (snake) + homepage board view.
 - **Cups:** Cup (top 6) and Pup Cup (bottom 4 + Cup losers), start after GW28,
   each round spans 2 GWs, admin sets GWs per round. Auto-score 2-week totals.
   Implemented as auto-generated single-elim brackets seeded from H2H standings

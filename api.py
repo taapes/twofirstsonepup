@@ -54,3 +54,11 @@ def keepers(league_key: str, db: Session = Depends(get_db)):
 @router.get("/leagues/{league_key}/keeper-selections/{season_year}")
 def keeper_selections(league_key: str, season_year: int, db: Session = Depends(get_db)):
     return services.get_keeper_selections(db, _league(db, league_key), season_year)
+
+
+@router.get("/leagues/{league_key}/draft/{season_year}")
+def draft_board(
+    league_key: str, season_year: int, draft_type: str = "main",
+    db: Session = Depends(get_db),
+):
+    return services.get_draft_board(db, _league(db, league_key), season_year, draft_type)

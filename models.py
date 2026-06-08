@@ -159,7 +159,17 @@ class Trade(Base):
     # diffs so a traded-away player isn't mistaken for a drop.
     event_gw: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fpl_trade_id: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
-    draft_pick: Mapped[str | None] = mapped_column(String, nullable=True)  # e.g. "2026-R3"
+    draft_pick: Mapped[str | None] = mapped_column(String, nullable=True)  # human label
+    # Structured pick-trade fields (commissioner-entered; not in the FPL feed).
+    # When set, this row moves a draft pick rather than a player: the slot
+    # (season, draft_type, round) originally owned by pick_original_manager moves
+    # from_manager -> to_manager. The draft board applies the latest such move.
+    pick_season_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pick_draft_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    pick_round: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pick_original_manager: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), nullable=True
+    )
     conditions: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
@@ -252,9 +262,15 @@ class KeeperSelection(Base):
 
 
 class DraftPick(Base):
+    """An actual selection made during a draft. The board (slot order/ownership)
+    is computed on read from the draft order + keepers + pick trades; this table
+    records picks as they're made live. manager_id = the picking (owning) manager."""
+
     __tablename__ = "draft_picks"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
+    season_year: Mapped[int] = mapped_column(Integer, index=True, server_default="0")
+    draft_type: Mapped[str] = mapped_column(String, server_default="main")  # main/discovery
     round: Mapped[int] = mapped_column(Integer)
     pick_number: Mapped[int] = mapped_column(Integer)
     manager_id: Mapped[uuid.UUID] = mapped_column(
