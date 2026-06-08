@@ -1586,6 +1586,59 @@ def _shield_lines(db: Session, league: League) -> dict:
     return extra
 
 
+def add_side_payout(
+    db: Session, league: League, *, fpl_manager_id: str, label: str, amount: int,
+    gameweek: int | None = None,
+) -> dict:
+    """Record a side-pot credit/debit (weekly-entry pool, team-sale clause, etc.)."""
+    from models import SidePayout
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    if not amount:
+        raise RuleViolation("enter a non-zero amount")
+    if not label.strip():
+        raise RuleViolation("enter a label")
+    db.add(SidePayout(league_id=league.id, manager_id=manager.id, label=label.strip(),
+                      amount=amount, gameweek=gameweek))
+    db.commit()
+    return {"manager": manager.display, "amount": amount}
+
+
+def delete_side_payout(db: Session, league: League, side_id: str) -> None:
+    from models import SidePayout
+
+    row = db.query(SidePayout).filter_by(league_id=league.id, id=side_id).one_or_none()
+    if not row:
+        raise RuleViolation("side payout not found")
+    db.delete(row)
+    db.commit()
+
+
+def get_side_payouts(db: Session, league: League) -> list[dict]:
+    from models import SidePayout
+
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    rows = (
+        db.query(SidePayout).filter_by(league_id=league.id)
+        .order_by(SidePayout.created_at.desc()).all()
+    )
+    return [
+        {"id": str(s.id), "manager": names.get(s.manager_id), "label": s.label,
+         "amount": s.amount, "gameweek": s.gameweek}
+        for s in rows
+    ]
+
+
+def _side_payout_lines(db: Session, league: League) -> dict:
+    """{manager_id: [(label, amount)]} side-pot lines for the winnings table."""
+    from models import SidePayout
+
+    extra: dict = {}
+    for s in db.query(SidePayout).filter_by(league_id=league.id):
+        extra.setdefault(s.manager_id, []).append((s.label, float(s.amount)))
+    return extra
+
+
 def _cup_final_and_third(db: Session, cup: Tournament):
     """Identify the Cup's final vs 3rd-place match: the final is between the two
     semifinal winners; the other round-3 match is the 3rd-place playoff."""
@@ -1715,9 +1768,14 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
     # Pup winner takes the Pup buy-in pool ($25 x entrants); default to the typical
     # 6-team field (bottom 4 + 2 Cup losers) when the entrant count is unknown.
     pup_pool = PAYOUT_STRUCTURE["pup_entry"] * (pup_entrants or 6)
+    # merge side-pot lines (Pupmunity Shield + weekly-entry / team-sale side payouts)
+    extra: dict = {}
+    for src in (_shield_lines(db, league), _side_payout_lines(db, league)):
+        for mid, lines in src.items():
+            extra.setdefault(mid, []).extend(lines)
     raw = compute_payouts(
         recipients, num_managers, other_fines=other_fines, fines=fines, pup_pool=pup_pool,
-        extra=_shield_lines(db, league),
+        extra=extra,
     )
     all_mgrs = db.query(Manager).filter_by(league_id=league.id).all()
     names = {m.id: m.display for m in all_mgrs}

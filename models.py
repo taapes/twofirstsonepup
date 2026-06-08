@@ -801,6 +801,28 @@ class DraftQueue(Base):
     rank: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
+class SidePayout(Base):
+    """A commissioner-entered side-pot credit/debit outside the main pot — e.g. the
+    weekly-entry pool winner or a team-sale-clause payment. Folded into a manager's
+    overall winnings. Amount may be negative (an entry/owing)."""
+
+    __tablename__ = "side_payouts"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    label: Mapped[str] = mapped_column(String)  # e.g. "Weekly winner GW10" / "Team-sale clause"
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)  # dollars (+/-)
+    gameweek: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class PlayerPoolSnapshot(Base):
     """The set of player fpl_ids that existed in the pool at a season's draft (captured
     at the Preseason rollover). FPL has no reliable 'added date', so this snapshot is

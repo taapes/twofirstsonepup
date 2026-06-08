@@ -98,4 +98,43 @@
   </table>
   {% else %}<div class="empty">No fines.</div>{% endif %}
 </div>
+
+<h2>Side Pots</h2>
+<p class="sub">Direct credits/debits outside the main pot — the weekly-entry pool winner,
+  the team-sale clause, etc. They fold into a manager's overall winnings. Use a negative
+  amount for an entry/owing.</p>
+<div class="card" style="padding:12px;max-width:560px">
+  <form method="post" action="/admin/side-payouts/add">
+    <label>Manager
+      <select name="fpl_manager_id" required style="width:100%">
+        {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label style="display:block;margin-top:8px">Label<br>
+      <input name="label" style="width:100%" placeholder="Weekly winner GW10 / Team-sale clause" required></label>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <label>Amount ($, ±)<br><input name="amount" type="number" style="width:110px" required></label>
+      <label>GW (opt)<br><input name="gameweek" type="number" min="1" max="38" style="width:80px"></label>
+    </div>
+    <button type="submit" style="margin-top:8px">Add side payout</button>
+  </form>
+</div>
+<div class="card">
+  {% if side_payouts %}
+  <table>
+    <thead><tr><th>Manager</th><th>Label</th><th class="num">$</th><th class="num">GW</th><th></th></tr></thead>
+    <tbody>
+      {% for s in side_payouts %}
+      <tr><td>{{ s.manager }}</td><td class="sub">{{ s.label }}</td>
+        <td class="num">{{ "%+d"|format(s.amount) }}</td>
+        <td class="num">{{ s.gameweek if s.gameweek else "—" }}</td>
+        <td><form method="post" action="/admin/side-payouts/delete" style="display:inline"
+                  onsubmit="return confirm('Remove this side payout?')">
+          <input type="hidden" name="side_id" value="{{ s.id }}">
+          <button type="submit" title="remove">✕</button></form></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="empty">No side pots.</div>{% endif %}
+</div>
 {% endblock %}

@@ -682,6 +682,7 @@ def admin_standings(request: Request, db: Session = Depends(get_db)):
         "standings": services.get_standings(db, league),
         "adjustments": services.get_standing_adjustments(db, league),
         "fines": services.get_fines(db, league),
+        "side_payouts": services.get_side_payouts(db, league),
     })
 
 
@@ -794,6 +795,40 @@ def admin_delete_fine(
     league = _league_or_404(db)
     try:
         services.delete_fine(db, league, fine_id)
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/standings", status_code=303)
+
+
+@router.post("/admin/side-payouts/add")
+def admin_add_side_payout(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), label: str = Form(...), amount: str = Form(...),
+    gameweek: str = Form(""),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/standings", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.add_side_payout(
+            db, league, fpl_manager_id=fpl_manager_id, label=label,
+            amount=_safe_int(amount, -100000, 100000, field="amount"),
+            gameweek=_safe_int(gameweek, 1, 38, field="gameweek") if gameweek.strip() else None,
+        )
+    except (RuleViolation, ValueError) as e:
+        return _err(e)
+    return RedirectResponse("/admin/standings", status_code=303)
+
+
+@router.post("/admin/side-payouts/delete")
+def admin_delete_side_payout(
+    request: Request, db: Session = Depends(get_db), side_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/standings", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.delete_side_payout(db, league, side_id)
     except RuleViolation as e:
         return _err(e)
     return RedirectResponse("/admin/standings", status_code=303)
