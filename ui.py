@@ -457,6 +457,61 @@ def il_release(
     return RedirectResponse("/my-team", status_code=303)
 
 
+# ---- international list (AFCON / Asia Cup) self-service ----
+def _intl_entry_or_403(db, league, fpl_manager_id: str, intl_id: str):
+    from models import InternationalList
+    manager = services._resolve_manager(db, league, fpl_manager_id)
+    entry = db.get(InternationalList, intl_id)
+    if not entry or entry.manager_id != manager.id:
+        return None
+    return entry
+
+
+@router.post("/intl/place")
+def intl_place(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), away_fpl_id: str = Form(...),
+    replacement_fpl_id: str = Form(...), tournament: str = Form(""),
+):
+    league = _league_or_404(db)
+    if not _feature_allowed(request, db, league, "gw_logic_active"):
+        return _locked_response("The international list")
+    if not can_act_as(request, fpl_manager_id):
+        return _forbidden(request, "You can only manage your own team's international list.")
+    try:
+        services.place_on_intl(
+            db, league, fpl_manager_id=fpl_manager_id,
+            away_fpl_id=_safe_int(away_fpl_id, 1, 10_000_000, field="away player"),
+            replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
+            start_gw=services.current_gameweek(db, league) or 1,
+            tournament=tournament or None,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/my-team", status_code=303)
+
+
+@router.post("/intl/return")
+def intl_return(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), intl_id: str = Form(...),
+):
+    league = _league_or_404(db)
+    if not _feature_allowed(request, db, league, "gw_logic_active"):
+        return _locked_response("The international list")
+    if not can_act_as(request, fpl_manager_id):
+        return _forbidden(request, "You can only manage your own team's international list.")
+    if not _intl_entry_or_403(db, league, fpl_manager_id, intl_id):
+        return _forbidden(request, "That international-list entry isn't yours.")
+    try:
+        services.return_from_intl(
+            db, league, intl_id, services.current_gameweek(db, league) or SEASON_LAST_GW,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/my-team", status_code=303)
+
+
 @router.get("/my-team/upcoming", response_class=HTMLResponse)
 def my_team_upcoming_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)

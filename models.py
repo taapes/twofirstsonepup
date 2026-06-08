@@ -280,6 +280,31 @@ class InjuryList(Base):
     status: Mapped[str | None] = mapped_column(String, nullable=True)  # active/returned/waived
 
 
+class InternationalList(Base):
+    """A player away at a national-team cup (AFCON / Asia Cup), temporarily replaced.
+    Mirrors the InjuryList but: no minimum stay (return when the nation is eliminated)
+    and no same-position requirement. Preserves keeper eligibility while out (covered
+    like the IL in the keeper-drop derivation). One active entry per manager; one
+    replacement for the whole absence."""
+
+    __tablename__ = "international_list"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    start_gw: Mapped[int] = mapped_column(Integer)
+    end_gw: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    replacement_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
+    )
+    tournament: Mapped[str | None] = mapped_column(String, nullable=True)  # AFCON / Asia Cup
+    status: Mapped[str | None] = mapped_column(String, nullable=True)  # active/returned
+
+
 class KeeperException(Base):
     __tablename__ = "keeper_exceptions"
 

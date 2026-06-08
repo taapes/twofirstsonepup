@@ -87,6 +87,60 @@
     {% else %}<p class="sub">No players on the injury list.</p>{% endif %}
   </div>
 </div>
+
+{% if team.status %}
+<div class="card statusbox" style="margin-bottom:14px">
+  <strong>International list</strong> <span class="sub">(AFCON / Asia Cup — keeps keeper
+    eligibility while away; re-add when the nation is eliminated)</span>
+  {% if team.status.international_list %}
+  {% for il in team.status.international_list %}
+  <div style="margin-top:6px">
+    <strong>{{ il.player }}</strong> <span class="sub">{{ il.position }}</span>
+    {% if il.tournament %}<span class="tag">{{ il.tournament }}</span>{% endif %}
+    — replaced by {{ il.replacement or "—" }}; out {{ il.gws_out }} GW{% if il.gws_out != 1 %}s{% endif %} (since GW{{ il.start_gw }}).
+    {% if can_edit_il %}
+    <form method="post" action="/intl/return" style="display:inline;margin-left:6px">
+      <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
+      <input type="hidden" name="intl_id" value="{{ il.id }}">
+      <button type="submit">Return to roster</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% elif can_edit_il %}
+  <p class="sub">No players away at a national-team cup.</p>
+  <details style="margin-top:6px"><summary class="sub">Send a player to international duty</summary>
+    <form method="post" action="/intl/place" onsubmit="return intlResolve(this)" style="margin-top:8px">
+      <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
+      <label>Away player<br>
+        <select name="away_fpl_id" required style="width:100%">
+          {% for p in team.players %}<option value="{{ p.fpl_id }}">{{ p.name }} · {{ p.position }}</option>{% endfor %}
+        </select></label>
+      <label style="display:block;margin-top:6px">Replacement<br>
+        <input list="intlPlayers" name="replacement_name" placeholder="search by name" autocomplete="off" style="width:100%" required>
+        <input type="hidden" name="replacement_fpl_id"></label>
+      <label style="display:block;margin-top:6px">Tournament
+        <input name="tournament" placeholder="AFCON" style="width:160px"></label>
+      <button type="submit" style="margin-top:8px">Send to international duty</button>
+      <p class="sub">One replacement for the whole absence; re-add the returning player when their nation is out.</p>
+    </form>
+  </details>
+  <datalist id="intlPlayers">
+    {% for p in players %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.label }}"></option>{% endfor %}
+  </datalist>
+  <script>
+    function intlResolve(form){
+      var name=form.querySelector('[name=replacement_name]').value;
+      var opt=document.querySelector('#intlPlayers option[value="'+name.replace(/"/g,'\\"')+'"]');
+      if(!opt){alert('Pick a replacement from the list.');return false;}
+      form.querySelector('[name=replacement_fpl_id]').value=opt.dataset.fpl;
+      return true;
+    }
+  </script>
+  {% else %}<p class="sub">No players on international duty.</p>{% endif %}
+</div>
+{% endif %}
+
 <style>
   .statusbox { padding:12px; }
   .statusbox.danger { border-color:var(--warn); }

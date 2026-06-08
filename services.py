@@ -721,6 +721,22 @@ def _manager_status(db: Session, league: League, manager: Manager) -> dict:
             "return_gw": eligible_gw,
             "can_return": cur is not None and eligible_gw is not None and cur >= eligible_gw,
         })
+    from models import InternationalList
+
+    intl = []
+    for entry, p in (
+        db.query(InternationalList, Player)
+        .join(Player, Player.id == InternationalList.player_id)
+        .filter(InternationalList.manager_id == manager.id, InternationalList.status == "active")
+        .all()
+    ):
+        repl = db.get(Player, entry.replacement_id) if entry.replacement_id else None
+        gws_out = max(cur - entry.start_gw + 1, 0) if (cur and entry.start_gw) else None
+        intl.append({
+            "id": str(entry.id), "player": p.name, "position": p.position,
+            "replacement": repl.name if repl else None, "tournament": entry.tournament,
+            "start_gw": entry.start_gw, "gws_out": gws_out,
+        })
     return {
         "tanking": {
             "state": tank_state,
@@ -729,6 +745,7 @@ def _manager_status(db: Session, league: League, manager: Manager) -> dict:
             "min_players": ANTI_TANKING_MIN_ZERO_PLAYERS,
         },
         "injury_list": il,
+        "international_list": intl,
     }
 
 
@@ -1063,6 +1080,70 @@ def return_from_il(
     injured = db.get(Player, entry.player_id)
     replacement = db.get(Player, entry.replacement_id) if entry.replacement_id else None
     return _il_to_dict(entry, injured, replacement)
+
+
+# ---- international list (AFCON / Asia Cup temporary leave) ----
+def place_on_intl(
+    db: Session, league: League, *, fpl_manager_id: str, away_fpl_id: int,
+    replacement_fpl_id: int, start_gw: int, tournament: str | None = None,
+) -> dict:
+    """Replace a player away at a national-team cup. One active entry per manager; one
+    replacement for the whole absence (no same-position rule, unlike the IL). Keeper
+    eligibility is preserved while away (covered in the keeper-drop derivation)."""
+    from models import InternationalList
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    away = _resolve_player(db, away_fpl_id)
+    replacement = _resolve_player(db, replacement_fpl_id)
+    if away.id == replacement.id:
+        raise RuleViolation("replacement must be a different player")
+    existing = (
+        db.query(InternationalList).filter_by(manager_id=manager.id, status="active").first()
+    )
+    if existing:
+        raise RuleViolation("manager already has an active international-list player")
+    entry = InternationalList(
+        player_id=away.id, manager_id=manager.id, start_gw=start_gw,
+        replacement_id=replacement.id, tournament=tournament or None, status="active",
+    )
+    db.add(entry)
+    db.commit()
+    db.refresh(entry)
+    return {"player": away.name, "replacement": replacement.name, "start_gw": start_gw}
+
+
+def return_from_intl(db: Session, league: League, intl_id: str, return_gw: int) -> dict:
+    """Re-add a returning player (their nation was eliminated). No minimum stay — the
+    replacement is dropped to make room (the manager picks the returner back up)."""
+    from models import InternationalList
+
+    entry = db.get(InternationalList, intl_id)
+    if not entry:
+        raise RuleViolation("international-list entry not found")
+    if entry.status != "active":
+        raise RuleViolation(f"international-list entry is already '{entry.status}'")
+    entry.end_gw = return_gw
+    entry.status = "returned"
+    db.commit()
+    return {"returned_gw": return_gw}
+
+
+def get_international_list(db: Session, league: League) -> list[dict]:
+    """Active international-list entries for the league."""
+    from models import InternationalList
+
+    rows = (
+        db.query(InternationalList, Manager, Player)
+        .join(Manager, Manager.id == InternationalList.manager_id)
+        .join(Player, Player.id == InternationalList.player_id)
+        .filter(Manager.league_id == league.id, InternationalList.status == "active")
+        .all()
+    )
+    return [
+        {"manager": m.display, "player": p.name, "tournament": il.tournament,
+         "start_gw": il.start_gw}
+        for il, m, p in rows
+    ]
 
 
 # ---- cups (auto-bracket from GW28 standings, auto-scored 2-GW totals) ----
@@ -1615,10 +1696,23 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
     ):
         presence.setdefault((mid, pid), set()).add(gnum)
 
-    il: dict = {}  # (manager_id, player_id) -> GW numbers covered by the IL (not a drop)
+    from models import InternationalList
+
+    # GW numbers a player was OFF the roster but covered (not a drop): the IL and the
+    # international (AFCON / Asia Cup) list both preserve keeper eligibility.
+    il: dict = {}  # (manager_id, player_id) -> covered GW numbers
     for e in (
         db.query(InjuryList)
         .join(Manager, Manager.id == InjuryList.manager_id)
+        .filter(Manager.league_id == league.id)
+        .all()
+    ):
+        il.setdefault((e.manager_id, e.player_id), set()).update(
+            range(e.start_gw, (e.end_gw or last_n) + 1)
+        )
+    for e in (
+        db.query(InternationalList)
+        .join(Manager, Manager.id == InternationalList.manager_id)
         .filter(Manager.league_id == league.id)
         .all()
     ):
