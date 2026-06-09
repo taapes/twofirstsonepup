@@ -968,6 +968,19 @@ def admin_players(request: Request, db: Session = Depends(get_db)):
     })
 
 
+@router.get("/admin/audit", response_class=HTMLResponse)
+def admin_audit(request: Request, db: Session = Depends(get_db)):
+    """Commissioner audit log: every team-affecting action (who/what/when),
+    sortable/filterable client-side. Any admin can view."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/audit", status_code=303)
+    league = _league_or_404(db)
+    return templates.TemplateResponse("audit.html", {
+        "request": request, "league": league, "is_admin": True,
+        "entries": services.get_audit_log(db, league),
+    })
+
+
 @router.get("/cups", response_class=HTMLResponse)
 def cups_page(request: Request, db: Session = Depends(get_db)):
     """Public, read-only cup brackets."""

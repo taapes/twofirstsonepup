@@ -10,7 +10,9 @@ import os
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from audit import current_actor
 from models import (
+    AuditLog,
     DraftLottery,
     DraftPick,
     Fixture,
@@ -96,6 +98,80 @@ def latest_gameweek(db: Session, league: League) -> Gameweek | None:
         .order_by(Gameweek.number.desc())
         .first()
     )
+
+
+# ---- audit log ----
+def record_audit(
+    db: Session,
+    league: League,
+    *,
+    action: str,
+    summary: str,
+    manager_ids: list | None = None,
+    details: dict | None = None,
+) -> None:
+    """Append an audit entry for a team-affecting action. Adds to the session
+    only (NO commit) so it shares the caller's transaction and is atomic with the
+    change — call it immediately before the caller's `db.commit()`. The acting
+    identity comes from the request-scoped ContextVar (audit.current_actor), so
+    callers don't thread an actor argument; unset (scripts/cron) → system."""
+    actor, kind = current_actor()
+    db.add(
+        AuditLog(
+            league_id=league.id,
+            actor=actor,
+            actor_kind=kind,
+            action=action,
+            summary=summary,
+            manager_ids=[str(m) for m in manager_ids] if manager_ids else None,
+            details=details,
+        )
+    )
+
+
+def get_audit_log(
+    db: Session,
+    league: League,
+    *,
+    action: str | None = None,
+    manager_fpl_id: str | None = None,
+    limit: int = 500,
+) -> list[dict]:
+    """Audit entries newest-first, with affected-team names resolved. Filters by
+    action and/or by an affected manager (matched in Python on the manager_ids
+    list for Postgres/sqlite portability)."""
+    names = {
+        str(m.id): m.display
+        for m in db.query(Manager).filter_by(league_id=league.id)
+    }
+    target_id = None
+    if manager_fpl_id:
+        mgr = (
+            db.query(Manager)
+            .filter_by(league_id=league.id, fpl_manager_id=str(manager_fpl_id))
+            .one_or_none()
+        )
+        target_id = str(mgr.id) if mgr else "__none__"
+    q = db.query(AuditLog).filter_by(league_id=league.id)
+    if action:
+        q = q.filter(AuditLog.action == action)
+    rows = q.order_by(AuditLog.created_at.desc()).limit(max(1, min(limit, 2000))).all()
+    out = []
+    for r in rows:
+        mids = r.manager_ids or []
+        if target_id is not None and target_id not in mids:
+            continue
+        out.append({
+            "id": str(r.id),
+            "when": r.created_at.isoformat() if r.created_at else None,
+            "actor": r.actor,
+            "actor_kind": r.actor_kind,
+            "action": r.action,
+            "summary": r.summary,
+            "teams": [names.get(m, "—") for m in mids],
+            "details": r.details,
+        })
+    return out
 
 
 DEMO_DEFAULT_GW = 19  # demo: a mid-season GW so Upcoming/Scores have data to show
@@ -282,6 +358,9 @@ def set_phase(db: Session, league: League, macro: str, *, manual: bool = True) -
     league.phase = macro
     league.phase_manual = manual
     league.phase_set_at = _dt.datetime.now(_dt.timezone.utc)
+    record_audit(db, league, action="phase.set",
+                 summary=f"Set phase to {macro}" + (" (pinned)" if manual else ""),
+                 details={"phase": macro, "manual": manual})
     db.commit()
     return {"phase": league.phase, "manual": league.phase_manual}
 
@@ -289,6 +368,9 @@ def set_phase(db: Session, league: League, macro: str, *, manual: bool = True) -
 def set_phase_pin(db: Session, league: League, manual: bool) -> None:
     """Pin/unpin the phase (when unpinned, sync auto-advance resumes)."""
     league.phase_manual = manual
+    record_audit(db, league, action="phase.pin",
+                 summary=("Pinned" if manual else "Unpinned") + f" phase ({league.phase})",
+                 details={"manual": manual, "phase": league.phase})
     db.commit()
 
 
@@ -299,6 +381,8 @@ def enter_draft_phase(db: Session, league: League) -> dict:
     from rules import PHASE_DRAFT
 
     league.keepers_locked = True
+    record_audit(db, league, action="draft.enter",
+                 summary="Entered draft phase (keepers locked)")
     set_phase(db, league, PHASE_DRAFT, manual=True)
     return {"phase": league.phase, "keepers_locked": True}
 
@@ -308,6 +392,8 @@ def close_discovery(db: Session, league: League) -> None:
     done so the Oct-1 auto-open won't re-open it."""
     league.discovery_open = False
     league.discovery_done = True
+    record_audit(db, league, action="discovery.close",
+                 summary="Closed the discovery draft window")
     db.commit()
 
 
@@ -337,6 +423,9 @@ def flag_ineligible(db: Session, league: League) -> int:
         ))
         added += 1
     if added:
+        record_audit(db, league, action="players.ineligible",
+                     summary=f"Flagged {added} player(s) ineligible (added after the draft)",
+                     details={"count": added})
         db.commit()
     return added
 
@@ -494,6 +583,11 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
     new_league.phase = PHASE_PRESEASON
     new_league.phase_manual = False
     new_league.phase_set_at = _dt.datetime.now(_dt.timezone.utc)
+    record_audit(db, new_league, action="season.rollover",
+                 summary=(f"Rolled over to {new_league.season_year}: carried "
+                          f"{carried} identities, seeded {seeded} keepers"),
+                 details={"new_season": new_league.season_year, "managers_carried": carried,
+                          "keepers_seeded": seeded, "pool_snapshot": snapped})
     db.commit()
     return {
         "new_season": new_league.season_year,
@@ -532,6 +626,10 @@ def advance_phase_if_due(db: Session, league: League, now=None) -> bool:
         changed = True
     if changed:
         league.phase_set_at = _dt.datetime.now(_dt.timezone.utc)
+        record_audit(db, league, action="phase.auto",
+                     summary=f"Auto-advanced phase to {league.phase}"
+                             + (" (discovery opened)" if open_disc else ""),
+                     details={"phase": league.phase, "discovery_open": bool(open_disc)})
         db.commit()
     return changed
 
@@ -616,6 +714,13 @@ def adjust_standing(
         total_delta=total_delta, points_for_delta=points_for_delta,
         gameweek=gameweek, note=note,
     ))
+    record_audit(db, league, action="standing.adjust",
+                 summary=(f"Adjusted {manager.display}: H2H {total_delta:+d}, "
+                          f"points {points_for_delta:+d}"
+                          + (f" — {note}" if note else "")),
+                 manager_ids=[manager.id],
+                 details={"total_delta": total_delta, "points_for_delta": points_for_delta,
+                          "gameweek": gameweek, "note": note})
     db.commit()
     return {"manager": manager.display, "total_delta": total_delta, "points_for_delta": points_for_delta}
 
@@ -646,6 +751,9 @@ def reset_manager_password(db: Session, league: League, fpl_manager_id: str) -> 
     """Clear a manager's UI password so they set a new one on next login."""
     manager = _resolve_manager(db, league, fpl_manager_id)
     manager.password_hash = None
+    record_audit(db, league, action="manager.password_reset",
+                 summary=f"Reset {manager.display}'s password",
+                 manager_ids=[manager.id])
     db.commit()
 
 
@@ -660,6 +768,14 @@ def delete_standing_adjustment(db: Session, league: League, adjustment_id: str) 
     )
     if not row:
         raise RuleViolation("adjustment not found")
+    mgr = db.get(Manager, row.manager_id)
+    record_audit(db, league, action="standing.adjust.delete",
+                 summary=(f"Removed standings adjustment for "
+                          f"{mgr.display if mgr else '—'}: H2H {row.total_delta:+d}, "
+                          f"points {row.points_for_delta:+d}"),
+                 manager_ids=[row.manager_id],
+                 details={"total_delta": row.total_delta,
+                          "points_for_delta": row.points_for_delta, "note": row.note})
     db.delete(row)
     db.commit()
 
@@ -999,6 +1115,9 @@ def clear_flag(db: Session, league: League, fpl_manager_id: str, window: str) ->
     )
     if not exists:
         db.add(TankingFlagClear(league_id=league.id, manager_id=manager.id, window=window))
+        record_audit(db, league, action="tanking.clear",
+                     summary=f"Dismissed anti-tanking flag for {manager.display} ({window})",
+                     manager_ids=[manager.id], details={"window": window})
         db.commit()
 
 
@@ -1010,6 +1129,9 @@ def restore_flag(db: Session, league: League, fpl_manager_id: str, window: str) 
     db.query(TankingFlagClear).filter_by(
         league_id=league.id, manager_id=manager.id, window=window
     ).delete()
+    record_audit(db, league, action="tanking.restore",
+                 summary=f"Restored anti-tanking flag for {manager.display} ({window})",
+                 manager_ids=[manager.id], details={"window": window})
     db.commit()
 
 
@@ -1025,6 +1147,11 @@ def add_fine(
         raise RuleViolation("enter a non-zero fine amount")
     db.add(Fine(league_id=league.id, manager_id=manager.id, amount=amount,
                 reason=reason, gameweek=gameweek))
+    record_audit(db, league, action="fine.add",
+                 summary=(f"Fined {manager.display} ${amount}"
+                          + (f" — {reason}" if reason else "")),
+                 manager_ids=[manager.id],
+                 details={"amount": amount, "reason": reason, "gameweek": gameweek})
     db.commit()
     return {"manager": manager.display, "amount": amount}
 
@@ -1035,6 +1162,12 @@ def delete_fine(db: Session, league: League, fine_id: str) -> None:
     row = db.query(Fine).filter_by(league_id=league.id, id=fine_id).one_or_none()
     if not row:
         raise RuleViolation("fine not found")
+    mgr = db.get(Manager, row.manager_id)
+    record_audit(db, league, action="fine.delete",
+                 summary=f"Removed ${row.amount} fine on {mgr.display if mgr else '—'}"
+                         + (f" — {row.reason}" if row.reason else ""),
+                 manager_ids=[row.manager_id],
+                 details={"amount": row.amount, "reason": row.reason})
     db.delete(row)
     db.commit()
 
@@ -1135,6 +1268,12 @@ def place_on_il(
         status="active",
     )
     db.add(entry)
+    record_audit(db, league, action="il.place",
+                 summary=(f"{manager.display} placed {injured.name} "
+                          f"({injured.position}) on IL → {replacement.name} (GW{start_gw})"),
+                 manager_ids=[manager.id],
+                 details={"injured_fpl_id": injured_fpl_id,
+                          "replacement_fpl_id": replacement_fpl_id, "start_gw": start_gw})
     db.commit()
     db.refresh(entry)
     return _il_to_dict(entry, injured, replacement)
@@ -1164,10 +1303,17 @@ def return_from_il(
 
     entry.end_gw = return_gw
     entry.status = "waived" if via == "waiver" else "returned"
-    db.commit()
-    db.refresh(entry)
     injured = db.get(Player, entry.player_id)
     replacement = db.get(Player, entry.replacement_id) if entry.replacement_id else None
+    mgr = db.get(Manager, entry.manager_id)
+    record_audit(db, league, action="il.return",
+                 summary=(f"{mgr.display if mgr else '—'} returned "
+                          f"{injured.name if injured else '—'} from IL "
+                          f"(GW{return_gw}, {entry.status})"),
+                 manager_ids=[entry.manager_id],
+                 details={"il_id": str(il_id), "return_gw": return_gw, "via": via})
+    db.commit()
+    db.refresh(entry)
     return _il_to_dict(entry, injured, replacement)
 
 
@@ -1201,6 +1347,13 @@ def place_on_intl(
         replacement_id=replacement.id, tournament=tournament or None, status="active",
     )
     db.add(entry)
+    record_audit(db, league, action="intl.place",
+                 summary=(f"{manager.display} placed {away.name} ({away.position}) on the "
+                          f"international list → {replacement.name} (GW{start_gw}"
+                          + (f", {tournament}" if tournament else "") + ")"),
+                 manager_ids=[manager.id],
+                 details={"away_fpl_id": away_fpl_id, "replacement_fpl_id": replacement_fpl_id,
+                          "start_gw": start_gw, "tournament": tournament})
     db.commit()
     db.refresh(entry)
     return {"player": away.name, "replacement": replacement.name, "start_gw": start_gw}
@@ -1218,6 +1371,14 @@ def return_from_intl(db: Session, league: League, intl_id: str, return_gw: int) 
         raise RuleViolation(f"international-list entry is already '{entry.status}'")
     entry.end_gw = return_gw
     entry.status = "returned"
+    away = db.get(Player, entry.player_id)
+    mgr = db.get(Manager, entry.manager_id)
+    record_audit(db, league, action="intl.return",
+                 summary=(f"{mgr.display if mgr else '—'} returned "
+                          f"{away.name if away else '—'} from the international list "
+                          f"(GW{return_gw})"),
+                 manager_ids=[entry.manager_id],
+                 details={"intl_id": str(intl_id), "return_gw": return_gw})
     db.commit()
     return {"returned_gw": return_gw}
 
@@ -1330,6 +1491,16 @@ def reconcile_absences(db: Session, league: League) -> int:
                 e.end_gw = gw.number
                 e.status = "returned"
                 closed += 1
+                kind = "il" if model is InjuryList else "intl"
+                mgr = db.get(Manager, e.manager_id)
+                player = db.get(Player, e.player_id)
+                record_audit(
+                    db, league, action=f"{kind}.auto_return",
+                    summary=(f"Auto-returned {player.name if player else '—'} from "
+                             f"{'IL' if kind == 'il' else 'the international list'} for "
+                             f"{mgr.display if mgr else '—'} (re-added in FPL, GW{gw.number})"),
+                    manager_ids=[e.manager_id],
+                    details={"return_gw": gw.number})
     if closed:
         db.commit()
     return closed
@@ -1524,6 +1695,10 @@ def generate_cups(db: Session, league: League, through_gw: int = CUP_SEED_THROUG
     add(cup, 1, seeds[3], seeds[4])
     add(pup, 1, seeds[6], seeds[9])
     add(pup, 1, seeds[7], seeds[8])
+    record_audit(db, league, action="cup.generate",
+                 summary=f"Generated Cup + Pup Cup brackets (seeded through GW{through_gw})",
+                 manager_ids=[s.id for s in seeds],
+                 details={"through_gw": through_gw})
     db.commit()
     return get_cups(db, league)
 
@@ -1577,6 +1752,11 @@ def score_cup_round(db: Session, league: League, round_no: int, gw1: int, gw2: i
         # Pup Cup: final only (only the winner is paid).
         db.add(TournamentMatch(tournament_id=pup.id, round=3, manager_a=pup_r[0].winner_id, manager_b=pup_r[1].winner_id))
 
+    scored = cup_r + pup_r
+    record_audit(db, league, action="cup.score",
+                 summary=f"Scored cup round {round_no} (GW{gw1}+{gw2}): {len(scored)} match(es)",
+                 manager_ids=[mid for m in scored for mid in (m.manager_a, m.manager_b) if mid],
+                 details={"round": round_no, "gw1": gw1, "gw2": gw2})
     db.commit()
     return get_cups(db, league)
 
@@ -1617,6 +1797,12 @@ def override_cup_match(db: Session, league: League, match_id: str, score_a: int,
     m.score_a, m.score_b = score_a, score_b
     side = match_winner(score_a, score_b, seed_map.get(m.manager_a, 99), seed_map.get(m.manager_b, 99))
     m.winner_id = m.manager_a if side == "a" else m.manager_b
+    win = db.get(Manager, m.winner_id)
+    record_audit(db, league, action="cup.override",
+                 summary=(f"Overrode cup match score to {score_a}–{score_b}"
+                          f" (winner: {win.display if win else '—'})"),
+                 manager_ids=[mid for mid in (m.manager_a, m.manager_b) if mid],
+                 details={"match_id": str(match_id), "score_a": score_a, "score_b": score_b})
     db.commit()
     return {"match": match_id, "score_a": score_a, "score_b": score_b}
 
@@ -1679,6 +1865,9 @@ def set_shield(db: Session, league: League, *, cup_winner_fpl: str, pup_winner_f
     db.add(shield)
     db.flush()
     db.add(TournamentMatch(tournament_id=shield.id, round=1, manager_a=a.id, manager_b=b.id))
+    record_audit(db, league, action="shield.set",
+                 summary=f"Set Pupmunity Shield: {a.display} (Cup) vs {b.display} (Pup)",
+                 manager_ids=[a.id, b.id])
     db.commit()
     return {"cup_winner": a.display, "pup_winner": b.display}
 
@@ -1700,8 +1889,14 @@ def score_shield(db: Session, league: League, gw: int = 1) -> dict:
         _two_gw_tiebreak(db, league, m.manager_b, [gw]),
     )
     m.winner_id = m.manager_a if side == "a" else m.manager_b
+    win = db.get(Manager, m.winner_id)
+    record_audit(db, league, action="shield.score",
+                 summary=(f"Scored Pupmunity Shield (GW{gw}): {m.score_a}–{m.score_b}, "
+                          f"winner {win.display if win else '—'}"),
+                 manager_ids=[mid for mid in (m.manager_a, m.manager_b) if mid],
+                 details={"gw": gw, "score_a": m.score_a, "score_b": m.score_b})
     db.commit()
-    return {"winner": db.get(Manager, m.winner_id).display}
+    return {"winner": win.display}
 
 
 def get_shield(db: Session, league: League) -> dict | None:
@@ -1755,6 +1950,10 @@ def add_side_payout(
         raise RuleViolation("enter a label")
     db.add(SidePayout(league_id=league.id, manager_id=manager.id, label=label.strip(),
                       amount=amount, gameweek=gameweek))
+    record_audit(db, league, action="side_payout.add",
+                 summary=f"Side payout for {manager.display}: ${amount} — {label.strip()}",
+                 manager_ids=[manager.id],
+                 details={"amount": amount, "label": label.strip(), "gameweek": gameweek})
     db.commit()
     return {"manager": manager.display, "amount": amount}
 
@@ -1765,6 +1964,12 @@ def delete_side_payout(db: Session, league: League, side_id: str) -> None:
     row = db.query(SidePayout).filter_by(league_id=league.id, id=side_id).one_or_none()
     if not row:
         raise RuleViolation("side payout not found")
+    mgr = db.get(Manager, row.manager_id)
+    record_audit(db, league, action="side_payout.delete",
+                 summary=(f"Removed side payout for {mgr.display if mgr else '—'}: "
+                          f"${row.amount} — {row.label}"),
+                 manager_ids=[row.manager_id],
+                 details={"amount": row.amount, "label": row.label})
     db.delete(row)
     db.commit()
 
@@ -2027,6 +2232,11 @@ def set_keeper_seed(
             season_year=league.season_year,
         )
         db.add(seed)
+    record_audit(db, league, action="keeper.seed",
+                 summary=(f"Set keeper seed for {manager.display}: {player.name} = "
+                          f"{years_remaining} yr(s) remaining"),
+                 manager_ids=[manager.id],
+                 details={"player_fpl_id": player_fpl_id, "years_remaining": years_remaining})
     db.commit()
     return {"manager": manager.display, "player": player.name, "years_remaining": years_remaining}
 
@@ -2199,6 +2409,12 @@ def submit_keepers(
                 is_discovery=s["is_discovery"],
             )
         )
+    record_audit(db, league, action="keeper.submit",
+                 summary=(f"{manager.display} submitted {len(selections)} keeper(s) for "
+                          f"{season_year}: " + ", ".join(s["player"] for s in selections)),
+                 manager_ids=[manager.id],
+                 details={"season_year": season_year,
+                          "keeper_fpl_ids": all_fids, "discovery_fpl_id": discovery_fpl_id})
     db.commit()
     return {
         "manager": manager.display,
@@ -2257,6 +2473,10 @@ def set_draft_order(db: Session, league: League, fpl_manager_ids: list[str]) -> 
     db.query(DraftLottery).filter_by(league_id=league.id).delete()
     for i, m in enumerate(managers, start=1):
         db.add(DraftLottery(league_id=league.id, manager_id=m.id, pick_result=i))
+    record_audit(db, league, action="draft.order",
+                 summary="Set round-1 draft order: "
+                         + ", ".join(f"{i}. {m.display}" for i, m in enumerate(managers, start=1)),
+                 manager_ids=[m.id for m in managers])
     db.commit()
     return [{"pick": i, "manager": m.display} for i, m in enumerate(managers, start=1)]
 
@@ -2298,6 +2518,10 @@ def trade_pick(
             pick_season_year=season_year, pick_draft_type=draft_type, draft_pick=label,
         )
     )
+    record_audit(db, league, action="trade.pick",
+                 summary=f"Pick trade: {frm.display} → {to.display} ({label})",
+                 manager_ids=[frm.id, to.id, orig.id],
+                 details={"round": round, "season_year": season_year, "draft_type": draft_type})
     db.commit()
     return {"from": frm.display, "to": to.display, "pick": label}
 
@@ -2311,6 +2535,10 @@ def trade_player(
     to = _resolve_manager(db, league, to_fpl)
     player = _resolve_player(db, player_fpl_id)
     db.add(Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id, player_id=player.id))
+    record_audit(db, league, action="trade.player",
+                 summary=f"Player trade: {player.name} from {frm.display} → {to.display}",
+                 manager_ids=[frm.id, to.id],
+                 details={"player_fpl_id": player_fpl_id})
     db.commit()
     return {"from": frm.display, "to": to.display, "player": player.name}
 
@@ -2340,6 +2568,14 @@ def record_pick(
             pick_number=pick_number, round=round, manager_id=owner.id,
             player_id=player.id, source="draft",
         ))
+    record_audit(db, league, action="draft.pick",
+                 summary=(f"{owner.display} drafted {player.name} "
+                          f"({draft_type} #{pick_number})"
+                          + (" [overwrite]" if overwrite else "")),
+                 manager_ids=[owner.id],
+                 details={"season_year": season_year, "pick_number": pick_number,
+                          "draft_type": draft_type, "player_fpl_id": player_fpl_id,
+                          "overwrite": overwrite})
     db.commit()
     return {"pick": pick_number, "owner": owner.name, "player": player.name}
 
@@ -2730,6 +2966,12 @@ def record_discovery_pick(
             pick_number=pick_number, round=round, manager_id=owner.id,
             player_id=None, player_label=name, source="discovery",
         ))
+    record_audit(db, league, action="discovery.pick",
+                 summary=(f"{owner.display} made discovery pick #{pick_number}: {name}"
+                          + (" [overwrite]" if overwrite else "")),
+                 manager_ids=[owner.id],
+                 details={"season_year": season_year, "pick_number": pick_number,
+                          "player_name": name, "overwrite": overwrite})
     db.commit()
     return {"pick": pick_number, "owner": owner.display, "player": name}
 

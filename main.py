@@ -17,6 +17,7 @@ from starlette.middleware.sessions import SessionMiddleware
 import services
 from admin import router as admin_router
 from api import router as v1_router
+from audit import reset_actor, set_actor
 from auth import is_admin, is_logged_in, require_admin
 from db import get_db
 from settings import LEAGUE_ID
@@ -93,10 +94,38 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return resp
 
 
+class ActorMiddleware(BaseHTTPMiddleware):
+    """Capture who is acting (for the audit log) from the session/token and stash
+    it in a ContextVar before the route runs. Set before `call_next` so the value
+    is copied into the downstream task (incl. sync endpoints run in the threadpool);
+    reset afterwards. Runs inner of SessionMiddleware so the session is populated."""
+
+    async def dispatch(self, request: Request, call_next):
+        token = request.headers.get("X-Auth-Token")
+        if token and token == os.getenv("SYNC_AUTH_TOKEN"):
+            actor, kind = "system (sync)", "system"
+        else:
+            session = request.session
+            name = session.get("manager_name")
+            if session.get("admin"):
+                actor, kind = (name or "admin", "admin")
+            elif session.get("manager_id"):
+                actor, kind = (name or "manager", "manager")
+            else:
+                actor, kind = "system", "system"
+        reset_token = set_actor(actor, kind)
+        try:
+            return await call_next(request)
+        finally:
+            reset_actor(reset_token)
+
+
 app = FastAPI()
 # Add order is reverse of execution order. We want, outer→inner:
 #   SessionMiddleware (populates request.session) → SecurityHeaders (wraps every
-#   response, including the gate's redirects) → GateMiddleware → app.
+#   response, including the gate's redirects) → GateMiddleware → ActorMiddleware
+#   (reads the now-populated session) → app.
+app.add_middleware(ActorMiddleware)
 app.add_middleware(GateMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(

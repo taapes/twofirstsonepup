@@ -885,3 +885,29 @@ class SyncLog(Base):
         DateTime(timezone=True), nullable=True
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AuditLog(Base):
+    """Append-only trail of every action that changes a team's state — trades,
+    keepers, drafts, IL/international list, tanking-flag clears, standings/fines/
+    side-pots, cups, phase/season transitions, password resets. League-custom
+    truth (commissioner oversight), never mutated after insert. The acting
+    identity (`actor`/`actor_kind`) is captured from the request via a ContextVar
+    set by middleware; `manager_ids` lists the affected teams for per-team
+    filtering; `details` keeps the raw params."""
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    actor: Mapped[str] = mapped_column(String, nullable=False)  # "Tucker", "admin", "system (sync)"
+    actor_kind: Mapped[str] = mapped_column(String, nullable=False)  # manager|admin|system
+    action: Mapped[str] = mapped_column(String, nullable=False, index=True)  # e.g. "il.place"
+    summary: Mapped[str] = mapped_column(Text, nullable=False)  # human-readable one-liner
+    manager_ids: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # affected manager UUIDs
+    details: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # raw params

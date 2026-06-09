@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Audit Log{% endblock %}
+{% block content %}
+<h1>Audit Log <span class="tag">commissioner</span></h1>
+<p class="sub">Every action that changes a team's state — trades, keepers, drafts, IL /
+  international list, tanking flags, standings, fines, side pots, cups, phase & season
+  changes. Newest first; click a header to sort. <span id="acount"></span></p>
+
+{% set actions = entries | map(attribute='action') | unique | sort | list %}
+<div class="card" style="padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:end">
+  <label>Search<br><input id="f-q" type="search" placeholder="actor / action / summary / team" style="width:220px"></label>
+  <label>Action<br><select id="f-action"><option value="">All</option>
+    {% for a in actions %}<option>{{ a }}</option>{% endfor %}</select></label>
+  <label>Actor<br><select id="f-kind"><option value="">All</option>
+    <option value="manager">manager</option><option value="admin">admin</option>
+    <option value="system">system</option></select></label>
+</div>
+
+<div class="card" style="overflow-x:auto;margin-top:10px">
+  <table class="audit" id="atable">
+    <thead><tr>
+      <th data-sort="t" style="cursor:pointer">When <span class="sub">↕</span></th>
+      <th data-sort="t" style="cursor:pointer">Actor <span class="sub">↕</span></th>
+      <th data-sort="t" style="cursor:pointer">Action <span class="sub">↕</span></th>
+      <th>What</th>
+      <th>Teams</th>
+    </tr></thead>
+    <tbody>
+      {% for e in entries %}
+      <tr data-action="{{ e.action }}" data-kind="{{ e.actor_kind }}"
+          data-search="{{ (e.actor ~ ' ' ~ e.action ~ ' ' ~ e.summary ~ ' ' ~ (e.teams | join(' ')))|lower }}">
+        <td class="sub" style="white-space:nowrap">{{ (e.when or "")[:16] | replace("T", " ") }}</td>
+        <td style="white-space:nowrap">{{ e.actor }}
+          <span class="pill {{ 'warn' if e.actor_kind == 'admin' else ('ok' if e.actor_kind == 'manager' else '') }}">{{ e.actor_kind }}</span></td>
+        <td class="sub" style="white-space:nowrap"><code>{{ e.action }}</code></td>
+        <td>{{ e.summary }}</td>
+        <td class="sub">{{ e.teams | join(", ") if e.teams else "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if not entries %}<div class="empty">No audit entries yet.</div>{% endif %}
+</div>
+
+<script>
+  (function(){
+    var table = document.getElementById('atable');
+    var tbody = table.tBodies[0];
+    var rows = Array.prototype.slice.call(tbody.rows);
+    function val(id){ return document.getElementById(id).value; }
+    function applyFilters(){
+      var q = val('f-q').toLowerCase().trim(), action = val('f-action'), kind = val('f-kind');
+      var shown = 0;
+      rows.forEach(function(r){
+        var ok = true;
+        if (q && r.dataset.search.indexOf(q) < 0) ok = false;
+        if (action && r.dataset.action !== action) ok = false;
+        if (kind && r.dataset.kind !== kind) ok = false;
+        r.style.display = ok ? '' : 'none';
+        if (ok) shown++;
+      });
+      document.getElementById('acount').textContent = shown + ' shown';
+    }
+    ['f-q','f-action','f-kind'].forEach(function(id){
+      document.getElementById(id).addEventListener('input', applyFilters);
+    });
+    var dir = {};
+    Array.prototype.forEach.call(table.tHead.rows[0].cells, function(th, i){
+      if (!th.dataset.sort) return;
+      th.addEventListener('click', function(){
+        dir[i] = !dir[i];
+        var vis = rows.filter(function(r){ return r.style.display !== 'none'; });
+        vis.sort(function(a, b){
+          var x = a.cells[i].textContent.trim(), y = b.cells[i].textContent.trim();
+          return dir[i] ? x.localeCompare(y) : y.localeCompare(x);
+        });
+        vis.forEach(function(r){ tbody.appendChild(r); });
+      });
+    });
+    applyFilters();
+  })();
+</script>
+{% endblock %}
