@@ -42,6 +42,7 @@ from rules import (
     KEEPER_FRESH_REMAINING,
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
+    PHASE_DRAFT,
     PHASE_IN_SEASON,
     PHASE_OFFSEASON,
     PHASE_PRESEASON,
@@ -837,6 +838,58 @@ def _player_stat_dict(p: Player) -> dict:
 _POSITION_ORDER = {"GKP": 0, "DEF": 1, "MID": 2, "FWD": 3}
 
 
+def _draft_squad(db: Session, league: League, manager: Manager) -> dict:
+    """Draft-phase 'My Team': the squad being built for the upcoming season from
+    keepers + confirmed main-draft picks, with the remaining slots blank up to the
+    15-man roster. No synced rosters exist yet, so we assemble from custom tables.
+    Simplified (name/position/team + source tag), grouped by position on read."""
+    season_year = (league.season_year or 0) + 1
+
+    keeper_players = (
+        db.query(Player)
+        .join(KeeperSelection, KeeperSelection.player_id == Player.id)
+        .filter(
+            KeeperSelection.league_id == league.id,
+            KeeperSelection.manager_id == manager.id,
+            KeeperSelection.season_year == season_year,
+        )
+        .all()
+    )
+    pick_players = (
+        db.query(Player)
+        .join(DraftPick, DraftPick.player_id == Player.id)
+        .filter(
+            DraftPick.league_id == league.id,
+            DraftPick.season_year == season_year,
+            DraftPick.draft_type == "main",
+            DraftPick.manager_id == manager.id,
+        )
+        .all()
+    )
+
+    filled = []
+    for p in keeper_players:
+        filled.append({"name": p.name, "position": p.position,
+                       "team": p.current_team, "source": "keeper", "is_keeper": True})
+    for p in pick_players:
+        filled.append({"name": p.name, "position": p.position,
+                       "team": p.current_team, "source": "drafted", "is_keeper": False})
+    filled.sort(key=lambda d: (_POSITION_ORDER.get(d["position"], 9), d["name"]))
+
+    open_slots = max(0, ROSTER_SIZE - len(filled))
+    return {
+        "manager": manager.display,
+        "fpl": manager.fpl_manager_id,
+        "gameweek": None,
+        "players": filled,
+        "status": None,
+        "draft_mode": True,
+        "open_slots": open_slots,
+        "keeper_count": len(keeper_players),
+        "pick_count": len(pick_players),
+    }
+
+
 def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None:
     """A single manager's current squad with rich per-player stats + a recent
     points trend (from stored gameweek_points). None if the manager isn't found."""
@@ -847,6 +900,8 @@ def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None
     )
     if not manager:
         return None
+    if league.phase == PHASE_DRAFT:
+        return _draft_squad(db, league, manager)
     gw = latest_gameweek(db, league)
     players = _squad_players(db, manager.id, gw.id if gw else None)
 

@@ -5,6 +5,37 @@
 <h1>My Team</h1>
 <div class="empty">No squad to show yet. Once the season's rosters sync, your 15-man
   team and stats will appear here.</div>
+{% elif team.draft_mode %}
+<h1>{{ team.manager }} — My Team <span class="tag">draft</span></h1>
+<p class="sub">Your squad for next season is filling up as the draft runs.
+  {{ team.keeper_count }} keeper{{ "" if team.keeper_count == 1 else "s" }} ·
+  {{ team.pick_count }} drafted ·
+  {{ team.open_slots }} slot{{ "" if team.open_slots == 1 else "s" }} open.</p>
+<div class="card" style="overflow-x:auto">
+  <table class="stats">
+    <thead><tr>
+      <th>Player</th><th>Pos</th><th>Team</th><th>Status</th>
+    </tr></thead>
+    <tbody>
+      {% for p in team.players %}
+      <tr>
+        <td>{{ p.name }}</td>
+        <td class="sub">{{ p.position }}</td>
+        <td class="sub">{{ p.team }}</td>
+        <td>
+          {% if p.is_keeper %}<span class="tag">🔒 Keeper</span>
+          {% else %}<span class="tag">Drafted</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      {% for _ in range(team.open_slots) %}
+      <tr class="sub">
+        <td colspan="4"><em>Empty — to be drafted</em></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
 {% else %}
 <h1>{{ team.manager }} — My Team
   {% if team.gameweek %}<span class="tag">as of GW{{ team.gameweek }}</span>{% endif %}</h1>

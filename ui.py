@@ -18,7 +18,7 @@ from auth import (
 )
 from db import get_db
 from models import InjuryList, Manager
-from rules import RuleViolation, SEASON_LAST_GW
+from rules import PHASE_DRAFT, RuleViolation, SEASON_LAST_GW
 from settings import LEAGUE_ID
 from templating import templates
 
@@ -536,6 +536,9 @@ def intl_return(
 @router.get("/my-team/upcoming", response_class=HTMLResponse)
 def my_team_upcoming_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
+    if league.phase == PHASE_DRAFT:
+        # No H2H schedule for the new season during the draft; send back to the squad.
+        return RedirectResponse("/my-team", status_code=303)
     fpl = _resolve_my_fpl(request, db, league)
     matchups = services.get_upcoming_matchups(db, league, fpl) if fpl else []
     me = services.get_my_team(db, league, fpl) if fpl else None

@@ -49,7 +49,7 @@ def phase_features(
     if macro == PHASE_DRAFT:
         return {
             "trades_allowed": True, "keepers_editable": False, "draft_available": True,
-            "discovery_available": False, "my_team_available": False,
+            "discovery_available": False, "my_team_available": True,
             "cups_available": False, "prior_locked": True, "gw_logic_active": False,
         }
     if macro == PHASE_PRESEASON:

@@ -22,7 +22,7 @@ def test_draft():
     f = phase_features(PHASE_DRAFT)
     assert f["draft_available"] and f["trades_allowed"]
     assert not f["keepers_editable"]            # keepers lock when drafting
-    assert not f["my_team_available"]
+    assert f["my_team_available"]               # squad view shows keepers + live picks
 
 
 def test_preseason():
