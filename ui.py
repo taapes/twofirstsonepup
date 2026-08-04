@@ -402,6 +402,137 @@ def my_team_page(request: Request, db: Session = Depends(get_db)):
     })
 
 
+# ---- v2: app-owned weekly lineup (set your XI + bench) ----
+@router.get("/my-team/lineup", response_class=HTMLResponse)
+def my_team_lineup_page(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    fpl = _resolve_my_fpl(request, db, league)
+    if not fpl:
+        return RedirectResponse("/who", status_code=303)
+    gw_q = request.query_params.get("gw")
+    gw = _safe_int(gw_q, 1, SEASON_LAST_GW, field="gameweek") if gw_q else None
+    editor = services.get_lineup_editor(db, league, fpl, gw)
+    return templates.TemplateResponse("lineup.html", {
+        "request": request, "league": league, "is_admin": is_admin(request),
+        "editor": editor,
+        "can_edit": bool(editor) and (is_admin(request) or fpl == current_manager_id(request)),
+        "error": request.query_params.get("err"),
+    })
+
+
+@router.post("/my-team/lineup")
+async def my_team_lineup_set(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    form = await request.form()
+    fpl = form.get("fpl_manager_id")
+    gw = _safe_int(form.get("gw"), 1, SEASON_LAST_GW, field="gameweek")
+    if not can_act_as(request, fpl):
+        return _forbidden(request, "You can only set your own lineup.")
+    starters, bench_pairs = [], []
+    for key, val in form.items():
+        if not key.startswith("slot_") or not val:
+            continue
+        pid = _safe_int(key[len("slot_"):], 1, 10_000_000, field="player")
+        if val == "start":
+            starters.append(pid)
+        elif val[0] == "b":
+            bench_pairs.append((_safe_int(val[1:], 1, 4, field="bench order"), pid))
+    bench = [pid for _order, pid in sorted(bench_pairs)]
+    try:
+        services.set_lineup(db, league, fpl, gw, starters, bench,
+                            allow_locked=is_admin(request))
+    except RuleViolation as e:
+        return _err(e)
+    suffix = f"&fpl={fpl}" if is_admin(request) else ""
+    return RedirectResponse(f"/my-team/lineup?gw={gw}{suffix}", status_code=303)
+
+
+# ---- v2 waivers (manager: view order + submit claim) ----
+@router.get("/waivers", response_class=HTMLResponse)
+def waivers_page(request: Request, db: Session = Depends(get_db)):
+    league = _league_or_404(db)
+    fpl = _resolve_my_fpl(request, db, league)
+    if not fpl:
+        return RedirectResponse("/who", status_code=303)
+    return templates.TemplateResponse("waivers.html", {
+        "request": request, "league": league, "is_admin": is_admin(request),
+        "view": services.get_waivers_view(db, league, fpl),
+        "can_edit": bool(fpl) and (is_admin(request) or fpl == current_manager_id(request)),
+    })
+
+
+@router.post("/waivers/claim")
+def waivers_claim(
+    request: Request, db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...), add_fpl_id: str = Form(...),
+    drop_fpl_id: str = Form(""), gw: str = Form(...),
+):
+    league = _league_or_404(db)
+    if not can_act_as(request, fpl_manager_id):
+        return _forbidden(request, "You can only submit your own waiver claims.")
+    drop = _safe_int(drop_fpl_id, 1, 10_000_000, field="drop player") if drop_fpl_id else None
+    try:
+        services.submit_waiver_claim(
+            db, league, fpl_manager_id,
+            add_fpl=_safe_int(add_fpl_id, 1, 10_000_000, field="add player"),
+            drop_fpl=drop, gw_number=_safe_int(gw, 1, SEASON_LAST_GW, field="gameweek"),
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/waivers", status_code=303)
+
+
+@router.get("/admin/v2/waivers", response_class=HTMLResponse)
+def admin_v2_waivers(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/v2/waivers", status_code=303)
+    league = _league_or_404(db)
+    gw_q = request.query_params.get("gw")
+    gw = _safe_int(gw_q, 1, SEASON_LAST_GW, field="gameweek") if gw_q else (
+        services.current_gameweek(db, league) or 1)
+    return templates.TemplateResponse("admin_v2_waivers.html", {
+        "request": request, "league": league, "is_admin": True, "gw": gw,
+        "claims": services.pending_waiver_claims(db, league, gw),
+    })
+
+
+@router.post("/admin/v2/process-waivers")
+def admin_v2_process_waivers(request: Request, db: Session = Depends(get_db),
+                             gw: str = Form(...)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/v2/waivers", status_code=303)
+    league = _league_or_404(db)
+    services.process_waivers(db, league, _safe_int(gw, 1, SEASON_LAST_GW, field="gameweek"))
+    return RedirectResponse(f"/admin/v2/waivers?gw={gw}", status_code=303)
+
+
+@router.get("/admin/v2/schedule", response_class=HTMLResponse)
+def admin_v2_schedule(request: Request, db: Session = Depends(get_db)):
+    """v2 app-owned schedule + standings: a generated round-robin scored by the
+    engine, computed with no FPL standings involved."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/v2/schedule", status_code=303)
+    league = _league_or_404(db)
+    gw_q = request.query_params.get("gw")
+    gw = _safe_int(gw_q, 1, SEASON_LAST_GW, field="gameweek") if gw_q else 1
+    return templates.TemplateResponse("admin_v2_schedule.html", {
+        "request": request, "league": league, "is_admin": True, "gw": gw,
+        "standings": services.get_v2_standings(db, league),
+        "fixtures": services.get_v2_schedule(db, league, gw),
+    })
+
+
+@router.post("/admin/v2/generate-schedule")
+def admin_v2_generate_schedule(request: Request, db: Session = Depends(get_db)):
+    """Generate the H2H schedule and compute engine scores so standings populate."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/v2/schedule", status_code=303)
+    league = _league_or_404(db)
+    services.generate_v2_schedule(db, league)
+    services.compute_v2_scores(db, league)
+    return RedirectResponse("/admin/v2/schedule", status_code=303)
+
+
 # ---- injury list (manager self-service: place / return / release) ----
 def _il_entry_or_403(db, league, fpl_manager_id: str, il_id: str):
     """Resolve an IL entry and confirm it belongs to fpl_manager_id (admin bypass)."""
@@ -579,6 +710,58 @@ def admin_health(request: Request, db: Session = Depends(get_db)):
             for m in managers
         ],
     })
+
+
+@router.get("/admin/v2/validate", response_class=HTMLResponse)
+def admin_v2_validate(request: Request, db: Session = Depends(get_db)):
+    """v2 dual-run report: the in-app scoring engine vs FPL's synced totals/winners.
+    Read-only; the live app is unaffected. See scoring.py + the v2 roadmap."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/v2/validate", status_code=303)
+    league = _league_or_404(db)
+    return templates.TemplateResponse("admin_v2_validate.html", {
+        "request": request, "league": league, "is_admin": True,
+        "diff": services.v2_score_diff(db, league),
+    })
+
+
+@router.post("/admin/v2/compute")
+def admin_v2_compute(request: Request, db: Session = Depends(get_db)):
+    """Backfill/persist engine scores into v2_gameweek_scores for all synced GWs."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/v2/validate", status_code=303)
+    league = _league_or_404(db)
+    services.compute_v2_scores(db, league)
+    return RedirectResponse("/admin/v2/validate", status_code=303)
+
+
+@router.get("/admin/v2/ledger", response_class=HTMLResponse)
+def admin_v2_ledger(request: Request, db: Session = Depends(get_db)):
+    """v2 app-owned squad ledger: current squad sizes + fold-vs-FPL validation."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/v2/ledger", status_code=303)
+    league = _league_or_404(db)
+    managers = (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
+    )
+    squads = [
+        {"name": m.display, "size": len(services.get_v2_squad(db, league, m.fpl_manager_id))}
+        for m in managers
+    ]
+    return templates.TemplateResponse("admin_v2_ledger.html", {
+        "request": request, "league": league, "is_admin": True,
+        "diff": services.v2_ledger_diff(db, league), "squads": squads,
+    })
+
+
+@router.post("/admin/v2/seed-ledger")
+def admin_v2_seed_ledger(request: Request, db: Session = Depends(get_db)):
+    """(Re)build the ledger from FPL roster history so the fold has a starting point."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/v2/ledger", status_code=303)
+    league = _league_or_404(db)
+    services.seed_v2_ledger(db, league)
+    return RedirectResponse("/admin/v2/ledger", status_code=303)
 
 
 @router.post("/admin/phase/draft")

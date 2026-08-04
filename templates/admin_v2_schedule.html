@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}v2 Schedule & Standings{% endblock %}
+{% block content %}
+<h1>v2 Schedule &amp; Standings <span class="tag">commissioner</span> <span class="tag">dual-run</span></h1>
+<p class="sub">A fully app-owned league table: the H2H schedule is a generated double
+  round-robin (<code>v2_matches</code>), each fixture scored by the v2 engine
+  (<code>v2_gameweek_scores</code>). No FPL standings or FPL matches are read — this
+  is what "running the league in the app" produces end to end.</p>
+
+<form method="post" action="/admin/v2/generate-schedule" style="margin:10px 0"
+      onsubmit="return confirm('Regenerate the schedule and recompute engine scores?')">
+  <button type="submit">Generate schedule &amp; compute</button>
+  <span class="sub">{{ standings.fixtures }} fixtures · {{ standings.scored_fixtures }} scored</span>
+</form>
+
+<h2>Standings (engine-scored)</h2>
+{% if standings.table and standings.scored_fixtures %}
+<div class="card" style="overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th>#</th><th>Manager</th><th class="num">P</th><th class="num">W</th>
+      <th class="num">D</th><th class="num">L</th><th class="num">PF</th>
+      <th class="num">PA</th><th class="num">Pts</th></tr></thead>
+    <tbody>
+      {% for r in standings.table %}
+      <tr><td>{{ loop.index }}</td><td>{{ r.manager }}</td>
+        <td class="num">{{ r.played }}</td><td class="num">{{ r.w }}</td>
+        <td class="num">{{ r.d }}</td><td class="num">{{ r.l }}</td>
+        <td class="num">{{ r.pf }}</td><td class="num">{{ r.pa }}</td>
+        <td class="num">{{ r.points }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="sub">No scored fixtures yet — generate the schedule and compute engine scores above.</p>
+{% endif %}
+
+<h2>GW{{ gw }} fixtures</h2>
+{% if fixtures %}
+<div class="card" style="overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th>Home</th><th class="num">Score</th><th class="num">Score</th><th>Away</th></tr></thead>
+    <tbody>
+      {% for f in fixtures %}
+      <tr><td>{{ f.home }}</td>
+        <td class="num">{{ f.home_score if f.home_score is not none else "—" }}</td>
+        <td class="num">{{ f.away_score if f.away_score is not none else "—" }}</td>
+        <td>{{ f.away }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}<p class="sub">No fixtures for GW{{ gw }}.</p>{% endif %}
+{% endblock %}

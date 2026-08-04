@@ -443,6 +443,158 @@ class GameweekPoints(Base):
     team_clean_sheets: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class V2GameweekScore(Base):
+    """v2 in-app scoring engine output (dual-run, isolated from the FPL-sourced
+    `gameweek_points`). One row per manager per GW: the engine's own total computed
+    from the submitted lineup + auto-subs (see `scoring.py`), used to validate the
+    engine against FPL's numbers before we trust it. Not read by the live app."""
+
+    __tablename__ = "v2_gameweek_scores"
+    __table_args__ = (
+        UniqueConstraint("manager_id", "gameweek_id", name="uq_v2score_manager_gameweek"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    gameweek_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("gameweeks.id"), index=True
+    )
+    total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Engine breakdown: resolved starting XI (post auto-sub) + per-player points.
+    breakdown: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    team_goals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    team_assists: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    team_clean_sheets: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class V2Lineup(Base):
+    """App-owned weekly lineup (v2): a manager's chosen starting XI + ordered bench
+    for one gameweek, selected from their 15-man squad. Replaces reading FPL's
+    finalized picks — the v2 scoring engine (scoring.py) scores this submission and
+    applies auto-subs. `starters`/`bench` are ordered lists of FPL player ids
+    (bench order = auto-sub priority)."""
+
+    __tablename__ = "v2_lineups"
+    __table_args__ = (
+        UniqueConstraint("manager_id", "gameweek_id", name="uq_v2lineup_manager_gameweek"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    gameweek_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("gameweeks.id"), index=True
+    )
+    starters: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    bench: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+
+
+class V2RosterMove(Base):
+    """App-owned squad ledger (v2): the append-only source of truth for who owns
+    whom. Each row is one add or drop of a player to/from a manager, effective at a
+    gameweek. A manager's current squad = fold the moves in order (add → owned,
+    drop → not owned). Replaces reading rosters from FPL: the draft seeds `add`s,
+    and waivers / free agency / trades append further moves. `source` records how the
+    move happened (initial/draft/waiver/free_agent/trade/sync)."""
+
+    __tablename__ = "v2_roster_moves"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), index=True
+    )
+    gw_number: Mapped[int] = mapped_column(Integer, index=True)
+    action: Mapped[str] = mapped_column(String)  # add | drop
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class V2WaiverState(Base):
+    """Rolling waiver priority (v2): one row per manager. Lower `priority` = first
+    pick. Initialised from reverse standings; a manager who wins a claim drops to the
+    back. The order the app processes waiver claims in."""
+
+    __tablename__ = "v2_waiver_state"
+    __table_args__ = (
+        UniqueConstraint("league_id", "manager_id", name="uq_v2waiver_league_manager"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    priority: Mapped[int] = mapped_column(Integer)
+
+
+class V2WaiverClaim(Base):
+    """A blind waiver claim (v2): add `add_player`, dropping `drop_player`, effective
+    at `gw_number`. Submitted during the waiver window; processed in priority order at
+    the deadline. `status` is pending → won/lost; `reason` explains a loss."""
+
+    __tablename__ = "v2_waiver_claims"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    gw_number: Mapped[int] = mapped_column(Integer, index=True)
+    add_player_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id")
+    )
+    drop_player_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending|won|lost
+    reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    processed_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class V2Match(Base):
+    """App-owned H2H fixture (v2): a generated round-robin matchup for a gameweek.
+    Replaces reading the schedule from FPL — results and standings are computed on
+    read from the fixture + the v2 engine's per-manager scores (v2_gameweek_scores)."""
+
+    __tablename__ = "v2_matches"
+    __table_args__ = (
+        UniqueConstraint("league_id", "gw_number", "home_manager_id", "away_manager_id",
+                         name="uq_v2match_gw_pair"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    gw_number: Mapped[int] = mapped_column(Integer, index=True)
+    home_manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id")
+    )
+    away_manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id")
+    )
+
+
 class Tournament(Base):
     __tablename__ = "tournaments"
 

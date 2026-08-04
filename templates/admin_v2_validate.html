@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}v2 Engine Validation{% endblock %}
+{% block content %}
+<h1>v2 Scoring Engine <span class="tag">commissioner</span> <span class="tag">dual-run</span></h1>
+<p class="sub">The in-app scoring engine (<code>scoring.py</code>) computed from each
+  manager's submitted lineup + auto-subs, diffed against FPL's synced totals and H2H
+  winners. Read-only — the live app is unaffected. A clean diff means the engine math
+  is trustworthy.</p>
+
+<form method="post" action="/admin/v2/compute" style="margin:10px 0">
+  <button type="submit">Recompute &amp; store</button>
+  <span class="sub">persists engine scores into <code>v2_gameweek_scores</code></span>
+</form>
+
+<div class="grid2" style="margin-bottom:14px">
+  <div class="card statusbox {{ 'ok' if diff.points_mismatch == 0 else 'warn' }}">
+    <strong>Points</strong>
+    {% if diff.points_mismatch == 0 %}
+      <span class="pill ok">MATCH</span>
+      <p class="sub">All {{ diff.points_checked }} manager-GW totals match FPL.</p>
+    {% else %}
+      <span class="pill warn">{{ diff.points_mismatch }} / {{ diff.points_checked }} differ</span>
+      <p class="sub">Engine total ≠ FPL <code>total_points</code> — each is an engine
+        bug or a genuine FPL edge case (e.g. bonus settling) to document.</p>
+    {% endif %}
+  </div>
+  <div class="card statusbox {{ 'ok' if diff.winners_mismatch == 0 else 'warn' }}">
+    <strong>H2H winners</strong>
+    {% if diff.winners_mismatch == 0 %}
+      <span class="pill ok">MATCH</span>
+      <p class="sub">All {{ diff.winners_checked }} finished matches agree with FPL.</p>
+    {% else %}
+      <span class="pill warn">{{ diff.winners_mismatch }} / {{ diff.winners_checked }} differ</span>
+    {% endif %}
+  </div>
+</div>
+
+{% if diff.point_rows %}
+<h2>Points mismatches</h2>
+<div class="card" style="overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th>GW</th><th>Manager</th><th class="num">Engine</th>
+      <th class="num">FPL</th><th class="num">Δ</th></tr></thead>
+    <tbody>
+      {% for r in diff.point_rows %}
+      <tr><td>{{ r.gw }}</td><td>{{ r.manager }}</td>
+        <td class="num">{{ r.engine }}</td>
+        <td class="num">{{ r.fpl if r.fpl is not none else "—" }}</td>
+        <td class="num">{{ r.delta if r.delta is not none else "—" }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if diff.winner_rows %}
+<h2>Winner mismatches</h2>
+<div class="card" style="overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th>GW</th><th>Home</th><th>Away</th>
+      <th>Engine winner</th><th>FPL winner</th></tr></thead>
+    <tbody>
+      {% for r in diff.winner_rows %}
+      <tr><td>{{ r.gw }}</td><td>{{ r.home }}</td><td>{{ r.away }}</td>
+        <td>{{ r.engine }}</td><td>{{ r.fpl }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

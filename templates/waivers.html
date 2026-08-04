@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Waivers{% endblock %}
+{% block content %}
+{% if not view %}
+<h1>Waivers</h1>
+<div class="empty">No manager found.</div>
+{% else %}
+<h1>{{ view.manager }} — Waivers <span class="tag">GW{{ view.gameweek }}</span> <span class="tag">v2</span></h1>
+<p class="sub">Window: <strong>{{ view.window.label }}</strong>.
+  Waiver claims are blind and resolved in priority order at the deadline; the worst
+  team picks first, and winning a claim drops you to the back of the order.
+  In the final 24h it's free agency (first-come).</p>
+
+<div class="grid2">
+  <div class="card">
+    <strong>Waiver priority</strong>
+    <table class="stats" style="margin-top:6px">
+      <thead><tr><th class="num">#</th><th>Manager</th></tr></thead>
+      <tbody>
+        {% for r in view.order %}
+        <tr {% if r.is_me %}style="font-weight:600"{% endif %}>
+          <td class="num">{{ r.priority + 1 }}</td>
+          <td>{{ r.name }}{% if r.is_me %} ←{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <strong>Submit a claim</strong>
+    {% if can_edit %}
+    <form method="post" action="/waivers/claim" onsubmit="return waResolve(this)" style="margin-top:8px">
+      <input type="hidden" name="fpl_manager_id" value="{{ view.fpl }}">
+      <input type="hidden" name="gw" value="{{ view.gameweek }}">
+      <label>Add (free agent)<br>
+        <input list="waFA" name="add_name" placeholder="search free agents" autocomplete="off" style="width:100%" required>
+        <input type="hidden" name="add_fpl_id"></label>
+      <label style="display:block;margin-top:6px">Drop<br>
+        <select name="drop_fpl_id" style="width:100%">
+          <option value="">— (only if squad has room)</option>
+          {% for p in view.my_squad %}<option value="{{ p.fpl_id }}">{{ p.name }} · {{ p.position }}</option>{% endfor %}
+        </select></label>
+      <button type="submit" style="margin-top:8px">Submit claim</button>
+    </form>
+    <datalist id="waFA">
+      {% for p in view.free_agents %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.label }}"></option>{% endfor %}
+    </datalist>
+    <script>
+      function waResolve(form){
+        var name=form.querySelector('[name=add_name]').value;
+        var opt=document.querySelector('#waFA option[value="'+name.replace(/"/g,'\\"')+'"]');
+        if(!opt){alert('Pick a free agent from the list.');return false;}
+        form.querySelector('[name=add_fpl_id]').value=opt.dataset.fpl;
+        return true;
+      }
+    </script>
+    {% else %}<p class="sub">You can only submit your own claims.</p>{% endif %}
+  </div>
+</div>
+
+<h2>Your claims</h2>
+{% if view.my_claims %}
+<div class="card" style="overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th>GW</th><th>Add</th><th>Drop</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for c in view.my_claims %}
+      <tr>
+        <td>{{ c.gw }}</td><td>{{ c.add }}</td><td>{{ c.drop or "—" }}</td>
+        <td>{% if c.status == 'won' %}<span class="pill ok">won</span>
+          {% elif c.status == 'lost' %}<span class="pill warn">lost</span>{% if c.reason %} <span class="sub">{{ c.reason }}</span>{% endif %}
+          {% else %}<span class="pill">pending</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}<p class="sub">No claims yet.</p>{% endif %}
+{% endif %}
+{% endblock %}

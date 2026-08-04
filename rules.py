@@ -283,6 +283,149 @@ def match_winner(score_a, score_b, seed_a: int, seed_b: int,
     return "a" if seed_a < seed_b else "b"
 
 
+# ---- v2 lineups ----
+
+def validate_lineup(starters: list, bench: list, pos_by_pid: dict, squad_pids) -> None:
+    """Validate an app-owned weekly lineup (v2). `starters`/`bench` are ordered lists
+    of the manager's player ids; `squad_pids` is the manager's 15 owned players;
+    `pos_by_pid` maps each to GKP/DEF/MID/FWD. Raises RuleViolation on an illegal
+    lineup: not 11 starters / 4 bench, duplicates, players not on the squad, not all
+    15 used, or an illegal formation (1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD). Pure."""
+    import scoring
+
+    lineup = list(starters) + list(bench)
+    if len(starters) != scoring.XI_SIZE:
+        raise RuleViolation(f"Start exactly {scoring.XI_SIZE} players.")
+    if len(bench) != scoring.SQUAD_SIZE - scoring.XI_SIZE:
+        raise RuleViolation(f"Bench exactly {scoring.SQUAD_SIZE - scoring.XI_SIZE} players.")
+    if len(set(lineup)) != len(lineup):
+        raise RuleViolation("A player can't appear twice in the lineup.")
+    squad = set(squad_pids)
+    if set(lineup) != squad:
+        raise RuleViolation("Your lineup must use exactly your 15 rostered players.")
+    if not scoring.legal_formation([pos_by_pid.get(p) for p in starters]):
+        raise RuleViolation(
+            "Illegal formation — need 1 GK, 3-5 DEF, 2-5 MID, 1-3 FWD in the XI."
+        )
+
+
+# ---- v2 squad ledger ----
+
+def fold_moves(moves) -> set:
+    """Fold an ordered iterable of `(player_id, action)` roster moves into the set of
+    currently-owned player ids. `add` puts a player in the squad; `drop` removes them.
+    The caller supplies the moves already ordered (by gameweek, then insert order).
+    Pure — the app-owned squad is the fold of its ledger."""
+    owned: set = set()
+    for player_id, action in moves:
+        if action == "add":
+            owned.add(player_id)
+        elif action == "drop":
+            owned.discard(player_id)
+    return owned
+
+
+def validate_roster_add(
+    squad_size: int, already_owned: bool, owned_by_other: bool,
+    max_size: int = None,
+) -> None:
+    """Guard an app-owned squad `add`. Raises RuleViolation if the manager already
+    owns the player, another manager owns them (exclusive ownership), or the squad is
+    already full (must drop first)."""
+    cap = ROSTER_SIZE if max_size is None else max_size
+    if already_owned:
+        raise RuleViolation("You already own that player.")
+    if owned_by_other:
+        raise RuleViolation("That player is on another manager's squad.")
+    if squad_size >= cap:
+        raise RuleViolation(f"Your squad is full ({cap}); drop a player first.")
+
+
+def validate_roster_drop(owned: bool) -> None:
+    """Guard an app-owned squad `drop`. Raises if the manager doesn't own the player."""
+    if not owned:
+        raise RuleViolation("You can't drop a player you don't own.")
+
+
+# ---- v2 waivers ----
+
+def initial_waiver_order(manager_ids_worst_to_best: list) -> dict:
+    """Seed waiver priority from reverse standings: the worst-ranked manager picks
+    first. `manager_ids_worst_to_best` is already in that order. Returns
+    `{manager_id: priority}` where 0 = highest priority. Pure."""
+    return {mid: i for i, mid in enumerate(manager_ids_worst_to_best)}
+
+
+def resolve_waivers(claims_in_priority_order: list, owned: set) -> dict:
+    """Decide blind waiver claims in priority order. Each claim is a dict with
+    `id`, `add` (player id), and `drop_owned` (does the claimant currently own the
+    player they're dropping?). `owned` is the set of players already on any squad
+    (unavailable). A claim WINS if its add player is still free (not owned and not
+    already won earlier this run) and the drop is valid; otherwise it LOSES with a
+    reason. Dropped players do NOT become available within the same run. Returns
+    `{claim_id: (status, reason)}`. Pure — the caller applies the ledger effects."""
+    taken: set = set()
+    results: dict = {}
+    for c in claims_in_priority_order:
+        if c["add"] in owned or c["add"] in taken:
+            results[c["id"]] = ("lost", "player already claimed")
+        elif not c.get("drop_owned", True):
+            results[c["id"]] = ("lost", "drop player not on your squad")
+        else:
+            results[c["id"]] = ("won", None)
+            taken.add(c["add"])
+    return results
+
+
+def advance_waiver_priority(order: dict, winners: list) -> dict:
+    """After a waiver run, managers who won a claim drop to the back of the order
+    (relative order preserved among winners and among non-winners). `order` is
+    `{manager_id: priority}`; `winners` the manager ids that won at least one claim.
+    Returns the new `{manager_id: priority}`. Pure."""
+    ranked = [mid for mid, _ in sorted(order.items(), key=lambda kv: kv[1])]
+    winset = set(winners)
+    kept = [mid for mid in ranked if mid not in winset]
+    moved = [mid for mid in ranked if mid in winset]
+    return {mid: i for i, mid in enumerate(kept + moved)}
+
+
+# ---- v2 H2H schedule ----
+
+def round_robin(ids: list) -> list:
+    """Single round-robin via the circle method: every manager plays every other
+    exactly once. Returns a list of rounds; each round is a list of `(home, away)`
+    pairs. With an odd number of managers one sits out each round (bye). Home/away
+    alternates for balance. Pure."""
+    ids = list(ids)
+    if len(ids) % 2 == 1:
+        ids = ids + [None]  # bye marker
+    n = len(ids)
+    half = n // 2
+    order = ids[:]
+    rounds = []
+    for r in range(n - 1):
+        pairs = []
+        for i in range(half):
+            a, b = order[i], order[n - 1 - i]
+            if a is None or b is None:
+                continue
+            pairs.append((a, b) if (r + i) % 2 == 0 else (b, a))
+        rounds.append(pairs)
+        order = [order[0]] + [order[-1]] + order[1:-1]  # rotate, first fixed
+    return rounds
+
+
+def season_schedule(ids: list, gameweeks: int) -> dict:
+    """Assign a H2H fixture set to each gameweek 1..`gameweeks`. Uses a double
+    round-robin (second leg swaps home/away) tiled across the season, so pairings
+    repeat once the cycle completes. Returns `{gw_number: [(home, away), ...]}`. Pure."""
+    base = round_robin(ids)
+    double = base + [[(b, a) for (a, b) in rnd] for rnd in base]
+    if not double:
+        return {}
+    return {gw: double[(gw - 1) % len(double)] for gw in range(1, gameweeks + 1)}
+
+
 # ---- Payouts ----
 # Percentages are of the base pot (entry_fee * num managers). Entry fee rises by
 # season (25/26 $125, 26/27 $150, 27/28 $175, 28/29 $200) — override per season.

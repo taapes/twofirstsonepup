@@ -8,6 +8,8 @@
 {% else %}
 <h1>{{ team.manager }} — My Team
   {% if team.gameweek %}<span class="tag">as of GW{{ team.gameweek }}</span>{% endif %}</h1>
+<p><a href="/my-team/lineup{% if team.fpl %}?fpl={{ team.fpl }}{% endif %}">⚙ Set weekly lineup (v2)</a>
+  &nbsp;·&nbsp; <a href="/waivers">↔ Waivers &amp; free agency (v2)</a></p>
 
 {% if team.status %}
 {% set t = team.status.tanking %}

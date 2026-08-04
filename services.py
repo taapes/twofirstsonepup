@@ -30,6 +30,12 @@ from models import (
     Tournament,
     TournamentMatch,
     Trade,
+    V2GameweekScore,
+    V2Lineup,
+    V2RosterMove,
+    V2WaiverClaim,
+    V2WaiverState,
+    V2Match,
 )
 from rules import (
     ANTI_TANKING_MIN_WEEKS,
@@ -58,6 +64,14 @@ from rules import (
     h2h_standings,
     il_can_return,
     il_same_position,
+    validate_lineup,
+    fold_moves,
+    validate_roster_add,
+    validate_roster_drop,
+    initial_waiver_order,
+    resolve_waivers,
+    advance_waiver_priority,
+    season_schedule,
     ROSTER_SIZE,
     generate_draft_slots,
     keeper_eligible,
@@ -274,6 +288,818 @@ def get_scoreboard(db: Session, league: League, gw_number: int | None = None) ->
         })
     matches.sort(key=lambda x: (x["home"] or ""))
     return {"gameweek": gw_number, "matches": matches}
+
+
+# ---- v2 app-owned weekly lineups (M2; see rules.validate_lineup + scoring.py) ----
+
+def _gw_by_number(db: Session, league: League, gw_number: int) -> Gameweek | None:
+    return db.query(Gameweek).filter_by(league_id=league.id, number=gw_number).one_or_none()
+
+
+def lineup_locked(db: Session, league: League, gw: Gameweek) -> bool:
+    """A GW's lineup locks at its deadline (its start date). On/after the start date
+    the lineup is frozen; before it, the manager can still edit."""
+    import datetime as _dt
+
+    return gw.start_date is not None and _dt.date.today() >= gw.start_date
+
+
+def get_lineup(db: Session, league: League, fpl_manager_id: str, gw_number: int) -> dict | None:
+    """The manager's submitted XI+bench for a GW, or None if they haven't set one
+    (the engine then falls back to FPL's picks for that GW). Returns
+    `{starters: [fpl_id...], bench: [fpl_id...]}`."""
+    manager = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    gw = _gw_by_number(db, league, gw_number)
+    if not manager or not gw:
+        return None
+    row = (
+        db.query(V2Lineup)
+        .filter_by(manager_id=manager.id, gameweek_id=gw.id)
+        .one_or_none()
+    )
+    if not row:
+        return None
+    return {"starters": list(row.starters or []), "bench": list(row.bench or [])}
+
+
+def set_lineup(
+    db: Session,
+    league: League,
+    fpl_manager_id: str,
+    gw_number: int,
+    starters: list,
+    bench: list,
+    *,
+    allow_locked: bool = False,
+) -> dict:
+    """Set a manager's XI+bench for a GW, enforcing the lineup rules
+    (`rules.validate_lineup`) against their 15 owned players. Locks at the GW
+    deadline unless `allow_locked` (admin). Upserts + audits. Raises RuleViolation
+    on an illegal lineup, a locked GW, or a missing squad."""
+    manager = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    if not manager:
+        raise RuleViolation("Unknown manager.")
+    gw = _gw_by_number(db, league, gw_number)
+    if not gw:
+        raise RuleViolation(f"Gameweek {gw_number} not found.")
+    if not allow_locked and lineup_locked(db, league, gw):
+        raise RuleViolation(f"GW{gw_number} lineup is locked (deadline passed).")
+
+    squad = _squad_players(db, manager.id, gw.id)
+    if len(squad) != ROSTER_SIZE:
+        raise RuleViolation(
+            f"Your GW{gw_number} squad has {len(squad)} players, expected "
+            f"{ROSTER_SIZE} — can't set a lineup yet."
+        )
+    pos_by_pid = {p.fpl_id: p.position for p in squad}
+    starters = [int(x) for x in starters]
+    bench = [int(x) for x in bench]
+
+    validate_lineup(starters, bench, pos_by_pid, set(pos_by_pid))
+
+    row = (
+        db.query(V2Lineup)
+        .filter_by(manager_id=manager.id, gameweek_id=gw.id)
+        .one_or_none()
+    )
+    if row is None:
+        row = V2Lineup(manager_id=manager.id, gameweek_id=gw.id)
+        db.add(row)
+    row.starters = starters
+    row.bench = bench
+    record_audit(
+        db, league, action="set_lineup",
+        summary=f"{manager.display} set GW{gw_number} lineup",
+        manager_ids=[manager.fpl_manager_id],
+        details={"gw": gw_number, "starters": starters, "bench": bench},
+    )
+    db.commit()
+    return {"starters": starters, "bench": bench}
+
+
+def get_lineup_editor(
+    db: Session, league: League, fpl_manager_id: str, gw_number: int | None = None
+) -> dict | None:
+    """Everything the lineup-editor page needs: the manager's 15 owned players for a
+    GW (position-sorted), each player's current role (start / bench N / unassigned)
+    from any saved lineup, the target GW, and whether it's locked. None if the
+    manager isn't found. Defaults the GW to the current one (or the latest synced)."""
+    manager = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    if not manager:
+        return None
+    if gw_number is None:
+        gw_number = current_gameweek(db, league)
+    if gw_number is None:
+        latest = latest_gameweek(db, league)
+        gw_number = latest.number if latest else None
+    gw = _gw_by_number(db, league, gw_number) if gw_number is not None else None
+    if not gw:
+        return {"manager": manager.display, "fpl": manager.fpl_manager_id,
+                "gameweek": gw_number, "locked": True, "has_lineup": False,
+                "players": []}
+
+    squad = _squad_players(db, manager.id, gw.id)
+    existing = get_lineup(db, league, fpl_manager_id, gw_number)
+    role: dict = {}
+    if existing:
+        for pid in existing["starters"]:
+            role[pid] = ("start", None)
+        for i, pid in enumerate(existing["bench"], start=1):
+            role[pid] = ("bench", i)
+
+    players = []
+    for p in squad:
+        r, order = role.get(p.fpl_id, (None, None))
+        players.append({"fpl_id": p.fpl_id, "name": p.name, "position": p.position,
+                        "role": r, "bench_order": order})
+    players.sort(key=lambda d: (_POSITION_ORDER.get(d["position"], 9), d["name"]))
+    return {
+        "manager": manager.display, "fpl": manager.fpl_manager_id,
+        "gameweek": gw_number, "locked": lineup_locked(db, league, gw),
+        "has_lineup": existing is not None, "players": players,
+        "squad_size": len(squad), "roster_size": ROSTER_SIZE,
+    }
+
+
+# ---- v2 app-owned squad ledger (M3; see rules.fold_moves + validate_roster_*) ----
+
+def _v2_roster_snapshots(db: Session, league: League) -> dict:
+    """(manager_id, gw_number) -> set(player_id) from the synced FPL roster snapshots.
+    The source we seed the ledger from and validate the fold against."""
+    snaps: dict = {}
+    for mid, pid, gnum in (
+        db.query(Roster.manager_id, Roster.player_id, Gameweek.number)
+        .join(Gameweek, Gameweek.id == Roster.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+    ):
+        snaps.setdefault((mid, gnum), set()).add(pid)
+    return snaps
+
+
+def seed_v2_ledger(db: Session, league: League) -> int:
+    """(Re)build the app-owned squad ledger from FPL roster history: the earliest GW
+    snapshot becomes `add` (source 'initial'); each later GW's diff vs the previous
+    becomes `add`/`drop` (source 'sync'). This gives the ledger a real starting point
+    to test the fold; going forward, in-app ops append moves instead. Idempotent —
+    clears this league's moves first. Returns the number of moves written."""
+    db.query(V2RosterMove).filter_by(league_id=league.id).delete()
+    snaps = _v2_roster_snapshots(db, league)
+    by_manager: dict = {}
+    for (mid, gnum) in snaps:
+        by_manager.setdefault(mid, set()).add(gnum)
+
+    written = 0
+    for mid, gnums in by_manager.items():
+        gws = sorted(gnums)
+        first = gws[0]
+        for pid in snaps.get((mid, first), set()):
+            db.add(V2RosterMove(league_id=league.id, manager_id=mid, player_id=pid,
+                                gw_number=first, action="add", source="initial"))
+            written += 1
+        for prev, gw in zip(gws, gws[1:]):
+            before = snaps.get((mid, prev), set())
+            after = snaps.get((mid, gw), set())
+            for pid in (after - before):
+                db.add(V2RosterMove(league_id=league.id, manager_id=mid, player_id=pid,
+                                    gw_number=gw, action="add", source="sync"))
+                written += 1
+            for pid in (before - after):
+                db.add(V2RosterMove(league_id=league.id, manager_id=mid, player_id=pid,
+                                    gw_number=gw, action="drop", source="sync"))
+                written += 1
+    db.commit()
+    return written
+
+
+def _v2_moves(db: Session, league: League, manager_id=None, through_gw=None) -> list:
+    """Ordered `(player_id, action)` moves for folding. Ordered by (gw, created_at,
+    id) so replays are deterministic."""
+    q = db.query(V2RosterMove).filter_by(league_id=league.id)
+    if manager_id is not None:
+        q = q.filter(V2RosterMove.manager_id == manager_id)
+    if through_gw is not None:
+        q = q.filter(V2RosterMove.gw_number <= through_gw)
+    q = q.order_by(V2RosterMove.gw_number, V2RosterMove.created_at, V2RosterMove.id)
+    return [(m.player_id, m.action) for m in q]
+
+
+def get_v2_squad(db: Session, league: League, fpl_manager_id: str, as_of_gw=None) -> set:
+    """A manager's app-owned squad = the fold of their ledger up to `as_of_gw`
+    (default: all moves). Returns a set of player UUIDs."""
+    manager = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    if not manager:
+        return set()
+    return fold_moves(_v2_moves(db, league, manager.id, as_of_gw))
+
+
+def v2_ledger_diff(db: Session, league: League) -> dict:
+    """Dual-run validation: at every GW, the ledger fold should reproduce the FPL
+    roster snapshot exactly. Reports per-(manager, GW) mismatches (extra/missing
+    player counts). A clean diff means the app-owned ledger faithfully represents
+    ownership and can take over from the FPL roster sync."""
+    snaps = _v2_roster_snapshots(db, league)
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    moves_by_mgr: dict = {}
+    for m in (
+        db.query(V2RosterMove)
+        .filter_by(league_id=league.id)
+        .order_by(V2RosterMove.gw_number, V2RosterMove.created_at, V2RosterMove.id)
+    ):
+        moves_by_mgr.setdefault(m.manager_id, []).append(m)
+
+    checked, mismatch, rows = 0, 0, []
+    for (mid, gnum), fpl_set in snaps.items():
+        folded = fold_moves(
+            (m.player_id, m.action) for m in moves_by_mgr.get(mid, []) if m.gw_number <= gnum
+        )
+        checked += 1
+        if folded != fpl_set:
+            mismatch += 1
+            rows.append({"gw": gnum, "manager": names.get(mid),
+                         "extra": len(folded - fpl_set), "missing": len(fpl_set - folded)})
+    return {
+        "checked": checked, "mismatch": mismatch,
+        "moves": db.query(V2RosterMove).filter_by(league_id=league.id).count(),
+        "rows": sorted(rows, key=lambda r: (r["gw"], r["manager"] or "")),
+    }
+
+
+def roster_add(db: Session, league: League, fpl_manager_id: str, player_fpl_id: int,
+               gw_number: int, source: str = "free_agent") -> None:
+    """App-owned squad add: append an `add` move after enforcing exclusive ownership
+    and the squad cap (`rules.validate_roster_add`). Audited."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    player = _resolve_player(db, player_fpl_id)
+    squad = fold_moves(_v2_moves(db, league, manager.id))
+    owner_of = _v2_current_owner(db, league, player.id)
+    validate_roster_add(
+        squad_size=len(squad),
+        already_owned=(owner_of == manager.id),
+        owned_by_other=(owner_of is not None and owner_of != manager.id),
+    )
+    db.add(V2RosterMove(league_id=league.id, manager_id=manager.id, player_id=player.id,
+                        gw_number=gw_number, action="add", source=source))
+    record_audit(db, league, action="roster_add",
+                 summary=f"{manager.display} added {player.name} (GW{gw_number})",
+                 manager_ids=[manager.fpl_manager_id],
+                 details={"player": player.name, "gw": gw_number, "source": source})
+    db.commit()
+
+
+def roster_drop(db: Session, league: League, fpl_manager_id: str, player_fpl_id: int,
+                gw_number: int, source: str = "free_agent") -> None:
+    """App-owned squad drop: append a `drop` move after confirming ownership. Audited."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    player = _resolve_player(db, player_fpl_id)
+    squad = fold_moves(_v2_moves(db, league, manager.id))
+    validate_roster_drop(owned=(player.id in squad))
+    db.add(V2RosterMove(league_id=league.id, manager_id=manager.id, player_id=player.id,
+                        gw_number=gw_number, action="drop", source=source))
+    record_audit(db, league, action="roster_drop",
+                 summary=f"{manager.display} dropped {player.name} (GW{gw_number})",
+                 manager_ids=[manager.fpl_manager_id],
+                 details={"player": player.name, "gw": gw_number, "source": source})
+    db.commit()
+
+
+def _v2_current_owner(db: Session, league: League, player_id):
+    """Which manager (id) currently owns a player in the v2 ledger, or None. Exclusive
+    ownership across the league."""
+    for mid, squad in _v2_all_squads(db, league).items():
+        if player_id in squad:
+            return mid
+    return None
+
+
+def _v2_all_squads(db: Session, league: League) -> dict:
+    """{manager_id: set(player_id)} — every manager's current ledger-folded squad."""
+    moves: dict = {}
+    for m in (
+        db.query(V2RosterMove)
+        .filter_by(league_id=league.id)
+        .order_by(V2RosterMove.gw_number, V2RosterMove.created_at, V2RosterMove.id)
+    ):
+        moves.setdefault(m.manager_id, []).append((m.player_id, m.action))
+    return {mid: fold_moves(ms) for mid, ms in moves.items()}
+
+
+def _v2_all_owned(db: Session, league: League) -> set:
+    """All player ids currently owned by any manager (unavailable to add)."""
+    owned: set = set()
+    for squad in _v2_all_squads(db, league).values():
+        owned |= squad
+    return owned
+
+
+def _append_move(db: Session, league: League, manager_id, player_id, gw_number: int,
+                 action: str, source: str) -> None:
+    """Append one ledger move (no commit — caller commits)."""
+    db.add(V2RosterMove(league_id=league.id, manager_id=manager_id, player_id=player_id,
+                        gw_number=gw_number, action=action, source=source))
+
+
+# ---- v2 waivers + free agency + trades (M4) ----
+
+def get_waiver_order(db: Session, league: League) -> dict:
+    """Current waiver priority `{manager_id: priority}` (0 = first). Initialised from
+    reverse standings (worst team first) the first time it's needed."""
+    rows = db.query(V2WaiverState).filter_by(league_id=league.id).all()
+    if rows:
+        return {r.manager_id: r.priority for r in rows}
+    standings = db.query(Standing).filter_by(league_id=league.id).all()
+    if standings:
+        worst_to_best = [
+            r.manager_id for r in sorted(standings, key=lambda r: (r.total or 0, r.points_for or 0))
+        ]
+    else:
+        worst_to_best = [
+            m.id for m in db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name)
+        ]
+    order = initial_waiver_order(worst_to_best)
+    for mid, prio in order.items():
+        db.add(V2WaiverState(league_id=league.id, manager_id=mid, priority=prio))
+    db.commit()
+    return order
+
+
+def _save_waiver_order(db: Session, league: League, order: dict) -> None:
+    for r in db.query(V2WaiverState).filter_by(league_id=league.id):
+        if r.manager_id in order:
+            r.priority = order[r.manager_id]
+
+
+def submit_waiver_claim(db: Session, league: League, fpl_manager_id: str,
+                        add_fpl: int, drop_fpl: int | None, gw_number: int) -> None:
+    """Submit a blind waiver claim: add a free agent, dropping one of your players.
+    Validates the add is currently a free agent and the drop is on your squad. The
+    claim is resolved later by `process_waivers`. Audited."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    add_player = _resolve_player(db, add_fpl)
+    squad = fold_moves(_v2_moves(db, league, manager.id))
+    if _v2_current_owner(db, league, add_player.id) is not None:
+        raise RuleViolation(f"{add_player.name} is already on a squad — not a free agent.")
+    drop_player = None
+    if drop_fpl is not None:
+        drop_player = _resolve_player(db, drop_fpl)
+        if drop_player.id not in squad:
+            raise RuleViolation(f"You can't drop {drop_player.name} — not on your squad.")
+    elif len(squad) >= ROSTER_SIZE:
+        raise RuleViolation("Your squad is full; a claim must name a player to drop.")
+    db.add(V2WaiverClaim(
+        league_id=league.id, manager_id=manager.id, gw_number=gw_number,
+        add_player_id=add_player.id,
+        drop_player_id=drop_player.id if drop_player else None,
+        status="pending",
+    ))
+    record_audit(db, league, action="waiver_claim",
+                 summary=f"{manager.display} claimed {add_player.name} (GW{gw_number})",
+                 manager_ids=[manager.fpl_manager_id],
+                 details={"add": add_player.name,
+                          "drop": drop_player.name if drop_player else None, "gw": gw_number})
+    db.commit()
+
+
+def process_waivers(db: Session, league: League, gw_number: int) -> dict:
+    """Process all pending claims for a GW in priority order, apply winners to the
+    ledger, mark each claim won/lost, and roll winners to the back of the waiver
+    order. Returns a summary. The core decision is the pure `rules.resolve_waivers`."""
+    import datetime as _dt
+
+    order = get_waiver_order(db, league)
+    claims = (
+        db.query(V2WaiverClaim)
+        .filter_by(league_id=league.id, gw_number=gw_number, status="pending")
+        .all()
+    )
+    claims.sort(key=lambda c: (order.get(c.manager_id, 10_000), c.created_at))
+    squads = _v2_all_squads(db, league)
+    owned = set().union(*squads.values()) if squads else set()
+
+    decide_input = [{
+        "id": c.id, "add": c.add_player_id,
+        "drop_owned": (c.drop_player_id is None
+                       or c.drop_player_id in squads.get(c.manager_id, set())),
+    } for c in claims]
+    results = resolve_waivers(decide_input, owned)
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+    winners, won = [], 0
+    for c in claims:
+        status, reason = results[c.id]
+        c.status, c.reason, c.processed_at = status, reason, now
+        if status == "won":
+            if c.drop_player_id is not None:
+                _append_move(db, league, c.manager_id, c.drop_player_id, gw_number, "drop", "waiver")
+            _append_move(db, league, c.manager_id, c.add_player_id, gw_number, "add", "waiver")
+            winners.append(c.manager_id)
+            won += 1
+    _save_waiver_order(db, league, advance_waiver_priority(order, winners))
+    record_audit(db, league, action="waivers_processed",
+                 summary=f"Processed {len(claims)} waiver claims for GW{gw_number} ({won} won)",
+                 details={"gw": gw_number, "won": won, "total": len(claims)})
+    db.commit()
+    return {"processed": len(claims), "won": won, "lost": len(claims) - won}
+
+
+def free_agent_move(db: Session, league: League, fpl_manager_id: str,
+                    add_fpl: int, drop_fpl: int | None, gw_number: int,
+                    allow_out_of_window: bool = False) -> None:
+    """Immediate free-agency add/drop (final 24h before a GW). Unlike waivers this is
+    first-come, applied instantly. Enforces the FA window (admin bypass via
+    `allow_out_of_window`), exclusive ownership, and the squad cap. Audited."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    add_player = _resolve_player(db, add_fpl)
+    if not allow_out_of_window and waiver_window(db, league).get("state") != "free_agency":
+        raise RuleViolation("Free agency isn't open yet (still the waiver period).")
+    squad = fold_moves(_v2_moves(db, league, manager.id))
+    owner = _v2_current_owner(db, league, add_player.id)
+    drop_player = None
+    if drop_fpl is not None:
+        drop_player = _resolve_player(db, drop_fpl)
+        validate_roster_drop(owned=(drop_player.id in squad))
+    size_after_drop = len(squad) - (1 if drop_player else 0)
+    validate_roster_add(
+        squad_size=size_after_drop,
+        already_owned=(owner == manager.id),
+        owned_by_other=(owner is not None and owner != manager.id),
+    )
+    if drop_player is not None:
+        _append_move(db, league, manager.id, drop_player.id, gw_number, "drop", "free_agent")
+    _append_move(db, league, manager.id, add_player.id, gw_number, "add", "free_agent")
+    record_audit(db, league, action="free_agent_move",
+                 summary=f"{manager.display} signed {add_player.name}"
+                         + (f", dropped {drop_player.name}" if drop_player else "")
+                         + f" (GW{gw_number})",
+                 manager_ids=[manager.fpl_manager_id],
+                 details={"add": add_player.name,
+                          "drop": drop_player.name if drop_player else None, "gw": gw_number})
+    db.commit()
+
+
+def v2_execute_trade(db: Session, league: League, a_fpl: str, a_player_fpl: int,
+                     b_fpl: str, b_player_fpl: int, gw_number: int) -> None:
+    """Execute a player-for-player trade against the ledger: each side must own the
+    player they're sending. Appends the four moves (drop+add per player) and audits."""
+    a = _resolve_manager(db, league, a_fpl)
+    b = _resolve_manager(db, league, b_fpl)
+    pa = _resolve_player(db, a_player_fpl)
+    pb = _resolve_player(db, b_player_fpl)
+    squad_a = fold_moves(_v2_moves(db, league, a.id))
+    squad_b = fold_moves(_v2_moves(db, league, b.id))
+    if pa.id not in squad_a:
+        raise RuleViolation(f"{a.display} doesn't own {pa.name}.")
+    if pb.id not in squad_b:
+        raise RuleViolation(f"{b.display} doesn't own {pb.name}.")
+    _append_move(db, league, a.id, pa.id, gw_number, "drop", "trade")
+    _append_move(db, league, b.id, pa.id, gw_number, "add", "trade")
+    _append_move(db, league, b.id, pb.id, gw_number, "drop", "trade")
+    _append_move(db, league, a.id, pb.id, gw_number, "add", "trade")
+    record_audit(db, league, action="v2_trade",
+                 summary=f"Trade: {a.display} {pa.name} ↔ {b.display} {pb.name} (GW{gw_number})",
+                 manager_ids=[a.fpl_manager_id, b.fpl_manager_id],
+                 details={"a": a.display, "a_player": pa.name,
+                          "b": b.display, "b_player": pb.name, "gw": gw_number})
+    db.commit()
+
+
+def get_waivers_view(db: Session, league: League, fpl_manager_id: str) -> dict | None:
+    """Everything the waivers page needs: the current waiver priority order, the
+    window state, the manager's squad (drop options), the free-agent pool (add
+    options), and the manager's pending claims. None if the manager isn't found."""
+    manager = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    if not manager:
+        return None
+    gw = current_gameweek(db, league)
+    if gw is None:
+        latest = latest_gameweek(db, league)
+        gw = latest.number if latest else 1
+    window = waiver_window(db, league)
+    order_map = get_waiver_order(db, league)
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    order = sorted(
+        [{"name": names.get(mid), "priority": prio, "is_me": mid == manager.id}
+         for mid, prio in order_map.items()],
+        key=lambda r: r["priority"],
+    )
+    squads = _v2_all_squads(db, league)
+    owned = set().union(*squads.values()) if squads else set()
+    my_ids = squads.get(manager.id, set())
+    players = db.query(Player).all()
+    my_squad = sorted(
+        [{"fpl_id": p.fpl_id, "name": p.name, "position": p.position}
+         for p in players if p.id in my_ids],
+        key=lambda d: (_POSITION_ORDER.get(d["position"], 9), d["name"]),
+    )
+    free_agents = sorted(
+        [{"fpl_id": p.fpl_id, "label": f"{p.name} · {p.position} · {p.current_team}"}
+         for p in players if p.id not in owned],
+        key=lambda d: d["label"],
+    )
+    pname = {p.id: p.name for p in players}
+    my_claims = [
+        {"add": pname.get(c.add_player_id), "drop": pname.get(c.drop_player_id),
+         "status": c.status, "reason": c.reason, "gw": c.gw_number}
+        for c in db.query(V2WaiverClaim)
+        .filter_by(league_id=league.id, manager_id=manager.id)
+        .order_by(V2WaiverClaim.created_at.desc())
+    ]
+    return {
+        "manager": manager.display, "fpl": manager.fpl_manager_id, "gameweek": gw,
+        "window": window, "order": order, "my_squad": my_squad,
+        "free_agents": free_agents, "my_claims": my_claims,
+    }
+
+
+def pending_waiver_claims(db: Session, league: League, gw_number: int) -> list:
+    """Admin view: pending claims for a GW in current priority order, with names."""
+    order = get_waiver_order(db, league)
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    pname = {p.id: p.name for p in db.query(Player)}
+    claims = (
+        db.query(V2WaiverClaim)
+        .filter_by(league_id=league.id, gw_number=gw_number, status="pending")
+        .all()
+    )
+    claims.sort(key=lambda c: order.get(c.manager_id, 10_000))
+    return [
+        {"manager": names.get(c.manager_id), "priority": order.get(c.manager_id),
+         "add": pname.get(c.add_player_id), "drop": pname.get(c.drop_player_id)}
+        for c in claims
+    ]
+
+
+# ---- v2 app-owned H2H schedule + standings (M5; see rules.season_schedule) ----
+
+def _v2_managers_ordered(db: Session, league: League) -> list:
+    """Manager ids in a stable order (for a deterministic generated schedule)."""
+    return [
+        m.id for m in db.query(Manager).filter_by(league_id=league.id)
+        .order_by(Manager.display_name, Manager.name)
+    ]
+
+
+def generate_v2_schedule(db: Session, league: League, through_gw: int | None = None) -> int:
+    """(Re)generate the app-owned H2H schedule as a double round-robin across GWs
+    1..through_gw (default: the number of synced gameweeks, else 38). Idempotent —
+    clears this league's fixtures first. Returns the number of fixtures written."""
+    if through_gw is None:
+        latest = latest_gameweek(db, league)
+        through_gw = latest.number if latest else SEASON_LAST_GW
+    ids = _v2_managers_ordered(db, league)
+    db.query(V2Match).filter_by(league_id=league.id).delete()
+    sched = season_schedule(ids, through_gw)
+    written = 0
+    for gw, pairs in sched.items():
+        for home, away in pairs:
+            db.add(V2Match(league_id=league.id, gw_number=gw,
+                           home_manager_id=home, away_manager_id=away))
+            written += 1
+    db.commit()
+    return written
+
+
+def _v2_engine_totals(db: Session, league: League) -> dict:
+    """{(manager_id, gw_number): total} from persisted engine scores. Populate via
+    compute_v2_scores first."""
+    out: dict = {}
+    for score, gw in (
+        db.query(V2GameweekScore, Gameweek)
+        .join(Gameweek, Gameweek.id == V2GameweekScore.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+    ):
+        out[(score.manager_id, gw.number)] = score.total
+    return out
+
+
+def get_v2_standings(db: Session, league: League) -> dict:
+    """League standings computed entirely in-app: the generated H2H schedule
+    (v2_matches) scored by the v2 engine (v2_gameweek_scores). A fixture counts once
+    both managers have an engine score for that GW. Returns an ordered table plus how
+    many fixtures were scored — no FPL standings involved."""
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    totals = _v2_engine_totals(db, league)
+    tbl = {mid: {"w": 0, "d": 0, "l": 0, "pf": 0, "pa": 0, "played": 0} for mid in names}
+    scored = 0
+    for mt in db.query(V2Match).filter_by(league_id=league.id):
+        ht = totals.get((mt.home_manager_id, mt.gw_number))
+        at = totals.get((mt.away_manager_id, mt.gw_number))
+        if ht is None or at is None:
+            continue
+        scored += 1
+        for mid, gf, ga in ((mt.home_manager_id, ht, at), (mt.away_manager_id, at, ht)):
+            row = tbl[mid]
+            row["pf"] += gf
+            row["pa"] += ga
+            row["played"] += 1
+            if gf > ga:
+                row["w"] += 1
+            elif gf < ga:
+                row["l"] += 1
+            else:
+                row["d"] += 1
+    table = sorted(
+        [{"manager": names.get(mid), "points": 3 * r["w"] + r["d"], **r}
+         for mid, r in tbl.items()],
+        key=lambda r: (-r["points"], -r["pf"], r["manager"] or ""),
+    )
+    return {"scored_fixtures": scored, "table": table,
+            "fixtures": db.query(V2Match).filter_by(league_id=league.id).count()}
+
+
+def get_v2_schedule(db: Session, league: League, gw_number: int) -> list:
+    """The app-owned fixtures for one GW, with engine scores if available."""
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    totals = _v2_engine_totals(db, league)
+    out = []
+    for mt in db.query(V2Match).filter_by(league_id=league.id, gw_number=gw_number):
+        out.append({
+            "home": names.get(mt.home_manager_id),
+            "away": names.get(mt.away_manager_id),
+            "home_score": totals.get((mt.home_manager_id, gw_number)),
+            "away_score": totals.get((mt.away_manager_id, gw_number)),
+        })
+    return sorted(out, key=lambda r: (r["home"] or ""))
+
+
+# ---- v2 in-app scoring engine (dual-run; see scoring.py + the v2 roadmap) ----
+
+def _v2_lineup_from_points(entries: list[dict], pos_by_fpl: dict) -> dict:
+    """Reconstruct a manager's submitted lineup from a `gameweek_points.player_points`
+    JSONB list. Each entry is `{fpl_id, position(1-15), is_starting, minutes, points}`
+    — FPL position 1-11 = starters (in order), 12-15 = bench (in priority order).
+    Returns `{starters, bench, players}` shaped for `scoring.score_lineup` (pids are
+    fpl_ids; players carry pos/minutes/points). Entries whose player position is
+    unknown are skipped so a legal formation can still be evaluated."""
+    ordered = sorted(entries or [], key=lambda e: (e.get("position") or 99))
+    starters, bench, players = [], [], {}
+    for e in ordered:
+        pid = e.get("fpl_id")
+        pos = pos_by_fpl.get(pid)
+        if pid is None or pos is None:
+            continue
+        players[pid] = {"pos": pos, "minutes": e.get("minutes") or 0,
+                        "points": e.get("points") or 0}
+        slot = e.get("position") or 99
+        (starters if slot <= 11 else bench).append(pid)
+    return {"starters": starters, "bench": bench, "players": players}
+
+
+def _v2_score_gp(gp: GameweekPoints, pos_by_fpl: dict, lineup: dict | None = None) -> dict:
+    """Run the pure engine over one synced `GameweekPoints` row → engine result
+    (total + resolved XI). Uses the manager's app-submitted `lineup` (M2) when given
+    and valid; otherwise falls back to FPL's submitted picks (positions 1-15), so the
+    dual-run still works for GWs with no app lineup. Player points/minutes always come
+    from the synced `player_points`; the lineup only re-designates who starts."""
+    import scoring
+
+    lu = _v2_lineup_from_points(gp.player_points or [], pos_by_fpl)
+    players = lu["players"]
+    if lineup:
+        starters = [p for p in lineup.get("starters", []) if p in players]
+        bench = [p for p in lineup.get("bench", []) if p in players]
+        if len(starters) == scoring.XI_SIZE and len(bench) == scoring.SQUAD_SIZE - scoring.XI_SIZE:
+            return scoring.score_lineup(starters, bench, players)
+    return scoring.score_lineup(lu["starters"], lu["bench"], players)
+
+
+def _v2_lineups_by_key(db: Session, league: League) -> dict:
+    """Preload app lineups for the league keyed by (manager_id, gameweek_id) →
+    {starters, bench} (fpl ids), so the engine can prefer them over FPL picks."""
+    out: dict = {}
+    for lp in (
+        db.query(V2Lineup)
+        .join(Gameweek, Gameweek.id == V2Lineup.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+        .all()
+    ):
+        out[(lp.manager_id, lp.gameweek_id)] = {
+            "starters": list(lp.starters or []), "bench": list(lp.bench or [])
+        }
+    return out
+
+
+def compute_v2_scores(db: Session, league: League, gw_number: int | None = None) -> int:
+    """Compute + persist v2 engine scores for one GW (or the latest with data) into
+    `v2_gameweek_scores`. Additive/idempotent (upsert by manager+GW); never touches
+    the FPL-sourced `gameweek_points`. Returns the number of manager rows written."""
+    q = (
+        db.query(GameweekPoints, Gameweek)
+        .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+    )
+    if gw_number is not None:
+        q = q.filter(Gameweek.number == gw_number)
+    pos_by_fpl = {p.fpl_id: p.position for p in db.query(Player)}
+    lineups = _v2_lineups_by_key(db, league)
+    written = 0
+    for gp, _gw in q.all():
+        res = _v2_score_gp(gp, pos_by_fpl, lineups.get((gp.manager_id, gp.gameweek_id)))
+        row = (
+            db.query(V2GameweekScore)
+            .filter_by(manager_id=gp.manager_id, gameweek_id=gp.gameweek_id)
+            .one_or_none()
+        )
+        if row is None:
+            row = V2GameweekScore(manager_id=gp.manager_id, gameweek_id=gp.gameweek_id)
+            db.add(row)
+        row.total = res["total"]
+        row.breakdown = {"resolved_xi": res["resolved_xi"]}
+        row.team_goals = res["team_goals"]
+        row.team_assists = res["team_assists"]
+        row.team_clean_sheets = res["team_clean_sheets"]
+        written += 1
+    db.commit()
+    return written
+
+
+def v2_score_diff(db: Session, league: League) -> dict:
+    """Dual-run validation: compare the v2 engine against FPL's synced numbers.
+    Computes engine totals on the fly (no dependency on a prior backfill) and diffs
+    them against `gameweek_points.total_points` per manager/GW, and engine H2H
+    winners against `matches.winner_id`. Returns summary counts + the mismatches."""
+    import scoring
+
+    pos_by_fpl = {p.fpl_id: p.position for p in db.query(Player)}
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    lineups = _v2_lineups_by_key(db, league)
+    app_lineups_used = 0
+
+    engine: dict = {}  # (manager_id, gameweek_id) -> engine total
+    point_rows, point_mismatch = [], 0
+    for gp, gw in (
+        db.query(GameweekPoints, Gameweek)
+        .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+        .all()
+    ):
+        lineup = lineups.get((gp.manager_id, gp.gameweek_id))
+        if lineup:
+            app_lineups_used += 1
+        eng = _v2_score_gp(gp, pos_by_fpl, lineup)["total"]
+        engine[(gp.manager_id, gp.gameweek_id)] = eng
+        fpl = gp.total_points
+        ok = (fpl is not None and eng == fpl)
+        if not ok:
+            point_mismatch += 1
+            point_rows.append({
+                "gw": gw.number, "manager": names.get(gp.manager_id),
+                "engine": eng, "fpl": fpl,
+                "delta": (eng - fpl) if fpl is not None else None,
+            })
+
+    winner_rows, winner_mismatch, winner_checked = [], 0, 0
+    for mt in (
+        db.query(Match)
+        .filter_by(league_id=league.id, finished=True)
+        .all()
+    ):
+        ht = engine.get((mt.home_manager_id, mt.gameweek_id))
+        at = engine.get((mt.away_manager_id, mt.gameweek_id))
+        if ht is None or at is None:
+            continue
+        winner_checked += 1
+        outcome = scoring.h2h_result(ht, at)
+        eng_winner = {"home": mt.home_manager_id, "away": mt.away_manager_id}.get(outcome)
+        if eng_winner != mt.winner_id:
+            winner_mismatch += 1
+            gwn = db.get(Gameweek, mt.gameweek_id)
+            winner_rows.append({
+                "gw": gwn.number if gwn else None,
+                "home": names.get(mt.home_manager_id),
+                "away": names.get(mt.away_manager_id),
+                "engine": names.get(eng_winner) if eng_winner else "draw",
+                "fpl": names.get(mt.winner_id) if mt.winner_id else "draw",
+            })
+
+    return {
+        "points_checked": len(engine),
+        "points_mismatch": point_mismatch,
+        "app_lineups_used": app_lineups_used,
+        "point_rows": sorted(point_rows, key=lambda r: (r["gw"], r["manager"] or "")),
+        "winners_checked": winner_checked,
+        "winners_mismatch": winner_mismatch,
+        "winner_rows": sorted(winner_rows, key=lambda r: (r["gw"] or 0)),
+    }
 
 
 def gw_finished(db: Session, league: League, number: int) -> bool:

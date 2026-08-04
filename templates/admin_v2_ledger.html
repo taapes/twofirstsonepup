@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}v2 Squad Ledger{% endblock %}
+{% block content %}
+<h1>v2 Squad Ledger <span class="tag">commissioner</span> <span class="tag">dual-run</span></h1>
+<p class="sub">The app-owned squad ledger (<code>v2_roster_moves</code>) — an
+  append-only add/drop history. A manager's squad = folding their moves in order.
+  Seeded from FPL roster-snapshot history so the fold has real data to validate
+  against; going forward, in-app adds/drops/trades append new moves.</p>
+
+<form method="post" action="/admin/v2/seed-ledger" style="margin:10px 0"
+      onsubmit="return confirm('Rebuild the ledger from FPL roster history? This replaces any app-only moves made since seeding.')">
+  <button type="submit">(Re)seed from FPL history</button>
+  <span class="sub">{{ diff.moves }} moves currently stored</span>
+</form>
+
+<div class="card statusbox {{ 'ok' if diff.mismatch == 0 else 'warn' }}" style="margin-bottom:14px">
+  <strong>Fold vs. FPL rosters</strong>
+  {% if diff.mismatch == 0 %}
+    <span class="pill ok">MATCH</span>
+    <p class="sub">All {{ diff.checked }} manager-GW snapshots reproduced exactly by the ledger fold.</p>
+  {% else %}
+    <span class="pill warn">{{ diff.mismatch }} / {{ diff.checked }} differ</span>
+  {% endif %}
+</div>
+
+<h2>Current squads (ledger fold)</h2>
+<div class="card" style="overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th>Manager</th><th class="num">Squad size</th></tr></thead>
+    <tbody>
+      {% for s in squads %}
+      <tr><td>{{ s.name }}</td><td class="num">{{ s.size }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if diff.rows %}
+<h2>Mismatches</h2>
+<div class="card" style="overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th>GW</th><th>Manager</th><th class="num">Extra</th><th class="num">Missing</th></tr></thead>
+    <tbody>
+      {% for r in diff.rows %}
+      <tr><td>{{ r.gw }}</td><td>{{ r.manager }}</td>
+        <td class="num">{{ r.extra }}</td><td class="num">{{ r.missing }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}v2 Waivers{% endblock %}
+{% block content %}
+<h1>v2 Waivers <span class="tag">commissioner</span> <span class="tag">GW{{ gw }}</span></h1>
+<p class="sub">Pending blind claims for GW{{ gw }}, in current waiver priority order.
+  Processing resolves them top-down: a claim wins if its player is still free; winners
+  drop to the back of the order. Effects append to the app-owned squad ledger.</p>
+
+<form method="post" action="/admin/v2/process-waivers" style="margin:10px 0"
+      onsubmit="return confirm('Process {{ claims|length }} pending claim(s) for GW{{ gw }}?')">
+  <input type="hidden" name="gw" value="{{ gw }}">
+  <button type="submit" {% if not claims %}disabled{% endif %}>Process GW{{ gw }} waivers</button>
+</form>
+
+{% if claims %}
+<div class="card" style="overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th class="num">Priority</th><th>Manager</th><th>Add</th><th>Drop</th></tr></thead>
+    <tbody>
+      {% for c in claims %}
+      <tr><td class="num">{{ (c.priority + 1) if c.priority is not none else "—" }}</td>
+        <td>{{ c.manager }}</td><td>{{ c.add }}</td><td>{{ c.drop or "—" }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}<p class="sub">No pending claims for GW{{ gw }}.</p>{% endif %}
+{% endblock %}
