@@ -84,6 +84,30 @@ for all manager labels; services already do.
 League logic must never corrupt synced canonical data. Custom state lives in its
 own tables alongside, not by mutating FPL-sourced rows.
 
+## v2 in-app engine (`APP_ENGINE` flag — branch `v2/in-app-league`)
+
+An in-progress track *inverts* the boundary above: the app becomes the system of
+record for league operations and FPL is demoted to a raw feed (player metadata,
+per-GW player points/minutes, PL fixtures, GW calendar). Built additively behind
+**isolated `v2_*` tables** so the live app is untouched (dual-run): `scoring.py`
+(pure engine: formation/auto-subs/XI scoring/H2H), `v2_gameweek_scores`,
+`v2_lineups` (app-set XI+bench), `v2_roster_moves` (append-only squad ledger; squad
+= fold), `v2_waiver_state`/`v2_waiver_claims` (blind waivers + priority),
+`v2_matches` (generated round-robin schedule). Rules in `rules.py`
+(`validate_lineup`, `fold_moves`, `validate_roster_*`, `resolve_waivers`,
+`season_schedule`); admin dual-run views at `/admin/v2/*`; manager UIs at
+`/my-team/lineup` and `/waivers`. Engine validated against FPL: 380/380 GW totals,
+190/190 winners, ledger fold reproduces every roster snapshot exactly.
+
+**The cutover switch:** `services.app_engine_on()` reads env `APP_ENGINE` (default
+`off`). When `on`, the public read paths (`get_standings`, `get_scoreboard`,
+`get_my_team` roster, `get_transactions`) serve the engine (`_engine_*`) instead of
+FPL-sourced tables — same return shapes, so templates are unchanged. **Off = byte-
+for-byte current behavior.** Flipping it is a deliberate, reversible operational act
+(and the FPL sync keeps running as the raw feed either way). Not yet flipped; a
+fresh-season cutover still needs the draft→ledger bridge (seed initial squads from
+an in-app draft rather than from FPL roster history).
+
 ## FPL Draft API endpoints in use
 
 `/bootstrap-static`, `/league/{league_id}/details`, `/event/{gw}/live`,

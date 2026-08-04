@@ -261,6 +261,8 @@ def waiver_window(db: Session, league: League) -> dict | None:
 def get_scoreboard(db: Session, league: League, gw_number: int | None = None) -> dict:
     """Current-GW H2H scoreboard: each matchup with live scores (from gameweek_points,
     falling back to the match's stored points) and whether it's finished."""
+    if app_engine_on():
+        return _engine_scoreboard(db, league, gw_number)
     gw_number = gw_number or current_gameweek(db, league)
     if gw_number is None:
         return {"gameweek": None, "matches": []}
@@ -941,6 +943,98 @@ def get_v2_schedule(db: Session, league: League, gw_number: int) -> list:
     return sorted(out, key=lambda r: (r["home"] or ""))
 
 
+# ---- v2 cutover switch (M6): serve engine reads when APP_ENGINE=on ----
+
+def app_engine_on() -> bool:
+    """The v2 cutover flag. When APP_ENGINE=on, the public read paths (standings,
+    scoreboard, My Team roster, transactions) are served from the app-owned engine
+    instead of FPL-sourced tables. OFF by default — flipping it is a deliberate,
+    reversible operational act; the FPL sync keeps running as the raw player/points/
+    fixtures feed regardless."""
+    import os
+
+    return os.getenv("APP_ENGINE", "off").lower() == "on"
+
+
+def _engine_standings(db: Session, league: League) -> list[dict]:
+    """`get_standings` shape, computed from the generated schedule + engine scores
+    (commissioner StandingAdjustment deltas still apply on top)."""
+    from models import StandingAdjustment
+
+    mgrs = {m.id: m for m in db.query(Manager).filter_by(league_id=league.id)}
+    totals = _v2_engine_totals(db, league)
+    tbl = {mid: {"w": 0, "d": 0, "l": 0, "pf": 0, "pa": 0} for mid in mgrs}
+    for mt in db.query(V2Match).filter_by(league_id=league.id):
+        ht = totals.get((mt.home_manager_id, mt.gw_number))
+        at = totals.get((mt.away_manager_id, mt.gw_number))
+        if ht is None or at is None:
+            continue
+        for mid, gf, ga in ((mt.home_manager_id, ht, at), (mt.away_manager_id, at, ht)):
+            r = tbl[mid]
+            r["pf"] += gf
+            r["pa"] += ga
+            r["w" if gf > ga else "l" if gf < ga else "d"] += 1
+    dt, dpf = {}, {}
+    for a in db.query(StandingAdjustment).filter_by(league_id=league.id):
+        dt[a.manager_id] = dt.get(a.manager_id, 0) + a.total_delta
+        dpf[a.manager_id] = dpf.get(a.manager_id, 0) + a.points_for_delta
+    out = []
+    for mid, m in mgrs.items():
+        r = tbl[mid]
+        out.append({
+            "manager": m.display, "fpl": m.fpl_manager_id,
+            "total": (3 * r["w"] + r["d"]) + dt.get(mid, 0),
+            "points_for": r["pf"] + dpf.get(mid, 0), "points_against": r["pa"],
+            "matches_won": r["w"], "matches_drawn": r["d"], "matches_lost": r["l"],
+            "total_delta": dt.get(mid, 0), "points_for_delta": dpf.get(mid, 0),
+            "adjusted": bool(dt.get(mid) or dpf.get(mid)),
+        })
+    out.sort(key=lambda x: (-(x["total"] or 0), -(x["points_for"] or 0), x["manager"]))
+    for i, row in enumerate(out, start=1):
+        row["rank"] = i
+    return out
+
+
+def _engine_scoreboard(db: Session, league: League, gw_number: int | None) -> dict:
+    """`get_scoreboard` shape, from the generated schedule + engine scores."""
+    gw_number = gw_number or current_gameweek(db, league)
+    if gw_number is None:
+        return {"gameweek": None, "matches": []}
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    totals = _v2_engine_totals(db, league)
+    matches = []
+    for mt in db.query(V2Match).filter_by(league_id=league.id, gw_number=gw_number):
+        hs = totals.get((mt.home_manager_id, gw_number))
+        as_ = totals.get((mt.away_manager_id, gw_number))
+        matches.append({
+            "home": names.get(mt.home_manager_id), "away": names.get(mt.away_manager_id),
+            "home_score": hs, "away_score": as_,
+            "finished": hs is not None and as_ is not None,
+            "leader": (names.get(mt.home_manager_id) if (hs or 0) > (as_ or 0)
+                       else names.get(mt.away_manager_id) if (as_ or 0) > (hs or 0) else None),
+        })
+    matches.sort(key=lambda x: (x["home"] or ""))
+    return {"gameweek": gw_number, "matches": matches}
+
+
+def _engine_transactions(db: Session, league: League) -> list[dict]:
+    """`get_transactions` shape, from the app-owned ledger (excludes the initial seed)."""
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    pnames = {p.id: p.name for p in db.query(Player)}
+    by_gw: dict = {}
+    for mv in db.query(V2RosterMove).filter_by(league_id=league.id):
+        if mv.source == "initial":
+            continue
+        by_gw.setdefault(mv.gw_number, []).append({
+            "manager": names.get(mv.manager_id), "player": pnames.get(mv.player_id, "?"),
+            "action": "added" if mv.action == "add" else "dropped",
+        })
+    return [
+        {"gameweek": gw, "moves": sorted(by_gw[gw], key=lambda x: (x["manager"] or "", x["action"]))}
+        for gw in sorted(by_gw, reverse=True)
+    ]
+
+
 # ---- v2 in-app scoring engine (dual-run; see scoring.py + the v2 roadmap) ----
 
 def _v2_lineup_from_points(entries: list[dict], pos_by_fpl: dict) -> dict:
@@ -1488,6 +1582,8 @@ def fixtures_for_gws(db: Session, league: League, gw_numbers: list[int]) -> dict
 def get_standings(db: Session, league: League) -> list[dict]:
     """Live standings with commissioner adjustments applied as accumulating deltas
     on top of the synced totals, then re-ranked."""
+    if app_engine_on():
+        return _engine_standings(db, league)
     from models import StandingAdjustment
 
     rows = (
@@ -1674,7 +1770,12 @@ def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None
     if not manager:
         return None
     gw = latest_gameweek(db, league)
-    players = _squad_players(db, manager.id, gw.id if gw else None)
+    if app_engine_on():
+        # Squad from the app-owned ledger (fold) rather than the FPL roster snapshot.
+        squad_ids = get_v2_squad(db, league, fpl_manager_id)
+        players = db.query(Player).filter(Player.id.in_(squad_ids)).all() if squad_ids else []
+    else:
+        players = _squad_players(db, manager.id, gw.id if gw else None)
 
     # recent points trend per player (last 5 synced GWs, oldest->newest)
     recent = (
@@ -2213,6 +2314,8 @@ def get_transactions(db: Session, league: League) -> list[dict]:
     """Weekly add/drops derived from consecutive per-GW roster snapshots (the FPL Draft
     waiver feed isn't public). Grouped newest-GW first: for each manager, players in
     GW n but not n-1 = added; in n-1 but not n = dropped. Captures waivers/FA/trades."""
+    if app_engine_on():
+        return _engine_transactions(db, league)
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
     pnames = {p.id: p.name for p in db.query(Player)}
     # (manager_id, gw_number) -> set(player_id)
