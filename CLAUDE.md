@@ -314,6 +314,25 @@ Starting a new season therefore means a **rollover to the new league id**, never
 re-pointing at the old one. `scripts/cleanup_recycled_league.py` is the one-off
 repair for the 2026 incident (kept as the worked example).
 
+**FPL also reassigns PLAYER element ids every season — same trap, second table.**
+`players` is a single global table keyed on `fpl_id`, but element ids are per-season
+(25/26 id 5 = Gabriel, 26/27 id 5 = J.Timber). `sync_players` upserts on `fpl_id`,
+so pulling a new season's bootstrap rewrites each existing row's identity *in place*.
+`rosters` reference `players.id`, so nothing looks broken structurally — every
+historical squad just silently shows the wrong names/clubs. This is exactly what
+happened alongside the league-id incident (570/841 rows rewritten; rosters and
+gameweek_points were untouched). Guard: `sync_players` no-ops when **every** league
+row is `sync_locked`, so a finished pool is never refreshed with a live season's ids.
+Repair: `scripts/restore_player_identity.py` (restores from a snapshot by
+`players.id`; season stats added after the snapshot are cleared, since showing
+another player's numbers is worse than showing none).
+
+⚠️ **Still open:** the guard only holds while no season is live. The moment 26/27
+rolls over and syncs, the 26/27 pool overwrites the 25/26 identities again and
+every historical roster breaks. Making player identity season-scoped (snapshot
+name/position/club per season like `player_pool_snapshot` does for eligibility, and
+resolve historical views through it) is the real fix and is **not yet built**.
+
 **Sync cadence** is fixture-aligned + code-gated: `/admin/sync` runs
 `services.sync_plan` (pure `rules.decide_sync`) → `full | live | skip` from
 {a full sync today?, a PL fixture live now?, a GW deadline today?}. The cron
