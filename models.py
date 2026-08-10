@@ -53,6 +53,13 @@ class League(Base):
     keepers_locked: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # Freeze against the FPL feed. FPL recycles numeric league ids between
+    # seasons, so a finished season's `fpl_league_id` can start resolving to a
+    # STRANGER'S league — syncing it would merge their teams into our history.
+    # Set when the season ends (GW38 / rollover); sync then skips this row.
+    sync_locked: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
     # League lifecycle phase (drives feature availability + sync cadence). Macro
     # phase only: offseason | draft | preseason | in_season. In-season sub-states
     # (discovery / post-deadline / cup) are the `discovery_open` flag + values

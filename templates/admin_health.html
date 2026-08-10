@@ -49,6 +49,10 @@
       Lock public picks &amp; trades <span class="sub">(currently {{ "LOCKED" if writes_locked else "open" }})</span></label>
     <label style="display:block;margin-top:6px"><input type="checkbox" name="keepers_lock" {% if keepers_locked %}checked{% endif %}>
       Lock keeper selection <span class="sub">(currently {{ "LOCKED" if keepers_locked else "open" }})</span></label>
+    <label style="display:block;margin-top:6px"><input type="checkbox" name="sync_lock" {% if sync_locked %}checked{% endif %}>
+      Freeze this season against FPL sync <span class="sub">(currently {{ "FROZEN" if sync_locked else "live" }})</span></label>
+    <p class="sub" style="margin:6px 0 0">Freezing is automatic once GW38 finishes. FPL reuses league
+       ids between seasons, so a finished season must never be re-read from the feed.</p>
     <button type="submit" style="margin-top:8px">Save</button>
   </form>
 </div>

@@ -27,7 +27,16 @@ from models import (
     SyncLog,
     Trade,
 )
+from rules import verify_league_feed
 from settings import API_BASE, LEAGUE_ID
+
+
+class LeagueIdentityError(RuntimeError):
+    """The `/league/{id}/details` feed no longer describes the league we have
+    stored — FPL recycles league ids between seasons, so this id now belongs to
+    somebody else. Sync aborts loudly rather than merge a stranger's data into
+    our history."""
+
 
 # FPL element_type id -> position short name. Stable in bootstrap-static, but we
 # read element_types from the payload when available and fall back to this.
@@ -50,6 +59,25 @@ def _upsert(session: Session, model, match: dict, values: dict):
     row = model(**{**match, **values})
     session.add(row)
     return row
+
+
+def _resolve_league(session: Session, fpl_league_id, log: SyncLog) -> League | None:
+    """The league row this sync task may write to, or None when it's missing or
+    frozen (the reason recorded on `log`). A frozen row is a finished season: FPL
+    may have handed its league id to a different league, so we never touch it."""
+    league = (
+        session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
+    )
+    if league and not league.sync_locked:
+        return league
+    if not league:
+        log.notes = "league missing, run sync_league_and_managers first"
+    else:
+        log.ok = True  # a deliberate freeze is a skip, not a failure
+        log.notes = f"season {league.season_year} is frozen (sync_locked); skipped"
+    log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+    session.commit()
+    return None
 
 
 def _parse_iso(dt_str: str | None) -> datetime.datetime | None:
@@ -177,13 +205,8 @@ async def sync_fixtures(fpl_league_id: str | None = None):
         session.add(log)
         session.commit()
 
-        league = (
-            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
-        )
+        league = _resolve_league(session, fpl_league_id, log)
         if not league:
-            log.notes = "league missing, run sync_league_and_managers first"
-            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
-            session.commit()
             return
 
         async with httpx.AsyncClient() as client:
@@ -234,11 +257,56 @@ async def sync_league_and_managers(fpl_league_id: str | None = None):
         log = SyncLog(kind="league")
         session.add(log)
         session.commit()
+
+        # A frozen row is a finished season — never re-read it from the feed.
+        existing = (
+            session.query(League)
+            .filter_by(fpl_league_id=str(fpl_league_id))
+            .one_or_none()
+        )
+        if existing and existing.sync_locked:
+            log.ok = True
+            log.notes = f"season {existing.season_year} is frozen (sync_locked); skipped"
+            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+            session.commit()
+            return
+
         async with httpx.AsyncClient() as client:
             data = await _get_json(client, f"{API_BASE}/league/{fpl_league_id}/details")
 
         league_meta = data.get("league", {})
         draft_dt = _parse_iso(league_meta.get("draft_dt"))
+        entries = data.get("league_entries", data.get("entries", []))
+
+        # Identity gate: prove the feed is still OUR league before writing a byte.
+        # Without this an id FPL has reused merges a stranger's managers,
+        # standings and fixtures into our season (see LeagueIdentityError).
+        if existing:
+            stored_ids = [
+                mid
+                for (mid,) in session.query(Manager.fpl_manager_id).filter_by(
+                    league_id=existing.id
+                )
+            ]
+            ok, reason = verify_league_feed(
+                stored_ids,
+                [e.get("entry_id") or e.get("id") for e in entries],
+                stored_season_year=existing.season_year,
+                fetched_season_year=_season_start_year(draft_dt) if draft_dt else None,
+            )
+            if not ok:
+                msg = (
+                    f"Sync aborted for FPL league {fpl_league_id} "
+                    f"('{league_meta.get('name', '')}'): {reason}. Nothing was "
+                    f"written. If the season is over, freeze it (sync_locked) and "
+                    f"roll over to the new season's league id."
+                )
+                log.ok = False
+                log.notes = msg
+                log.finished_at = datetime.datetime.now(datetime.timezone.utc)
+                session.commit()
+                raise LeagueIdentityError(msg)
+
         league = _upsert(
             session,
             League,
@@ -254,7 +322,7 @@ async def sync_league_and_managers(fpl_league_id: str | None = None):
         # league_entry id -> manager, so we can attach standings (which key off
         # the league_entry id, not the entry_id).
         entry_to_manager: dict[int, Manager] = {}
-        for entry in data.get("league_entries", data.get("entries", [])):
+        for entry in entries:
             fpl_manager_id = str(entry.get("entry_id") or entry.get("id"))
             league_entry_id = entry.get("id")
             display = (
@@ -354,13 +422,8 @@ async def sync_gameweek_dates(fpl_league_id: str | None = None):
         session.add(log)
         session.commit()
 
-        league = (
-            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
-        )
+        league = _resolve_league(session, fpl_league_id, log)
         if not league:
-            log.notes = "league missing, run sync_league_and_managers first"
-            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
-            session.commit()
             return
 
         async with httpx.AsyncClient() as client:
@@ -399,13 +462,8 @@ async def sync_rosters(gw_number: int | None = None, fpl_league_id: str | None =
         session.add(log)
         session.commit()
 
-        league = (
-            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
-        )
+        league = _resolve_league(session, fpl_league_id, log)
         if not league:
-            log.notes = "league missing, run sync_league_and_managers first"
-            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
-            session.commit()
             return
 
         if gw_number is None:
@@ -461,13 +519,8 @@ async def sync_gameweek_points(gw_number: int | None = None, fpl_league_id: str 
         session.add(log)
         session.commit()
 
-        league = (
-            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
-        )
+        league = _resolve_league(session, fpl_league_id, log)
         if not league:
-            log.notes = "league missing, run sync_league_and_managers first"
-            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
-            session.commit()
             return
 
         if gw_number is None:
@@ -570,13 +623,8 @@ async def sync_trades(fpl_league_id: str | None = None):
         session.add(log)
         session.commit()
 
-        league = (
-            session.query(League).filter_by(fpl_league_id=str(fpl_league_id)).one_or_none()
-        )
+        league = _resolve_league(session, fpl_league_id, log)
         if not league:
-            log.notes = "league missing, run sync_league_and_managers first"
-            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
-            session.commit()
             return
 
         async with httpx.AsyncClient() as client:

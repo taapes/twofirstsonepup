@@ -11,6 +11,61 @@ class RuleViolation(Exception):
     to HTTP 400 with the message."""
 
 
+# ---- League feed identity ----
+# An FPL Draft league id is only unique WITHIN a season: FPL recycles the numeric
+# ids, so once our season is over `/league/{id}/details` can start returning a
+# completely different league. Upserting that feed into our season row merges a
+# stranger's managers, standings and fixtures into our history. Before sync writes
+# to a league row that already has managers, it must prove the feed is still ours.
+#
+# Identity is the set of FPL `entry_id`s: a keeper league keeps the same people
+# year to year, and entry_id is stable per person across seasons.
+MIN_ENTRY_OVERLAP = 0.5
+
+
+def verify_league_feed(
+    stored_entry_ids,
+    fetched_entry_ids,
+    *,
+    stored_season_year: int | None = None,
+    fetched_season_year: int | None = None,
+    min_overlap: float = MIN_ENTRY_OVERLAP,
+) -> tuple[bool, str]:
+    """Pure check that a fetched `/league/{id}/details` payload still describes the
+    league we have stored. Returns `(ok, reason)`; `reason` is "" when ok.
+
+    A league row with no managers yet is a fresh season row — nothing to compare,
+    so anything is accepted. Otherwise the feed must (a) name the same season and
+    (b) still contain at least `min_overlap` of the managers we already know.
+    """
+    stored = {str(e) for e in stored_entry_ids if e is not None}
+    fetched = {str(e) for e in fetched_entry_ids if e is not None}
+
+    if not stored:
+        return True, ""  # fresh league row (first sync / new season)
+    if not fetched:
+        return False, "feed returned no league entries"
+
+    if (
+        stored_season_year is not None
+        and fetched_season_year is not None
+        and stored_season_year != fetched_season_year
+    ):
+        return False, (
+            f"feed is season {fetched_season_year}, stored league is "
+            f"{stored_season_year} (FPL reused league id for a new season)"
+        )
+
+    overlap = len(stored & fetched) / len(stored)
+    if overlap < min_overlap:
+        return False, (
+            f"only {len(stored & fetched)}/{len(stored)} known managers present "
+            f"in the feed ({overlap:.0%} < {min_overlap:.0%}) — this looks like a "
+            f"different league"
+        )
+    return True, ""
+
+
 # ---- League phase lifecycle ----
 # Macro phases stored on the league row. In-season sub-states (discovery /
 # post-trade-deadline / cup) are NOT separate macro values — they're the

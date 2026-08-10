@@ -575,9 +575,12 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
             db.add(PlayerPoolSnapshot(league_id=new_league.id, fpl_id=fid))
             snapped += 1
 
-    # 4. flip current + set preseason
+    # 4. flip current + set preseason. The outgoing season is frozen against the
+    # FPL feed for good: its league id is now free for FPL to hand to anyone.
     for lg in db.query(League):
         lg.is_current = (lg.id == new_league.id)
+    old_league.sync_locked = True
+    new_league.sync_locked = False
     import datetime as _dt
 
     new_league.phase = PHASE_PRESEASON
@@ -624,12 +627,20 @@ def advance_phase_if_due(db: Session, league: League, now=None) -> bool:
     if open_disc and not league.discovery_open:
         league.discovery_open = True
         changed = True
+    # The season is over: freeze the row against the FPL feed. FPL reuses league
+    # ids, so once 38 GWs are done this id can start resolving to someone else's
+    # league — syncing it would merge their teams into our finished season.
+    if new_macro == PHASE_OFFSEASON and not league.sync_locked:
+        league.sync_locked = True
+        changed = True
     if changed:
         league.phase_set_at = _dt.datetime.now(_dt.timezone.utc)
         record_audit(db, league, action="phase.auto",
                      summary=f"Auto-advanced phase to {league.phase}"
-                             + (" (discovery opened)" if open_disc else ""),
-                     details={"phase": league.phase, "discovery_open": bool(open_disc)})
+                             + (" (discovery opened)" if open_disc else "")
+                             + (" (season frozen)" if league.sync_locked else ""),
+                     details={"phase": league.phase, "discovery_open": bool(open_disc),
+                              "sync_locked": league.sync_locked})
         db.commit()
     return changed
 
@@ -3150,6 +3161,22 @@ def data_health(db: Session, league: League) -> list[dict]:
 
     mgrs = db.query(Manager).filter_by(league_id=league.id).all()
     add("10 managers", len(mgrs) == 10, f"{len(mgrs)} found")
+
+    # A sync that refused a feed writes nothing, so no other check would notice.
+    # Surface it here: silence is how a recycled league id went unseen for days.
+    from models import SyncLog
+
+    last = (
+        db.query(SyncLog)
+        .filter_by(kind="league")
+        .order_by(SyncLog.started_at.desc())
+        .first()
+    )
+    if last is not None and last.ok is False:
+        add("last league sync", False, last.notes or "failed")
+    elif league.sync_locked:
+        add("season frozen against FPL sync", True,
+            f"{league.season_year} is final; roll over to sync a new season")
 
     missing_person = [m.name for m in mgrs if not m.display_name]
     add("all managers have a person name", not missing_person,

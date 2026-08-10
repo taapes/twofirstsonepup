@@ -570,6 +570,7 @@ def admin_health(request: Request, db: Session = Depends(get_db)):
         "checks": services.data_health(db, league),
         "writes_locked": league.writes_locked,
         "keepers_locked": league.keepers_locked,
+        "sync_locked": league.sync_locked,
         "phase_ctx": services.phase_context(db, league),
         "phase_manual": league.phase_manual,
         "discovery_open": league.discovery_open,
@@ -678,13 +679,14 @@ def admin_season_advance(
 @router.post("/admin/lock")
 def admin_lock(
     request: Request, db: Session = Depends(get_db),
-    lock: str = Form(""), keepers_lock: str = Form(""),
+    lock: str = Form(""), keepers_lock: str = Form(""), sync_lock: str = Form(""),
 ):
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
     league = _league_or_404(db)
     league.writes_locked = lock == "on"
     league.keepers_locked = keepers_lock == "on"
+    league.sync_locked = sync_lock == "on"
     db.commit()
     return RedirectResponse("/admin/health", status_code=303)
 
