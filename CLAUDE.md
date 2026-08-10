@@ -293,6 +293,27 @@ parameterized by league id), carries identity (display_name + password_hash by
 entry_id) + keeper seeds (years−1) forward, snapshots the player pool, flips
 `is_current`, sets preseason.
 
+**FPL league ids are NOT stable across seasons — a finished season must be frozen.**
+FPL recycles the numeric league id, so once our season ends `/league/{id}/details`
+can start returning a *completely different league*. This actually happened (Aug
+2026: our 25/26 id `1754` became a Danish league, and three nightly syncs merged 12
+foreign managers + 228 foreign fixtures into our season and overwrote our league
+name / season year / GW calendar). Two guards, both in the sync path:
+1. **`leagues.sync_locked`** — set automatically when the season ends
+   (`advance_phase_if_due` on →offseason, and on the outgoing row in
+   `advance_season`), toggleable at `/admin/health`. Every sync sub-task resolves
+   its league through `sync._resolve_league`, which skips a frozen row before any
+   HTTP call. `/admin/sync` also skips `flag_ineligible`/`reconcile_absences`.
+2. **`rules.verify_league_feed`** (pure) — before writing to a league row that
+   already has managers, the feed must name the same `season_year` and still
+   contain ≥50% (`MIN_ENTRY_OVERLAP`) of the FPL `entry_id`s we know. Otherwise
+   sync writes nothing and raises `sync.LeagueIdentityError` → `/admin/sync` 409
+   (red cron) + a failed check on `/admin/health`. A league row with no managers
+   yet is a fresh season and accepts anything.
+Starting a new season therefore means a **rollover to the new league id**, never
+re-pointing at the old one. `scripts/cleanup_recycled_league.py` is the one-off
+repair for the 2026 incident (kept as the worked example).
+
 **Sync cadence** is fixture-aligned + code-gated: `/admin/sync` runs
 `services.sync_plan` (pure `rules.decide_sync`) → `full | live | skip` from
 {a full sync today?, a PL fixture live now?, a GW deadline today?}. The cron

@@ -1,7 +1,7 @@
 import asyncio
 import os
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -21,7 +21,7 @@ from audit import reset_actor, set_actor
 from auth import is_admin, is_logged_in, require_admin
 from db import get_db
 from settings import LEAGUE_ID
-from sync import sync_all
+from sync import LeagueIdentityError, sync_all
 from templating import templates
 from ui import router as ui_router
 
@@ -225,23 +225,30 @@ def admin_sync(force: bool = False):
             advanced = services.advance_phase_if_due(db, league)
             plan = "full" if force else services.sync_plan(db, league)
 
-    if plan == "full":
-        asyncio.run(sync_all())
-    elif plan == "live":
-        # only the GW-changing pulls while matches are live
-        async def _live():
-            await sync_rosters()
-            await sync_gameweek_points()
-            await sync_fixtures()
+    try:
+        if plan == "full":
+            asyncio.run(sync_all())
+        elif plan == "live":
+            # only the GW-changing pulls while matches are live
+            async def _live():
+                await sync_rosters()
+                await sync_gameweek_points()
+                await sync_fixtures()
 
-        asyncio.run(_live())
+            asyncio.run(_live())
+    except LeagueIdentityError as e:
+        # The feed stopped being our league (FPL reuses league ids between
+        # seasons). Nothing was written. 409 so the cron goes red rather than
+        # quietly importing a stranger's league for weeks.
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
     if plan in ("full", "live"):
         # rosters just refreshed: re-flag post-draft additions and auto-return any
-        # IL / international player the manager has re-added in FPL.
+        # IL / international player the manager has re-added in FPL. Skipped for a
+        # frozen season — its roster data is final and the player pool has moved on.
         with SessionLocal() as db:
             league = services.current_league(db)
-            if league:
+            if league and not league.sync_locked:
                 if plan == "full":
                     services.flag_ineligible(db, league)
                 services.reconcile_absences(db, league)
