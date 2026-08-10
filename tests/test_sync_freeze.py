@@ -80,6 +80,24 @@ def test_frozen_season_is_never_synced(task, frozen_league, no_network, clean_lo
         db.close()
 
 
+def test_player_pool_not_refreshed_when_every_season_is_frozen(
+    frozen_league, no_network, clean_logs
+):
+    """FPL reassigns element ids each season, and `players` is global and keyed on
+    fpl_id — so refreshing the pool with no live season rewrites every historical
+    roster's names in place. This is what put the wrong players on every team.
+    """
+    asyncio.run(sync.sync_players())  # raises if it hits the API
+
+    db = SessionLocal()
+    try:
+        log = db.query(SyncLog).order_by(SyncLog.started_at.desc()).first()
+        assert log.kind == "players" and log.ok is True
+        assert "frozen" in (log.notes or "")
+    finally:
+        db.close()
+
+
 def test_foreign_feed_aborts_before_writing(frozen_league, clean_logs, monkeypatch):
     """With the freeze lifted, the identity gate is the second line of defence."""
     db = SessionLocal()
