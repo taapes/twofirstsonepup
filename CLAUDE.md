@@ -346,6 +346,21 @@ Backfills: `scripts/backfill_player_code.py` (conservative; hard-stops rather th
 rostered/keeper player uncoded) and `scripts/capture_player_season.py`. 25/26 rich stats are
 permanently NULL — they were cleared after the incident and can't be recovered.
 
+**Point projections (external, not synced).** A draft is prepared while `players` is all
+zeros, so the Players tab also shows an outside analyst's projected totals beside last
+season's actuals. `player_projection` is keyed on `(season_year, player_id)` — **not
+`league_id`** (projections are needed before `advance_season` creates that season's league
+row) and **not `fpl_id`** (recycled ids would re-point every row at a different human).
+Points-per-million is derived on read, never stored. Read path:
+`services.projection_season_year` (the newest imported year — reading it off the data, not
+`league.season_year + 1`, which blanks the whole tab the moment `is_current` flips) →
+`projection_index` → `proj_*` keys on `player_portal`. **`proj_price` is already £m, unlike
+`players.price` (tenths) — don't divide it.** Import via `scripts/import_projections.py`
+(dry-run default, `--apply`, stdlib `zipfile` xlsx parse, no openpyxl); it reads cells by
+column LETTER because Excel omits empty cells, and lowercases before transliterating
+because NFKD has no decomposition for ø/ı. **Owner-only** — deliberately absent from the
+draft board search all managers see, with a test enforcing it.
+
 **Sync cadence** is fixture-aligned + code-gated: `/admin/sync` runs
 `services.sync_plan` (pure `rules.decide_sync`) → `full | live | skip` from
 {a full sync today?, a PL fixture live now?, a GW deadline today?}. The cron
