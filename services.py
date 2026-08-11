@@ -356,7 +356,7 @@ def set_lineup(
     if not allow_locked and lineup_locked(db, league, gw):
         raise RuleViolation(f"GW{gw_number} lineup is locked (deadline passed).")
 
-    squad = _squad_players(db, manager.id, gw.id)
+    squad = _squad_players(db, league, manager.id, gw.id)
     if len(squad) != ROSTER_SIZE:
         raise RuleViolation(
             f"Your GW{gw_number} squad has {len(squad)} players, expected "
@@ -413,7 +413,7 @@ def get_lineup_editor(
                 "gameweek": gw_number, "locked": True, "has_lineup": False,
                 "players": []}
 
-    squad = _squad_players(db, manager.id, gw.id)
+    squad = _squad_players(db, league, manager.id, gw.id)
     existing = get_lineup(db, league, fpl_manager_id, gw_number)
     role: dict = {}
     if existing:
@@ -1021,7 +1021,8 @@ def _engine_scoreboard(db: Session, league: League, gw_number: int | None) -> di
 def _engine_transactions(db: Session, league: League) -> list[dict]:
     """`get_transactions` shape, from the app-owned ledger (excludes the initial seed)."""
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    pnames = {p.id: p.name for p in db.query(Player)}
+    # V2RosterMove.player_id is a FK to players.id, so these keys line up.
+    pnames = {pid: ps.name for pid, ps in season_identity(db, league).items()}
     by_gw: dict = {}
     for mv in db.query(V2RosterMove).filter_by(league_id=league.id):
         if mv.source == "initial":
@@ -1104,7 +1105,13 @@ def compute_v2_scores(db: Session, league: League, gw_number: int | None = None)
     )
     if gw_number is not None:
         q = q.filter(Gameweek.number == gw_number)
-    pos_by_fpl = {p.fpl_id: p.position for p in db.query(Player)}
+    # fpl_id is nullable since the code rekey (a departed player holds no slot).
+    # NOTE: for a HISTORICAL season this must be rebuilt from
+    # PlayerSeason(league_id, fpl_id) — player_points holds that season's ids.
+    pos_by_fpl = {
+        p.fpl_id: p.position
+        for p in db.query(Player).filter(Player.fpl_id.isnot(None))
+    }
     lineups = _v2_lineups_by_key(db, league)
     written = 0
     for gp, _gw in q.all():
@@ -1134,7 +1141,13 @@ def v2_score_diff(db: Session, league: League) -> dict:
     winners against `matches.winner_id`. Returns summary counts + the mismatches."""
     import scoring
 
-    pos_by_fpl = {p.fpl_id: p.position for p in db.query(Player)}
+    # fpl_id is nullable since the code rekey (a departed player holds no slot).
+    # NOTE: for a HISTORICAL season this must be rebuilt from
+    # PlayerSeason(league_id, fpl_id) — player_points holds that season's ids.
+    pos_by_fpl = {
+        p.fpl_id: p.position
+        for p in db.query(Player).filter(Player.fpl_id.isnot(None))
+    }
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
     lineups = _v2_lineups_by_key(db, league)
     app_lineups_used = 0
