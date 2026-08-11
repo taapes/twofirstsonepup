@@ -53,11 +53,16 @@ def payouts(league_key: str, db: Session = Depends(get_db)):
 
 @router.get("/leagues/{league_key}/keepers")
 def keepers(league_key: str, db: Session = Depends(get_db)):
+    """Keeper ELIGIBILITY per manager. No viewer is passed on purpose: /v1 is exempt
+    from the login gate, so there is nobody to scope to — the `kept` flags come back
+    False until keeper selections are revealed (see rules.keepers_revealed)."""
     return services.get_keepers(db, _league(db, league_key))
 
 
 @router.get("/leagues/{league_key}/keeper-selections/{season_year}")
 def keeper_selections(league_key: str, season_year: int, db: Session = Depends(get_db)):
+    """Empty until keeper selections are revealed — this endpoint is unauthenticated
+    and returns exactly the thing that is private while they're still editable."""
     return services.get_keeper_selections(db, _league(db, league_key), season_year)
 
 
@@ -89,8 +94,17 @@ def players(
     db: Session = Depends(get_db),
 ):
     """Search the player pool by name/position; pass available_year to show only
-    players still draftable (not kept or already drafted that season)."""
+    players still draftable (not kept or already drafted that season).
+
+    Kept players are NOT filtered out until keeper selections are revealed, and that
+    is deliberate: this endpoint is unauthenticated, so filtering them would let
+    anyone enumerate the league's keepers by diffing with and without
+    available_year. Draft picks are public and still filtered."""
+    league = _league(db, league_key)
     return services.search_players(
-        db, _league(db, league_key), q=q, position=position,
-        available_year=available_year, limit=limit,
+        db, league, q=q, position=position, available_year=available_year,
+        # passed explicitly rather than left to the redacting default, so the filter
+        # comes BACK once selections are public instead of staying off forever
+        kept_all=services.keepers_revealed(league),
+        limit=limit,
     )

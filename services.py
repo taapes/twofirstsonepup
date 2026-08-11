@@ -55,6 +55,7 @@ from rules import (
     compute_payouts,
     current_tanking_streak,
     decide_sync,
+    keepers_revealed as _keepers_revealed_rule,
     next_phase,
     phase_features,
     h2h_standings,
@@ -345,7 +346,25 @@ def phase_context(db: Session, league: League) -> dict:
         "phase_manual": bool(league.phase_manual),
         "demo": is_demo(),
         **feats,
+        # Deliberately NOT one of `feats`: the demo blanket above rewrites those, and
+        # this flag must make the same demo decision as the service-layer redaction or
+        # the page and the data disagree. keepers_revealed owns that decision, alone.
+        "keepers_public": keepers_revealed(league),
     }
+
+
+def keepers_revealed(league: League) -> bool:
+    """Whether this league's keeper selections are public (see rules.keepers_revealed).
+
+    The demo check is not optional. `phase_context` forces every feature flag True in
+    demo, which makes `keepers_editable` True there — so the raw predicate would leave
+    keepers permanently HIDDEN on the demo site, the exact inverse of what demo is for.
+    """
+    from auth import is_demo
+
+    return is_demo() or _keepers_revealed_rule(
+        league.phase or PHASE_OFFSEASON, bool(league.keepers_locked)
+    )
 
 
 def set_phase(db: Session, league: League, macro: str, *, manual: bool = True) -> dict:
@@ -2548,7 +2567,8 @@ def keeper_overrides_context(db: Session, league: League) -> dict:
     """
     from rules import KEEPER_MAX_WAIVER
 
-    status = _derive_keeper_status(db, league)
+    # kept_all: the commissioner's own page, and the "kept" column is the point of it
+    status = _derive_keeper_status(db, league, kept_all=True)
     seeds = {
         (s.manager_id, s.player_id): s
         for s in db.query(KeeperSeed).filter_by(league_id=league.id)
@@ -2605,10 +2625,27 @@ def clear_keeper_override(
     db.commit()
 
 
-def _derive_keeper_status(db: Session, league: League) -> dict:
+def _derive_keeper_status(
+    db: Session,
+    league: League,
+    *,
+    kept_for: set | None = None,
+    kept_all: bool = False,
+) -> dict:
     """Core keeper derivation, shared by the report and selection validation.
     Returns {manager_id: {player_id: {player, position, acquisition,
-    keeper_years, eligible}}} for players on each manager's final-GW roster."""
+    keeper_years, eligible}}} for players on each manager's final-GW roster.
+
+    `kept` / `kept_discovery` are PRIVATE until keepers are revealed (see
+    rules.keepers_revealed), so they DEFAULT TO FALSE FOR EVERYONE. Callers opt in:
+    `kept_for` = the manager ids whose selections this viewer may see, `kept_all` =
+    show every manager's. Defaulting to hidden means a new caller leaks nothing by
+    forgetting to think about it — and no rule, cap or write path reads `kept`, so
+    the default is safe for every internal consumer.
+
+    The keys are always PRESENT (False when redacted), never omitted, so the /v1 JSON
+    shape doesn't change with league state.
+    """
     gw = latest_gameweek(db, league)
     if gw is None:
         return {}
@@ -2673,6 +2710,8 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
         (s.manager_id, s.player_id): s.is_discovery
         for s in db.query(KeeperSelection).filter_by(league_id=league.id, season_year=upcoming)
     }
+    if not kept_all:
+        kept = {k: v for k, v in kept.items() if k[0] in (kept_for or set())}
 
     def _dropped(mid, pid) -> bool:
         gws = presence[(mid, pid)]
@@ -2706,13 +2745,36 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
     return status
 
 
-def get_keepers(db: Session, league: League) -> list[dict]:
+def get_keepers(
+    db: Session,
+    league: League,
+    *,
+    viewer_fpl: str | None = None,
+    viewer_is_admin: bool = False,
+) -> list[dict]:
     """Per-manager keeper eligibility for the upcoming selection, derived from
     roster continuity (drops reset the clock; IL and trades are explained moves),
-    acquisition type, and Option-B seeds. Precomputed read; no FPL calls."""
-    status = _derive_keeper_status(db, league)
+    acquisition type, and Option-B seeds. Precomputed read; no FPL calls.
+
+    Eligibility (acquisition, years, eligible) is public. Which players a manager has
+    SUBMITTED is not, until keepers are revealed — pass the viewer so they see their
+    own. No viewer means no `kept` flags at all, which is what the unauthenticated
+    /v1 endpoint wants.
+    """
     managers = (
         db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
+    )
+    # str(): fpl_manager_id is a String column and the session value may not be. A
+    # mismatch here fails closed (you'd see none of your own), which is safe but reads
+    # like a bug, so coerce the same way auth.can_act_as does.
+    mine = {
+        m.id for m in managers
+        if viewer_fpl is not None and m.fpl_manager_id == str(viewer_fpl)
+    }
+    status = _derive_keeper_status(
+        db, league,
+        kept_for=mine,
+        kept_all=viewer_is_admin or keepers_revealed(league),
     )
     out = []
     for m in managers:
@@ -2802,13 +2864,24 @@ def submit_keepers(
     }
 
 
-def get_keeper_selections(db: Session, league: League, season_year: int) -> list[dict]:
+def get_keeper_selections(
+    db: Session,
+    league: League,
+    season_year: int,
+    *,
+    viewer_fpl: str | None = None,
+    viewer_is_admin: bool = False,
+) -> list[dict]:
     """Submitted keeper selections for a season, grouped by manager.
 
     Identity resolves via the SUBMITTING league (`league`), not `season_year`:
     selections name the season being kept FOR, whose league row doesn't exist yet
     at submission time. So this shows the player as they were when picked, which
-    is the only data available and the right context anyway.
+    is the only data available and the right context anyway. Reveal is judged on the
+    same league row, for the same reason.
+
+    Private until keepers are revealed: without a viewer this returns [], which is
+    what the unauthenticated /v1 endpoint should say while selections are still open.
     """
     rows = (
         db.query(KeeperSelection, Manager, PlayerSeason)
@@ -2819,8 +2892,12 @@ def get_keeper_selections(db: Session, league: League, season_year: int) -> list
                 PlayerSeason.league_id == league.id)
         .all()
     )
+    show_all = viewer_is_admin or keepers_revealed(league)
     by_manager: dict = {}
     for sel, m, p in rows:
+        mine = viewer_fpl is not None and m.fpl_manager_id == str(viewer_fpl)
+        if not (show_all or mine):
+            continue
         by_manager.setdefault(m.display, []).append(
             {"player": p.name, "position": p.position, "is_discovery": sel.is_discovery}
         )
@@ -3196,10 +3273,13 @@ def approve_queued_pick(
     )
     if not queued:
         raise RuleViolation(f"{owner.display} has no queued picks")
-    # exclude already-taken (kept/drafted) + ineligible players
+    # exclude already-taken (kept/drafted) + ineligible players.
+    # kept_all: this is a CORRECTNESS filter, not a disclosure — with the redacted
+    # default the queue would hand this manager another manager's keeper, and
+    # record_pick has no availability guard to catch it.
     available = search_players(
         db, league, available_year=season_year, draft_type=draft_type,
-        include_taken=False, limit=10_000,
+        include_taken=False, kept_all=True, limit=10_000,
     )
     available_ids = {r["fpl_id"] for r in available}
     for _q, p in queued:
@@ -3355,6 +3435,8 @@ def search_players(
     sort: str | None = None,
     include_taken: bool = False,
     draft_type: str = "main",
+    kept_for: set | None = None,
+    kept_all: bool = False,
     limit: int = 50,
 ) -> list[dict]:
     """Search the player pool. A name query searches ALL players (position is
@@ -3362,7 +3444,12 @@ def search_players(
     marks already-kept/drafted players: by default they're excluded, but with
     `include_taken` they're returned flagged (`taken` + `taken_by`) so a search can
     surface "already drafted" instead of empty results. `sort` = 'price', 'points',
-    or 'team' (else by name)."""
+    or 'team' (else by name).
+
+    `kept_for` / `kept_all` control whose keeper selections count as taken, since those
+    are private until revealed (see rules.keepers_revealed). Default: nobody's — so a
+    caller that forgets discloses nothing. `drafted:` labels are unaffected; draft
+    picks are public."""
     # Points come from the season stats_season() resolves to — last completed season
     # while drafting, the live one once it starts. NOT from a join: an inner join
     # would drop every player with no snapshot row (new to the PL, or never matched
@@ -3391,7 +3478,12 @@ def search_players(
         for pid, mid in db.query(KeeperSelection.player_id, KeeperSelection.manager_id).filter_by(
             league_id=league.id, season_year=available_year
         ):
-            taken[pid] = f"kept: {names.get(mid, '?')}"
+            # Not marked taken at all when hidden — an anonymous "kept" pill would
+            # still tell you the player is off the board, which is the half that
+            # matters. `kept_all` is also how the drafting engine asks for the truth:
+            # see approve_queued_pick, where this is a correctness filter.
+            if kept_all or (kept_for and mid in kept_for):
+                taken[pid] = f"kept: {names.get(mid, '?')}"
         for pid, mid in (
             db.query(DraftPick.player_id, DraftPick.manager_id)
             .filter_by(league_id=league.id, season_year=available_year, draft_type=draft_type)
@@ -3972,7 +4064,10 @@ def keeper_candidates(db: Session, league: League, fpl_manager_id: str) -> dict:
     """A manager's roster players with keeper eligibility (for the selection UI):
     fpl_id, name, position, acquisition, years_remaining, eligible."""
     manager = _resolve_manager(db, league, fpl_manager_id)
-    status = _derive_keeper_status(db, league).get(manager.id, {})
+    # This manager's own screen, so their own flags are truthful. Note this is NOT the
+    # access control for the route — `selected`/`is_discovery`/`discovery` below come
+    # from a separate query, so the route's can_act_as check is what protects them.
+    status = _derive_keeper_status(db, league, kept_for={manager.id}).get(manager.id, {})
     fpl_by_id = {p.id: p.fpl_id for p in db.query(Player)}
     # A player who has left the Premier League keeps their row but loses their
     # fpl_id (the slot goes back to FPL). The form submits by fpl_id, so without

@@ -138,7 +138,18 @@ Write tests for these. They are custom and non-obvious:
   `POST /admin/.../keepers`, `GET /v1/.../keeper-selections/{year}`,
   `keeper_selections` table) — enforces ≤5 keepers (+1 with a discovery keeper),
   ≤2 waiver-acquired (discovery excluded), all eligible; replaces the prior
-  submission for that season. *Phase 3 (TODO):* main draft (lottery-weighted R1,
+  submission for that season.
+  **Selections are PRIVATE until they lock** (`rules.keepers_revealed` = `keepers_locked`
+  or the phase has left offseason; `enter_draft_phase` sets both, so the draft reveals
+  them). Redacted in **services, not templates** — `/v1` is exempt from the login gate and
+  has no viewer, so `_derive_keeper_status`'s `kept_for`/`kept_all` and `get_keepers` /
+  `get_keeper_selections` / `search_players`' viewer args all **default to disclosing
+  nothing**; routes opt in via `ui._viewer`. Two things that look like the gate but aren't:
+  `keeper_candidates` builds `selected`/`discovery` from its own query, so `GET
+  /keepers/candidates` is protected only by its `can_act_as` check; and
+  `approve_queued_pick` passes `kept_all=True` as a **correctness** filter — without it the
+  autodraft hands out another manager's keeper, since `record_pick` has no availability
+  guard. The draft board's pick count (`15 − keepers`) still leaks the count, deliberately. *Phase 3 (TODO):* main draft (lottery-weighted R1,
   reverse-standings R2+) and discovery draft (snake, Sept), which also produces
   the discovery (6th) keeper that raises the cap.
 - **Waivers vs. free agency:** Waiver period = start of a GW until 24h before the

@@ -123,6 +123,28 @@ def phase_features(
     raise ValueError(f"unknown phase {macro!r}")
 
 
+def keepers_revealed(macro: str, keepers_locked: bool) -> bool:
+    """Are every manager's keeper selections public yet?
+
+    A selection is private to the manager who made it (and the commissioner) for
+    exactly as long as it can still be changed, and public the moment it can't —
+    otherwise you could read the league's picks and then choose your own.
+
+    Two things end the private window: the commissioner flipping
+    `leagues.keepers_locked` at the keeper deadline, or the phase leaving the
+    offseason. `services.enter_draft_phase` does both, so starting the draft reveals
+    them on its own.
+
+    Deliberately the negation of `keepers_editable` rather than a list of phases, so
+    reveal and editability cannot drift apart when a phase is added. The artifact of
+    that: keepers aren't editable IN SEASON either, so a commissioner who enters
+    someone's selection mid-season publishes it immediately. Accepted — enumerating
+    phases instead would re-hide last offseason's picks the moment the season starts,
+    which is worse.
+    """
+    return bool(keepers_locked) or not phase_features(macro)["keepers_editable"]
+
+
 def next_phase(
     macro: str,
     *,

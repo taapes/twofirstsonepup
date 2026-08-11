@@ -158,6 +158,16 @@ def _forbidden(request: Request, what: str = "You can only edit your own team.")
     return HTMLResponse(what, status_code=403)
 
 
+def _viewer(request: Request) -> dict:
+    """Who is looking, for services that redact per viewer (keeper selections are
+    private until they lock). One token to splat, so it's hard to forget on a route
+    and quietly fall back to showing nothing — or, worse, everything."""
+    return {
+        "viewer_fpl": current_manager_id(request),
+        "viewer_is_admin": is_admin(request),
+    }
+
+
 # ---- "who are you?" gate + per-manager login ----
 @router.get("/who", response_class=HTMLResponse)
 def who(request: Request, db: Session = Depends(get_db)):
@@ -301,7 +311,7 @@ def teams_page(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(
         "teams.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
-         "teams": services.get_keepers(db, league)},
+         "teams": services.get_keepers(db, league, **_viewer(request))},
     )
 
 
@@ -315,7 +325,11 @@ def team_page(fpl_manager_id: str, request: Request, db: Session = Depends(get_d
     )
     if not m:
         raise HTTPException(status_code=404, detail="team not found")
-    team = next((t for t in services.get_keepers(db, league) if t["manager"] == m.display), None)
+    team = next(
+        (t for t in services.get_keepers(db, league, **_viewer(request))
+         if t["manager"] == m.display),
+        None,
+    )
     return templates.TemplateResponse(
         "team.html",
         {"request": request, "league": league, "is_admin": is_admin(request), "team": team, "manager": m.display},
@@ -344,6 +358,13 @@ def keepers_page(request: Request, db: Session = Depends(get_db)):
 def keepers_candidates(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     fpl = request.query_params.get("fpl_manager_id")
+    # A manager's own selection screen — and the ONLY protection on it. The response
+    # carries their checked keepers and their off-roster discovery pick, neither of
+    # which comes through _derive_keeper_status, so the redaction there doesn't reach
+    # this route. Without the check any logged-in manager could read anyone's picks by
+    # editing the query string.
+    if fpl and not can_act_as(request, fpl):
+        return _forbidden(request, "You can only view your own keeper options.")
     cands = services.keeper_candidates(db, league, fpl) if fpl else None
     return templates.TemplateResponse(
         "_keeper_candidates.html", {"request": request, "candidates": cands}
@@ -1407,9 +1428,17 @@ def draft_search(
     league = _league_or_404(db)
     results = []
     if q.strip() or position or sort:
+        # Keeper selections are private until they lock, so "kept: X" would otherwise
+        # leak them here — this page is reachable in the offseason. Drafting can't
+        # happen before the reveal (draft_available is true only in PHASE_DRAFT, which
+        # forces keepers_editable false), so nobody can pick a hidden keeper.
+        me = _current_manager(request, db, league)
         results = services.search_players(
             db, league, q=q.strip() or None, position=position or None,
-            sort=sort or None, available_year=year, include_taken=True, limit=50,
+            sort=sort or None, available_year=year, include_taken=True,
+            kept_for={me.id} if me else None,
+            kept_all=is_admin(request) or services.keepers_revealed(league),
+            limit=50,
         )
     on_clock = services.next_open_pick(services.get_draft_board(db, league, year))
     can_pick = bool(on_clock) and can_act_as(request, on_clock.get("owner_fpl"))

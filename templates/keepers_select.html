@@ -9,6 +9,11 @@
 {% endif %}
 <p class="sub">Pick up to 5 keepers (6 with a discovery keeper); at most 2 waiver-acquired.
    Players with 0 years left can't be kept.</p>
+{% if phase and not phase.keepers_public %}
+<p class="sub">🔒 Your picks are <strong>private</strong> — only you and the commissioner can
+   see them, and you can't see anyone else's. They become visible to the whole league when
+   keepers lock (automatically, when the draft starts).</p>
+{% endif %}
 <form method="post" action="/keepers" class="card" style="padding:12px;max-width:560px">
   {% if is_admin %}
   <label>Manager

@@ -4,6 +4,11 @@
 <h1>Teams — Rosters &amp; Keeper Years</h1>
 <p class="sub">Current 15-man rosters. "N left" = years a player can still be kept after this season;
    <span class="pill warn">max</span> = at the 4-year limit (must be drafted).</p>
+{% if phase and not phase.keepers_public %}
+<p class="sub">🔒 <strong>Keeper picks are private</strong> while selection is still open — you
+   can see your own here, nobody else's. Everyone's become visible once the commissioner
+   locks keepers, which happens automatically when the draft starts.</p>
+{% endif %}
 <div class="teamgrid">
   {% for t in teams %}{% include "_roster_card.html" %}{% endfor %}
 </div>
