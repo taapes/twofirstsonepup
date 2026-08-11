@@ -2354,28 +2354,38 @@ def get_payouts(db: Session, league: League, other_fines: float = 0.0) -> dict:
     """Season-end payouts + overall winnings from final standings + cup results
     (precomputed read).
 
-    Resolves recipient slots (league 1/2/3 + last from standings; cup 1/2/3 and
+    Resolves recipient slots (league 1/2/3 + last from the ADJUSTED standings —
+    `get_standings`, with `standing_adjustments` applied and re-ranked; cup 1/2/3 and
     pup champion from the brackets) and applies the configured payout structure.
     Pulls per-manager fines from the fines table (winner collects the pool); each
     manager's `net` is their payout minus the buy-in (overall winnings). Every
     manager is listed (those with no payout show net = -entry_fee - fines).
     """
-    by_rank = sorted(
-        db.query(Standing, Manager)
-        .join(Manager, Manager.id == Standing.manager_id)
-        .filter(Standing.league_id == league.id)
-        .all(),
-        key=lambda sm: sm[0].rank if sm[0].rank is not None else 999,
-    )
+    # The four position slots follow the ADJUSTED standings, not the raw synced
+    # `Standing.rank`. A commissioner deduction changes where a team finished, and
+    # 1st/2nd/3rd/last are a consequence of where they finished — sorting the synced
+    # rank meant the winnings table and the standings table on the SAME page could
+    # name different people. Reuses get_standings, as _reverse_standings_managers does
+    # for the draft order, so there is one definition of "the standings" and the
+    # tie-breaks can't drift apart.
+    by_fpl = {m.fpl_manager_id: m for m in db.query(Manager).filter_by(league_id=league.id)}
+    # Best first, adjusted. A manager with no Standing row is absent from get_standings,
+    # so they can neither win a slot nor be fined for last — they still count toward the
+    # pot and owe their buy-in, exactly as the old join-based query left them.
+    ranked = [
+        by_fpl[row["fpl"]]
+        for row in get_standings(db, league)
+        if row.get("fpl") in by_fpl
+    ]
     recipients: dict = {}
-    if len(by_rank) >= 1:
-        recipients["league_1"] = by_rank[0][1].id
-    if len(by_rank) >= 2:
-        recipients["league_2"] = by_rank[1][1].id
-    if len(by_rank) >= 3:
-        recipients["league_3"] = by_rank[2][1].id
-    if by_rank:
-        recipients["last_place"] = by_rank[-1][1].id
+    if len(ranked) >= 1:
+        recipients["league_1"] = ranked[0].id
+    if len(ranked) >= 2:
+        recipients["league_2"] = ranked[1].id
+    if len(ranked) >= 3:
+        recipients["league_3"] = ranked[2].id
+    if ranked:
+        recipients["last_place"] = ranked[-1].id
 
     cups_pending = False  # a bracket exists but its decisive match isn't scored yet
     cup = _get_tournament(db, league, "Cup")

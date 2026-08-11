@@ -36,7 +36,9 @@ before any non-trivial work.
 - New migration: `alembic revision --autogenerate -m "<message>"`
 - Apply migrations: `alembic upgrade head`
 - Dev deps (tests + local proxy workaround): `uv pip install -r requirements-dev.txt`
-- Tests: `pytest` (rules engine unit tests in `tests/`)
+- Tests: `pytest`. Pure rule tests run anywhere; anything touching the DB needs
+  `TEST_DATABASE_URL` (local Postgres recipe in `tests/conftest.py`) and **silently skips
+  without it** — confirm a run says `passed`, not `skipped`, before trusting it.
 - Env vars: Neon DB URL + sync secret live in env (Render dashboard / local `.env`, never committed)
 
 ## Architecture: Pull -> Normalize -> Store -> Serve
@@ -194,7 +196,10 @@ Write tests for these. They are custom and non-obvious:
   `standing_adjustments` applied and re-ranked) — a post-season deduction changes where
   a team finished, so it changes the order. `_reverse_standings_managers` used to sort
   the raw synced `Standing.rank`, which made the standings page and the draft board
-  disagree. (`get_payouts` still sorts raw rank — same latent bug, not yet fixed.)
+  disagree. `get_payouts` had the same bug and now resolves league 1st/2nd/3rd and the
+  last-place fine through `get_standings` too. **Three readers of the finishing order —
+  the standings page, the draft order and the money — all go through `get_standings`;
+  never sort `Standing.rank` directly.**
   **Order overrides** (`draft_order_override`): the commissioner can replace the derived
   order for rounds 2+ — `round IS NULL` is the base for every round from 2 on, a row with
   a round beats it for that round, and editing one position within a round is how a single
@@ -232,6 +237,14 @@ Write tests for these. They are custom and non-obvious:
   (team-sale clause, ad-hoc) are an admin ledger (`side_payouts`, on `/admin/standings`).
   Both fold into overall winnings via `compute_payouts`' `extra`. Each manager's `net`
   = payout − buy-in (overall winnings). `services.get_payouts`.
+  The four position slots (league 1/2/3, last place) come from the **adjusted** standings,
+  so a commissioner deduction moves the money — and because 1st also collects the fines
+  pool, a change at the top moves more than its 40%. An exact (total, points_for) tie breaks
+  alphabetically by display name, the same rule as the standings page and the draft order;
+  a manager with no `Standing` row counts toward the pot and owes the buy-in but can neither
+  win a slot nor be fined for last. Cup seeding is deliberately *not* on this path —
+  `seed_managers` recomputes H2H from `Match` rows through GW27, so a later deduction can't
+  retroactively reseed a bracket.
 - **Scoreboard:** `GET /scoreboard` (`services.get_scoreboard`) — current-GW H2H live
   scores; 'Scores' nav link in-season.
 - **Waiver window:** `services.waiver_window` surfaces waivers-vs-free-agency on
