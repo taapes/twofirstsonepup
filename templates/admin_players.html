@@ -1,13 +1,53 @@
 {% extends "base.html" %}
 {% block title %}Player Data{% endblock %}
+{% block head %}
+<style>
+  /* 29 columns don't fit the site's 1100px reading column; this page alone gets the
+     window. Scoped here by the head block, so no other page widens. */
+  .wrap { max-width:1600px; }
+  table.stats th, table.stats td { white-space:nowrap; }
+  /* Both header rows stay put while you scroll ~1000 rows, so a lone "G" always has
+     its group label above it. 33px is the group row's height (8px padding x2 + line).
+     This only works because the wrapper below is overflow:auto with a max-height —
+     .card's overflow:hidden + overflow-x:auto would make a box that never scrolls
+     vertically, and sticky would pin to something moving with the page. */
+  table.stats thead th { position:sticky; background:var(--card); z-index:2; }
+  table.stats thead tr:first-child th { top:0; font-size:.68rem; }
+  table.stats thead tr:last-child th { top:33px; }
+  /* Freeze the name: with the projected group off-screen right, you otherwise can't
+     tell whose row you're reading over there. */
+  table.stats th:first-child, table.stats td:first-child {
+    position:sticky; left:0; background:var(--card); border-right:1px solid var(--line);
+  }
+  table.stats thead th:first-child { z-index:3; }   /* the corner cell */
+  table.stats .gsep { border-left:2px solid var(--line); }
+  table.stats td.proj { background:rgba(55,214,122,.05); }
+  table.stats thead .proj { color:var(--accent); }
+</style>
+{% endblock %}
 {% block content %}
+{% macro pnum(v, dp=1, cls="") %}<td class="num proj {{ cls }}">{{ "%.*f"|format(dp, v) if v is not none else "—" }}</td>{% endmacro %}
 <h1>Player Data <span class="tag">commissioner</span></h1>
 <p class="sub">Every player, with <strong>{{ stats_season_label }}</strong> season
-  statistics. Click a column header to sort; use the filters to narrow (ownership, IL,
-  keeper acquisition/eligibility, position). <span id="pcount"></span></p>
+  statistics{% if projection_season_label %} and <strong>{{ projection_season_label }}</strong>
+  projections{% endif %}. Click a column header to sort; use the filters to narrow
+  (ownership, IL, keeper acquisition/eligibility, position{% if projection_season_label %},
+  projection{% endif %}). <span id="pcount"></span></p>
 <p class="sub">Stats are the last completed season's totals, so they stay useful for
   drafting while the new season is still scoreless. Blank means the player wasn't in the
   Premier League that season.</p>
+{% if projection_season_label %}
+<p class="sub">The <strong>{{ projection_season_label }} projected</strong> columns are an
+  outside forecast, not FPL data. They were imported once from a spreadsheet and are never
+  synced or recomputed — they won't move when the player pool refreshes, and they won't
+  react to a transfer, a price change or an injury. Their £m is that model's expected
+  {{ projection_season_label }} price, not the live pool price two columns to the left,
+  and <strong>Val</strong> is simply projected points ÷ that price, computed on read.
+  {{ projection_count }} of the {{ pool.live }} players in the current pool have a
+  projection; everyone else — including every player who has left the Premier League —
+  shows “—”. These columns exist only on this page; the draft board the rest of the
+  league sees is unchanged.</p>
+{% endif %}
 <p class="sub">Player pool last pulled
   {% if pool.synced_at %}<strong>{{ pool.synced_at.strftime('%Y-%m-%d %H:%M') }} UTC</strong>{% else %}<strong>never</strong>{% endif %}
   — {{ pool.live }} players currently in the Premier League,
@@ -24,22 +64,55 @@
   <label>Keeper<br><select id="f-elig"><option value="">All</option><option value="1">Eligible</option><option value="0">Maxed</option></select></label>
   <label>Acquired<br><select id="f-acq"><option value="">All</option><option>draft</option><option>trade</option><option>waiver</option></select></label>
   <label>Eligibility<br><select id="f-inelig"><option value="">All</option><option value="0">Eligible only</option><option value="1">Ineligible only</option></select></label>
+  {% if projection_season_label %}
+  <label>Projection<br><select id="f-proj"><option value="">All</option>
+    <option value="1">Has {{ projection_season_label }}</option>
+    <option value="0">Missing</option></select></label>
+  <label>Min proj pts<br><input id="f-minpts" type="number" min="0" step="10" style="width:90px"></label>
+  {% endif %}
 </div>
 
-<div class="card" style="overflow-x:auto;margin-top:10px">
+<div class="card" style="overflow:auto;max-height:78vh;margin-top:10px">
   <table class="stats" id="ptable">
-    <thead><tr>
-      {% set cols = [
-        ("name","Player","t"),("position","Pos","t"),("team","Team","t"),("status","Avail","t"),
-        ("price","£m","n"),("total_points","Pts","n"),
-        ("points_per_game","PPG","n"),("goals_scored","G","n"),
-        ("assists","A","n"),("clean_sheets","CS","n"),("bonus","Bon","n"),("minutes","Min","n"),
-        ("ict_index","ICT","n"),
+    {# Both header rows are built from ONE list, with colspan derived from the cells
+       beneath it — so a group label can never drift out of step with its columns. #}
+    {% set groups = [
+      ("", "", [
+        ("name","Player","t"),("position","Pos","t"),("team","Team","t"),
+        ("status","Avail","t"),("price","£m","n")
+      ]),
+      ("act", stats_season_label ~ " ACTUAL", [
+        ("total_points","Pts","n"),("points_per_game","PPG","n"),("goals_scored","G","n"),
+        ("assists","A","n"),("clean_sheets","CS","n"),("bonus","Bon","n"),
+        ("minutes","Min","n"),("ict_index","ICT","n")
+      ]),
+    ] + ([
+      ("proj", projection_season_label ~ " PROJECTED", [
+        ("proj_price","£m","n"),("proj_points","Pts","n"),("proj_value","Val","n"),
+        ("proj_minutes","Min","n"),("proj_goals","G","n"),("proj_assists","A","n"),
+        ("proj_clean_sheets","CS","n"),("proj_bonus","Bon","n"),
+        ("proj_defensive_contributions","DC","n"),("proj_yellow_cards","YC","n")
+      ]),
+    ] if projection_season_label else []) + [
+      ("lg", "LEAGUE", [
         ("owner","Owner","t"),("acquisition","Acq","t"),("keeper_years","Yrs","n"),
         ("keeper_eligible","Keep?","t"),("on_il","IL","t"),("ineligible","Inelig","t")
-      ] %}
-      {% for key, label, kind in cols %}<th data-sort="{{ kind }}" style="cursor:pointer">{{ label }} <span class="sub">↕</span></th>{% endfor %}
-    </tr></thead>
+      ])
+    ] %}
+    <thead>
+      {# Decorative only: no data-sort, never iterated by the sort JS. #}
+      <tr class="grouphead">
+        {% for cls, glabel, cells in groups %}
+        <th colspan="{{ cells|length }}" class="{{ cls }}{{ ' gsep' if not loop.first }}">{{ glabel }}</th>
+        {% endfor %}
+      </tr>
+      {# id="phead" is load-bearing: the sort JS binds here, one cell per column. #}
+      <tr id="phead">
+        {% for cls, glabel, cells in groups %}{% set gfirst = loop.first %}{% for key, label, kind in cells %}
+        <th data-sort="{{ kind }}" class="{{ cls }}{{ ' gsep' if loop.first and not gfirst }}" style="cursor:pointer">{{ label }} <span class="sub">↕</span></th>
+        {% endfor %}{% endfor %}
+      </tr>
+    </thead>
     <tbody>
       {% for p in players %}
       <tr
@@ -50,13 +123,15 @@
         data-acq="{{ p.acquisition or '' }}"
         data-inelig="{{ 1 if p.ineligible else 0 }}"
         data-team="{{ p.team or '' }}"
+        data-proj="{{ 1 if p.proj_points is not none else 0 }}"
+        data-ppts="{{ p.proj_points if p.proj_points is not none else '' }}"
         data-search="{{ (p.name ~ ' ' ~ (p.team or '') ~ ' ' ~ (p.owner or ''))|lower }}">
         <td>{{ p.name }}</td>
         <td class="sub">{{ p.position or "—" }}</td>
         <td class="sub">{{ p.team or "—" }}</td>
         <td class="sub">{{ p.status or "a" }}{% if p.news %} <span title="{{ p.news }}">⚠</span>{% endif %}</td>
         <td class="num">{{ "%.1f"|format(p.price) if p.price is not none else "—" }}</td>
-        <td class="num">{{ p.total_points if p.total_points is not none else "—" }}</td>
+        <td class="num gsep">{{ p.total_points if p.total_points is not none else "—" }}</td>
         <td class="num">{{ p.points_per_game if p.points_per_game is not none else "—" }}</td>
         <td class="num">{{ p.goals_scored if p.goals_scored is not none else "—" }}</td>
         <td class="num">{{ p.assists if p.assists is not none else "—" }}</td>
@@ -64,7 +139,19 @@
         <td class="num">{{ p.bonus if p.bonus is not none else "—" }}</td>
         <td class="num">{{ p.minutes if p.minutes is not none else "—" }}</td>
         <td class="num">{{ p.ict_index if p.ict_index is not none else "—" }}</td>
-        <td class="sub">{{ p.owner or "—" }}</td>
+        {% if projection_season_label %}
+        {{ pnum(p.proj_price, 1, "gsep") }}
+        {{ pnum(p.proj_points) }}
+        {{ pnum(p.proj_value) }}
+        {{ pnum(p.proj_minutes, 0) }}
+        {{ pnum(p.proj_goals) }}
+        {{ pnum(p.proj_assists) }}
+        {{ pnum(p.proj_clean_sheets) }}
+        {{ pnum(p.proj_bonus) }}
+        {{ pnum(p.proj_defensive_contributions) }}
+        {{ pnum(p.proj_yellow_cards) }}
+        {% endif %}
+        <td class="sub gsep">{{ p.owner or "—" }}</td>
         <td class="sub">{{ p.acquisition or "—" }}</td>
         <td class="num">{{ p.keeper_years if p.keeper_years is not none else "—" }}</td>
         <td>{% if p.keeper_eligible is none %}—{% elif p.keeper_eligible %}<span class="pill ok">yes</span>{% else %}<span class="pill warn">maxed</span>{% endif %}</td>
@@ -76,17 +163,21 @@
   </table>
 </div>
 
-<style> table.stats th, table.stats td { white-space:nowrap; } </style>
 <script>
   (function(){
     var table = document.getElementById('ptable');
     var tbody = table.tBodies[0];
     var rows = Array.prototype.slice.call(tbody.rows);
-    var ctrls = ['f-q','f-pos','f-team','f-own','f-il','f-elig','f-acq','f-inelig'].map(function(id){return document.getElementById(id);});
-    function val(id){ return document.getElementById(id).value; }
+    // The projection controls only exist after an import, so tolerate nulls — a bare
+    // addEventListener on a missing element would throw and kill EVERY filter.
+    var ctrls = ['f-q','f-pos','f-team','f-own','f-il','f-elig','f-acq','f-inelig','f-proj','f-minpts']
+      .map(function(id){ return document.getElementById(id); })
+      .filter(Boolean);
+    function val(id){ var el = document.getElementById(id); return el ? el.value : ''; }
     function applyFilters(){
       var q = val('f-q').toLowerCase().trim(), pos = val('f-pos'), team = val('f-team'), own = val('f-own'),
-          il = val('f-il'), elig = val('f-elig'), acq = val('f-acq'), inelig = val('f-inelig');
+          il = val('f-il'), elig = val('f-elig'), acq = val('f-acq'), inelig = val('f-inelig'),
+          proj = val('f-proj'), minpts = parseFloat(val('f-minpts'));
       var shown = 0;
       rows.forEach(function(r){
         var ok = true;
@@ -99,6 +190,10 @@
         if (elig && r.dataset.elig !== elig) ok = false;
         if (acq && r.dataset.acq !== acq) ok = false;
         if (inelig && r.dataset.inelig !== inelig) ok = false;
+        if (proj && r.dataset.proj !== proj) ok = false;
+        // !(x >= min) rather than x < min: a blank projection parses to NaN, and NaN
+        // fails every comparison, so "no projection" correctly fails a minimum.
+        if (!isNaN(minpts) && !(parseFloat(r.dataset.ppts) >= minpts)) ok = false;
         r.style.display = ok ? '' : 'none';
         if (ok) shown++;
       });
@@ -107,7 +202,10 @@
     ctrls.forEach(function(c){ c.addEventListener('input', applyFilters); });
 
     var dir = {};
-    Array.prototype.forEach.call(table.tHead.rows[0].cells, function(th, i){
+    // Bind to the LABEL row by id, never tHead.rows[0]: rows[0] is the decorative
+    // group row, whose colspan cells don't line up with the <td>s. #phead has exactly
+    // one cell per column, so the loop index IS the column index.
+    Array.prototype.forEach.call(document.getElementById('phead').cells, function(th, i){
       th.addEventListener('click', function(){
         var numeric = th.dataset.sort === 'n';
         dir[i] = !dir[i];
@@ -121,7 +219,11 @@
           }
           return dir[i] ? x.localeCompare(y) : y.localeCompare(x);
         });
-        vis.forEach(function(r){ tbody.appendChild(r); });
+        // One append instead of ~1000 individual moves — each move now reflows 29
+        // cells rather than 19, which is enough to be visible.
+        var frag = document.createDocumentFragment();
+        vis.forEach(function(r){ frag.appendChild(r); });
+        tbody.appendChild(frag);
       });
     });
     applyFilters();

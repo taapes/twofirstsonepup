@@ -996,6 +996,67 @@ class PlayerIneligibility(Base):
     )
 
 
+class PlayerProjection(Base):
+    """An outside analyst's projected season totals for a player.
+
+    League-custom truth: nothing here comes from the FPL API, and sync never touches
+    it. It exists because a draft is prepared in the offseason, when `players` holds
+    nothing but zeros — see stats_season — so the only numbers worth ranking on are
+    expected ones.
+
+    Scoped by (season_year, player_id). Three deliberate choices:
+
+      - NOT league_id. Projections are needed BEFORE advance_season creates that
+        season's league row; today `leagues` has only the 25/26 row. A season is the
+        natural scope anyway, so this table survives a rollover untouched.
+      - NOT fpl_id. FPL reassigns element ids every season, so an fpl_id key would
+        silently re-point every projection at a different human at rollover — the
+        incident class documented in CLAUDE.md.
+      - No `value` column. Points per million is DERIVED on read from points + price,
+        so it can never drift from the two numbers either side of it.
+
+    raw_name/raw_team/raw_position keep the sheet's identity verbatim ('BRI', 'GK').
+    current_team is part of the import's match key and sync rewrites it on deadline
+    day, so without these a later re-import failure can't be diagnosed.
+    """
+
+    __tablename__ = "player_projection"
+    __table_args__ = (
+        UniqueConstraint(
+            "season_year", "player_id", name="uq_player_projection_season_player"
+        ),
+        Index("ix_player_projection_season", "season_year"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    season_year: Mapped[int] = mapped_column(Integer)  # 2026 == the 26/27 season
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), index=True
+    )
+    raw_name: Mapped[str] = mapped_column(String)
+    raw_team: Mapped[str | None] = mapped_column(String, nullable=True)
+    raw_position: Mapped[str | None] = mapped_column(String, nullable=True)
+    # The SOURCE's price, in £m as the sheet writes it (15.5) — NOT tenths like
+    # players.price. Kept separate because the sheet disagrees with the live pool for
+    # some players, and points/price must stay consistent with what was modelled.
+    price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Projected totals. Float for all of them, minutes included: these are expected
+    # values, not counts (a projection reads G=27.5).
+    minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    goals_scored: Mapped[float | None] = mapped_column(Float, nullable=True)
+    assists: Mapped[float | None] = mapped_column(Float, nullable=True)
+    clean_sheets: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bonus: Mapped[float | None] = mapped_column(Float, nullable=True)
+    defensive_contributions: Mapped[float | None] = mapped_column(Float, nullable=True)
+    yellow_cards: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The headline number and the reason the table exists. Everything else is
+    # nullable because another source may not publish every component.
+    points: Mapped[float] = mapped_column(Float)
+    imported_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class SyncLog(Base):
     """Audit trail for /admin/sync runs. Not FPL-canonical and not league-custom
     truth — operational metadata so we can see when a sync ran and whether it

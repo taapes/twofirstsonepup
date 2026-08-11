@@ -1008,12 +1008,18 @@ def admin_players(request: Request, db: Session = Depends(get_db)):
             return _forbidden(request, "This page is restricted to the league owner.")
         return RedirectResponse("/login?next=/admin/players", status_code=303)
     league = _league_or_404(db)
+    players = services.player_portal(db, league)
+    proj_year = services.projection_season_year(db)
     return templates.TemplateResponse("admin_players.html", {
         "request": request, "league": league, "is_admin": is_admin(request),
         "is_owner": True,
-        "players": services.player_portal(db, league),
+        "players": players,
         # name the season the stats belong to, so it's never ambiguous on screen
         "stats_season_label": services.season_label(services.stats_season(db, league)),
+        # None until the first projection import; the template hides the whole group
+        # on this one flag rather than rendering ten em-dash columns for every player
+        "projection_season_label": services.year_label(proj_year) if proj_year else None,
+        "projection_count": sum(1 for p in players if p["proj_points"] is not None),
         "pool": services.player_pool_freshness(db),
     })
 

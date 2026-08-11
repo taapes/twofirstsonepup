@@ -26,6 +26,7 @@ from models import (
     Match,
     Standing,
     Player,
+    PlayerProjection,
     PlayerSeason,
     Roster,
     Tournament,
@@ -1340,10 +1341,45 @@ def stats_season(db: Session, league: League) -> League:
     return completed or league
 
 
+def projection_season_year(db: Session) -> int | None:
+    """The season our imported projections describe — the newest one we hold.
+
+    Read off the data on purpose, the same way stats_season reads the stats season off
+    the data rather than off a flag. `league.season_year + 1` is correct only in the
+    window between GW38 and the rollover: the moment advance_season flips is_current to
+    the new row, +1 becomes the season AFTER it, every projected column silently blanks
+    for a whole year, and nothing errors. Taking the max shows 26/27 projections all
+    through 26/27 and switches by itself the day next summer's file is imported.
+
+    None before the first import — that is how the page knows to hide the whole column
+    group rather than render ten columns of em-dashes for every player.
+    """
+    return db.query(func.max(PlayerProjection.season_year)).scalar()
+
+
+def projection_index(db: Session, season_year: int) -> dict:
+    """player_id -> PlayerProjection for a season, in one query.
+
+    Keyed on PlayerProjection.player_id — a players.id — NOT the projection row's own
+    .id, which would compare False against every roster/keeper FK (the PlayerSeason
+    gotcha in CLAUDE.md, one table over).
+    """
+    return {
+        r.player_id: r
+        for r in db.query(PlayerProjection).filter_by(season_year=season_year)
+    }
+
+
+def year_label(year: int | None) -> str:
+    """A season year as the league writes it: 2026 -> '26/27'. Takes a bare int
+    because the projected season has no league row until the rollover runs."""
+    y = year or 0
+    return f"{y % 100:02d}/{(y + 1) % 100:02d}"
+
+
 def season_label(league: League) -> str:
     """A season as the league writes it: 2025 -> '25/26'."""
-    y = league.season_year or 0
-    return f"{y % 100:02d}/{(y + 1) % 100:02d}"
+    return year_label(league.season_year)
 
 
 def _il_to_dict(entry: InjuryList, injured: Player, replacement: Player | None) -> dict:
@@ -1577,8 +1613,10 @@ def player_pool_freshness(db: Session) -> dict:
 def player_portal(db: Session, league: League) -> list[dict]:
     """Every player with league context (owner, on-IL, ineligible, keeper
     acquisition/years/eligibility) for the admin data portal, plus that player's
-    statistics from the most recent COMPLETED season (see stats_season). One row per
-    player; stat fields are None for anyone absent that season."""
+    statistics from the most recent COMPLETED season (see stats_season) and, in the
+    `proj_*` keys, an imported outside forecast for the projected season (see
+    projection_season_year). One row per player; stat and projection fields are None
+    for anyone the respective season didn't cover."""
     gw = latest_gameweek(db, league)
     owner_by_pid: dict = {}
     if gw:
@@ -1599,17 +1637,33 @@ def player_portal(db: Session, league: League) -> list[dict]:
         except (TypeError, ValueError):
             return None
 
+    def _value(points, price):
+        """Projected points per £m. Derived on read, never stored, so it cannot drift
+        from the two numbers either side of it. `not price` catches 0.0 as well as
+        None, so a priceless row renders blank rather than raising."""
+        if points is None or not price:
+            return None
+        return points / price
+
     # Identity + league context come from the live pool; STATISTICS come from the
     # most recent completed season's snapshot. `players` only ever holds the current
     # season, which during a draft is all zeros.
     stats_lg = stats_season(db, league)
     stats = season_identity(db, stats_lg)
 
+    # Projections are an outside forecast on their own table, joined in memory by
+    # players.id like the stats above. Left-join semantics matter: the historical
+    # players in this list will never have one, and a few live ones are missing from
+    # the file. They stay in the list, blank.
+    proj_year = projection_season_year(db)
+    proj = projection_index(db, proj_year) if proj_year else {}
+
     rows = []
     for p in db.query(Player).order_by(Player.name):
         owner_mid = owner_by_pid.get(p.id)
         ks = kstatus.get(owner_mid, {}).get(p.id) if owner_mid else None
         s = stats.get(p.id)  # None for players absent that season
+        pr = proj.get(p.id)  # None for anyone the projection file didn't cover
         rows.append({
             "fpl_id": p.fpl_id, "name": p.name, "position": p.position,
             "team": p.current_team, "status": p.status, "news": p.news,
@@ -1622,6 +1676,19 @@ def player_portal(db: Session, league: League) -> list[dict]:
             "bonus": s.bonus if s else None,
             "minutes": s.minutes if s else None,
             "ict_index": _f(s.ict_index) if s else None,
+            # Keys mirror the projection model's field names, so there is no
+            # translation layer to keep in step; proj_value is the only derived one.
+            # proj_price is already £m — do NOT divide it by 10 like Player.price.
+            "proj_price": pr.price if pr else None,
+            "proj_points": pr.points if pr else None,
+            "proj_value": _value(pr.points, pr.price) if pr else None,
+            "proj_minutes": pr.minutes if pr else None,
+            "proj_goals": pr.goals_scored if pr else None,
+            "proj_assists": pr.assists if pr else None,
+            "proj_clean_sheets": pr.clean_sheets if pr else None,
+            "proj_bonus": pr.bonus if pr else None,
+            "proj_defensive_contributions": pr.defensive_contributions if pr else None,
+            "proj_yellow_cards": pr.yellow_cards if pr else None,
             "owner": names.get(owner_mid), "rostered": owner_mid is not None,
             "on_il": p.id in il_pids, "ineligible": p.fpl_id in inelig,
             "acquisition": ks["acquisition"] if ks else None,
