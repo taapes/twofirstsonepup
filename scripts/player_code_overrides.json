@@ -1,0 +1,19 @@
+{
+  "_comment": "players.id -> FPL permanent code, for rows the (web_name, position) key could not match on its own. A null value means REVIEWED AND DELIBERATELY LEFT WITHOUT A CODE: it clears the hard stop for that row without weakening the gate for rows nobody has looked at.",
+
+  "_reclassified": "Same web_name, same club, different element_type — FPL moved them between seasons. Overwhelming evidence of the same human, so assigned.",
+  "d187b3dc-1172-44c7-a201-32611ffb2d52": 467779,
+  "523f9dc3-215a-4abd-8597-2ac53e256f4f": 463067,
+  "bd197ed6-1fe1-44f7-80bc-083c801f9339": 596777,
+  "d238fd44-442b-4e2d-9b1f-6284f1dbfd08": 560262,
+  "9b71f3d3-9db4-4e57-89b9-62200afbfac1": 438234,
+  "6c41c4d2-eb23-4a59-a58a-ed8ae3cb9eba": 499169,
+  "76145a9d-281b-4a0c-9a00-b93df731c615": 184349,
+  "9418b3b3-e61b-4289-aa2b-dae8ae822da6": 249231,
+
+  "_duplicate_code": "Two rows named Wilson both matched code 75115 and the feed has Wilson at BRE, so no club tiebreak was possible. The WHU row is the one rostered for 26 gameweeks; the TOT row has no league assets at all.",
+  "3e494002-d21d-4bdf-ba93-550af4e0dd3c": 75115,
+
+  "_reviewed_no_code": "Anderson: our row is DEF/SUN, the only feed candidate is MID/MCI — a different club AND a different position, so this may well be a different person. Rostered for a single gameweek. Guessing would write another human's permanent id onto a row 12 FK columns point at; if it IS the same player, sync creates a duplicate row later, which is recoverable. Left NULL deliberately.",
+  "50c72b68-d8ca-49ba-9c2b-357103c849d4": null
+}
