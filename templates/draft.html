@@ -23,7 +23,7 @@
         <select name="sort" hx-get="/draft/{{ year }}/search" hx-trigger="change"
           hx-target="#search-results" hx-include="[name='q'],[name='position']">
           <option value="">Sort: name</option>
-          <option value="points">Sort: last-season pts</option>
+          <option value="points">Sort: {{ stats_season_label }} pts</option>
           <option value="price">Sort: price</option>
           <option value="team">Sort: team</option>
         </select>

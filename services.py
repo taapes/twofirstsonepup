@@ -1306,11 +1306,17 @@ def season_identity(db: Session, league: League, player_ids=None) -> dict:
 def stats_season(db: Session, league: League) -> League:
     """The season whose player STATISTICS we display.
 
-    The most recent completed (`sync_locked`) season that actually has statistics,
-    falling back to `league` itself. Not simply `league`: after a rollover the new
-    season's numbers are zero for months — which is exactly when the owner is
-    drafting and needs last season's production.
+    Once the season is under way, its own running totals are what matter, so we show
+    `league`. Before then — offseason, draft, preseason — the current season has no
+    numbers yet and everyone is drafting on last year's production, so we fall back
+    to the most recent completed season that actually has statistics.
+
+    The switch is the phase, which advance_phase_if_due flips to in_season at GW1, so
+    the changeover happens on its own every year. After GW38 the just-finished season
+    is both current and completed, so either branch resolves to it.
     """
+    if league.phase == PHASE_IN_SEASON:
+        return league
     completed = (
         db.query(League)
         .join(PlayerSeason, PlayerSeason.league_id == League.id)
@@ -2962,6 +2968,13 @@ def search_players(
     `include_taken` they're returned flagged (`taken` + `taken_by`) so a search can
     surface "already drafted" instead of empty results. `sort` = 'price', 'points',
     or 'team' (else by name)."""
+    # Points come from the season stats_season() resolves to — last completed season
+    # while drafting, the live one once it starts. NOT from a join: an inner join
+    # would drop every player with no snapshot row (new to the PL, or never matched
+    # to a code), and those are draftable. `limit` is applied in Python below, so the
+    # points sort can be too, without truncating first.
+    stats = season_identity(db, stats_season(db, league))
+
     query = db.query(Player)
     if q:
         query = query.filter(Player.name.ilike(f"%{q}%"))  # search all (ignore position)
@@ -2970,12 +2983,10 @@ def search_players(
 
     if sort == "price":
         query = query.order_by(Player.price.desc().nulls_last(), Player.name)
-    elif sort == "points":
-        query = query.order_by(Player.last_season_points.desc().nulls_last(), Player.name)
     elif sort == "team":
         query = query.order_by(Player.current_team.asc().nulls_last(), Player.name)
     else:
-        query = query.order_by(Player.name)
+        query = query.order_by(Player.name)  # 'points' is sorted after the fetch
     players = query.all()
 
     inelig = _ineligible_fpl_ids(db, league)  # post-draft non-DEF additions
@@ -3000,12 +3011,17 @@ def search_players(
         if is_taken and not include_taken:
             continue
         taken_by = "ineligible (post-draft)" if ineligible else taken.get(p.id)
+        ps = stats.get(p.id)  # None for players absent that season — still draftable
         out.append({
             "fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team,
             "price": (p.price / 10) if p.price is not None else None,
-            "points": p.last_season_points,
+            "points": ps.total_points if ps else None,
             "taken": is_taken, "taken_by": taken_by, "ineligible": ineligible,
         })
+    if sort == "points":
+        # Same shape as the SQL orderings above: nulls last, descending, name tie-break.
+        # Must run on the whole list — `limit` is applied by the slice below.
+        out.sort(key=lambda r: (r["points"] is None, -(r["points"] or 0), r["name"]))
     return out[:limit]
 
 

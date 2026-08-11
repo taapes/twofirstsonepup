@@ -80,6 +80,9 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
         "pick_rounds": pick_rounds,
         "players": services.list_players(db, league),
         "is_admin": is_admin(request),
+        # names the season the search panel's Pts column is showing, so the sort
+        # option can't drift from what search_players actually sorts by
+        "stats_season_label": services.season_label(services.stats_season(db, league)),
     }
 
 
