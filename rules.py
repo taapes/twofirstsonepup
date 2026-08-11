@@ -449,6 +449,7 @@ def generate_draft_slots(
     reverse_order: list,
     keeper_counts: dict,
     roster_size: int = ROSTER_SIZE,
+    overrides: dict | None = None,
 ) -> list[dict]:
     """Ordered (round, manager) pick slots BEFORE any pick trades.
 
@@ -457,12 +458,25 @@ def generate_draft_slots(
     roster_size-K picks, i.e. holds a slot in rounds 1..(roster_size-K) and drops
     out of the latest rounds once their 15-man roster is full. Manager keys are
     opaque (ids or names). Returns dicts {round, manager} in overall pick order.
+
+    `overrides` lets the commissioner replace the derived order for rounds 2+:
+    `{None: [...]}` is a base order for every round from 2 on, and `{N: [...]}`
+    overrides round N specifically. Round 1 is never overridable here — it has its
+    own order already. Precedence: round override, then base, then reverse standings.
+
+    An override is applied as-is, including one that lists a manager twice or omits
+    one: the commissioner may deliberately hand a slot to someone. The keeper filter
+    below still applies, so nobody picks in a round they have no roster space for.
     """
+    overrides = overrides or {}
     picks_needed = {m: roster_size - keeper_counts.get(m, 0) for m in r1_order}
     max_round = max(picks_needed.values(), default=0)
     slots = []
     for rnd in range(1, max_round + 1):
-        order = r1_order if rnd == 1 else reverse_order
+        if rnd == 1:
+            order = r1_order
+        else:
+            order = overrides.get(rnd) or overrides.get(None) or reverse_order
         for m in order:
             if picks_needed.get(m, 0) >= rnd:
                 slots.append({"round": rnd, "manager": m})

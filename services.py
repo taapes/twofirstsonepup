@@ -1303,6 +1303,19 @@ def season_identity(db: Session, league: League, player_ids=None) -> dict:
     return {ps.player_id: ps for ps in q}
 
 
+def player_names(db: Session, league: League) -> dict:
+    """player_id -> display name, preferring this season's snapshot.
+
+    Falls back to the live pool for anyone with no snapshot row. That matters on the
+    draft board: you draft from the CURRENT pool, so a player who joined the league
+    after the last completed season (a promoted club's squad, a new signing) has no
+    snapshot row yet and would otherwise render as a blank name once picked.
+    """
+    names = {p.id: p.name for p in db.query(Player)}
+    names.update({pid: ps.name for pid, ps in season_identity(db, league).items()})
+    return names
+
+
 def stats_season(db: Session, league: League) -> League:
     """The season whose player STATISTICS we display.
 
@@ -1503,7 +1516,7 @@ def get_transactions(db: Session, league: League) -> list[dict]:
     waiver feed isn't public). Grouped newest-GW first: for each manager, players in
     GW n but not n-1 = added; in n-1 but not n = dropped. Captures waivers/FA/trades."""
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    pnames = {pid: ps.name for pid, ps in season_identity(db, league).items()}
+    pnames = player_names(db, league)
     # (manager_id, gw_number) -> set(player_id)
     rosters: dict = {}
     for mid, pid, gnum in (
@@ -2613,14 +2626,25 @@ def get_keeper_selections(db: Session, league: League, season_year: int) -> list
 
 # ---- drafts (board generation + commissioner-entered pick/player trades) ----
 def _reverse_standings_managers(db: Session, league: League) -> list[Manager]:
-    rows = (
-        db.query(Standing, Manager)
-        .join(Manager, Manager.id == Standing.manager_id)
-        .filter(Standing.league_id == league.id)
-        .all()
-    )
-    rows.sort(key=lambda sm: -(sm[0].rank or 0))  # worst (10th) first
-    return [m for _, m in rows]
+    """Draft order for rounds 2+: worst-placed first.
+
+    Reads the ADJUSTED standings, not the raw `Standing.rank` column. A commissioner
+    deduction changes where a team finished, and the draft order is a consequence of
+    where they finished — sorting on the synced rank meant the standings page and the
+    draft board could disagree, which is exactly what a post-season deduction caused.
+    Reuses get_standings rather than re-merging the deltas here, so there is one
+    definition of "the standings" and the tie-breaks can't drift apart.
+    """
+    by_fpl = {
+        m.fpl_manager_id: m
+        for m in db.query(Manager).filter_by(league_id=league.id)
+    }
+    ordered = [
+        by_fpl[row["fpl"]]
+        for row in get_standings(db, league)          # best first, adjusted
+        if row.get("fpl") in by_fpl
+    ]
+    return list(reversed(ordered))                    # worst first
 
 
 def _r1_order_managers(db: Session, league: League) -> list[Manager]:
@@ -2655,6 +2679,134 @@ def get_draft_order(db: Session, league: League) -> list[dict]:
         {"name": m.display, "fpl": m.fpl_manager_id}
         for m in _r1_order_managers(db, league)
     ]
+
+
+# ---- draft order overrides (rounds 2+) ----------------------------------------
+def _order_overrides(
+    db: Session, league: League, season_year: int, draft_type: str = "main"
+) -> dict:
+    """{round_or_None: [manager_id, ...]} for every stored override."""
+    from models import DraftOrderOverride
+
+    out: dict = {}
+    for row in (
+        db.query(DraftOrderOverride)
+        .filter_by(league_id=league.id, season_year=season_year, draft_type=draft_type)
+        .order_by(DraftOrderOverride.position)
+    ):
+        out.setdefault(row.round, []).append(row.manager_id)
+    return out
+
+
+def set_draft_order_override(
+    db: Session, league: League, season_year: int, fpl_manager_ids: list[str],
+    *, round: int | None = None, draft_type: str = "main",
+) -> list[dict]:
+    """Set the pick order for rounds 2+. `round=None` sets the base order used by
+    every round from 2 on; a round number overrides that round only.
+
+    Replaces the whole list rather than patching positions, so the stored order can
+    never end up with a gap or a duplicate position.
+    """
+    from models import DraftOrderOverride
+
+    if round is not None and round < 2:
+        raise RuleViolation("round 1 has its own order — set it as the lottery result")
+    managers = [_resolve_manager(db, league, fid) for fid in fpl_manager_ids]
+    if not managers:
+        raise RuleViolation("pick order cannot be empty")
+
+    prev = [
+        str(mid) for mid in _order_overrides(db, league, season_year, draft_type)
+        .get(round, [])
+    ]
+    q = db.query(DraftOrderOverride).filter_by(
+        league_id=league.id, season_year=season_year, draft_type=draft_type
+    )
+    q = q.filter(DraftOrderOverride.round.is_(None)) if round is None else \
+        q.filter(DraftOrderOverride.round == round)
+    q.delete(synchronize_session=False)
+
+    for i, m in enumerate(managers, start=1):
+        db.add(DraftOrderOverride(
+            league_id=league.id, season_year=season_year, draft_type=draft_type,
+            round=round, position=i, manager_id=m.id,
+        ))
+    where = "rounds 2+" if round is None else f"round {round}"
+    record_audit(
+        db, league, action="draft.order.override",
+        summary=(f"Set {season_year} {draft_type} draft order for {where}: "
+                 + ", ".join(f"{i}. {m.display}" for i, m in enumerate(managers, 1))),
+        manager_ids=[m.id for m in managers],
+        details={"round": round, "season_year": season_year,
+                 "draft_type": draft_type, "previous": prev},
+    )
+    db.commit()
+    return [{"pick": i, "manager": m.display} for i, m in enumerate(managers, start=1)]
+
+
+def clear_draft_order_override(
+    db: Session, league: League, season_year: int,
+    *, round: int | None = None, draft_type: str = "main",
+) -> None:
+    """Drop an override so the round falls back to the derived (standings) order."""
+    from models import DraftOrderOverride
+
+    q = db.query(DraftOrderOverride).filter_by(
+        league_id=league.id, season_year=season_year, draft_type=draft_type
+    )
+    q = q.filter(DraftOrderOverride.round.is_(None)) if round is None else \
+        q.filter(DraftOrderOverride.round == round)
+    rows = q.all()
+    if not rows:
+        raise RuleViolation("no override set for that round")
+    prev = [str(r.manager_id) for r in sorted(rows, key=lambda r: r.position)]
+    for r in rows:
+        db.delete(r)
+    where = "rounds 2+" if round is None else f"round {round}"
+    record_audit(
+        db, league, action="draft.order.revert",
+        summary=f"Reverted {season_year} {draft_type} draft order for {where} to standings",
+        details={"round": round, "season_year": season_year,
+                 "draft_type": draft_type, "previous": prev},
+    )
+    db.commit()
+
+
+def draft_order_context(
+    db: Session, league: League, season_year: int, draft_type: str = "main"
+) -> dict:
+    """Everything the order editor needs: the effective order per round, which rounds
+    are overridden, and a per-manager pick count so a slot reassignment that gives
+    someone an extra pick is visible rather than silent."""
+    overrides = _order_overrides(db, league, season_year, draft_type)
+    by_id = {m.id: m for m in db.query(Manager).filter_by(league_id=league.id)}
+    derived = _reverse_standings_managers(db, league)
+
+    def as_opts(mids):
+        return [
+            {"name": by_id[mid].display, "fpl": by_id[mid].fpl_manager_id}
+            for mid in mids if mid in by_id
+        ]
+
+    base = as_opts(overrides[None]) if None in overrides else [
+        {"name": m.display, "fpl": m.fpl_manager_id} for m in derived
+    ]
+    board = get_draft_board(db, league, season_year, draft_type)
+    rounds = sorted({b["round"] for b in board if b["round"] > 1})
+    counts: dict = {}
+    for b in board:
+        counts[b["original_owner"]] = counts.get(b["original_owner"], 0) + 1
+    return {
+        "base": base,
+        "base_overridden": None in overrides,
+        "rounds": [
+            {"round": r, "overridden": r in overrides,
+             "order": as_opts(overrides[r]) if r in overrides else base}
+            for r in rounds
+        ],
+        "counts": sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])),
+    }
 
 
 def list_players(db: Session, league: League) -> list[dict]:
@@ -2913,7 +3065,8 @@ def get_draft_board(
         keeper_counts[sel.manager_id] = keeper_counts.get(sel.manager_id, 0) + 1
 
     slots = generate_draft_slots(
-        [m.id for m in r1], [m.id for m in rev], keeper_counts, ROSTER_SIZE
+        [m.id for m in r1], [m.id for m in rev], keeper_counts, ROSTER_SIZE,
+        overrides=_order_overrides(db, league, season_year, draft_type),
     )
     board = [
         {"pick": i, "round": s["round"], "original_owner_id": s["manager"], "owner_id": s["manager"]}
@@ -2935,17 +3088,29 @@ def get_draft_board(
         )
     }
     fpl_by_id = {m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)}
-    pnames = {pid: ps.name for pid, ps in season_identity(db, league).items()}
+    pnames = player_names(db, league)
     out = []
     for b in board:
         dp = picks.get(b["pick"])
+        # A slot that has already been picked keeps the manager who actually picked
+        # it. `pick_number` is positional, so any change to the order — a lottery
+        # edit, a standings adjustment, an override — shifts what a given number
+        # means, and recomputing the owner here would silently re-attribute a
+        # completed selection to whoever now occupies that position.
+        owner_id = b["owner_id"]
+        recorded_owner_id = dp.manager_id if dp and dp.manager_id else None
+        if recorded_owner_id:
+            owner_id = recorded_owner_id
         out.append({
             "pick": b["pick"],
             "round": b["round"],
-            "owner": names.get(b["owner_id"]),
-            "owner_fpl": fpl_by_id.get(b["owner_id"]),
+            "owner": names.get(owner_id),
+            "owner_fpl": fpl_by_id.get(owner_id),
             "original_owner": names.get(b["original_owner_id"]),
-            "traded": b["owner_id"] != b["original_owner_id"],
+            "traded": owner_id != b["original_owner_id"],
+            # the order moved under a pick that was already made — surface it rather
+            # than paper over it
+            "reassigned": bool(recorded_owner_id and recorded_owner_id != b["owner_id"]),
             "player": pnames.get(dp.player_id) if dp and dp.player_id else None,
         })
     return out
@@ -3057,7 +3222,7 @@ def get_trades(db: Session, league: League) -> list[dict]:
     """All trades for the league — synced player trades and commissioner-entered
     pick/player trades — newest-ish first (by GW then id)."""
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    pnames = {pid: ps.name for pid, ps in season_identity(db, league).items()}
+    pnames = player_names(db, league)
     rows = db.query(Trade).filter_by(league_id=league.id).all()
     out = []
     for t in rows:

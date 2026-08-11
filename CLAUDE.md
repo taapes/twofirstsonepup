@@ -174,6 +174,22 @@ Write tests for these. They are custom and non-obvious:
   FPL feed): `POST /admin/.../draft/trade-pick|trade-player`; a pick trade
   reassigns the (season, type, round, original-owner) slot's owner. Selections
   recorded live via `.../draft/record-pick`.
+  **Reverse standings means the ADJUSTED standings** (`get_standings`, deltas from
+  `standing_adjustments` applied and re-ranked) — a post-season deduction changes where
+  a team finished, so it changes the order. `_reverse_standings_managers` used to sort
+  the raw synced `Standing.rank`, which made the standings page and the draft board
+  disagree. (`get_payouts` still sorts raw rank — same latent bug, not yet fixed.)
+  **Order overrides** (`draft_order_override`): the commissioner can replace the derived
+  order for rounds 2+ — `round IS NULL` is the base for every round from 2 on, a row with
+  a round beats it for that round, and editing one position within a round is how a single
+  slot gets reassigned. Round 1 is never expressible here; it keeps `draft_lottery`.
+  Precedence in `rules.generate_draft_slots`: round override → base → reverse standings,
+  with the keeper filter unchanged. An override may deliberately give someone two slots in
+  a round, so the editor shows a per-manager pick count rather than blocking it.
+  **`pick_number` is positional**, so any order change shifts what a number means:
+  `get_draft_board` takes the owner of an already-picked slot from the stored
+  `DraftPick.manager_id` (flagging `reassigned` when it disagrees with the computed
+  owner), or a reorder would silently re-attribute completed picks.
 - **Cups:** Cup (top 6) and Pup Cup (bottom 4 + the two Cup R1 losers) start at GW28,
   each round spans 2 GWs (admin sets GWs per round; **DGW = first game only is a manual
   admin score override** via `services.override_cup_match`). **Seeded from H2H standings

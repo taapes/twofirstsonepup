@@ -71,6 +71,48 @@
         </form>
       </details>
       <details>
+        <summary>Set order for rounds 2+
+          {% if order_ctx.base_overridden %}<span class="pill warn">overridden</span>{% endif %}</summary>
+        <p class="sub">Rounds 2+ normally follow the final standings (worst picks first),
+          including any commissioner adjustment. Set an order here to override that. Leave
+          the round as <em>Rounds 2+</em> to change every later round at once, or choose a
+          single round to change only that one.</p>
+        <form hx-post="/draft/{{ year }}/order-later" hx-target="#board" hx-swap="outerHTML"
+              onsubmit="syncOrder2()">
+          <label>Applies to
+            <select name="round" id="roundPick" onchange="loadRound(this.value)">
+              <option value="">Rounds 2+ (default)</option>
+              {% for r in order_ctx.rounds %}
+              <option value="{{ r.round }}">Round {{ r.round }}{% if r.overridden %} (overridden){% endif %}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <ol id="orderList2" class="reorder">
+            {% for m in order_ctx.base %}
+            <li data-fpl="{{ m.fpl }}">
+              <span class="grip">{{ loop.index }}.</span>
+              <span class="oname">{{ m.name }}</span>
+              <span class="movers">
+                <button type="button" onclick="moveRow(this,-1)" title="up">&uarr;</button>
+                <button type="button" onclick="moveRow(this,1)" title="down">&darr;</button>
+              </span>
+            </li>
+            {% endfor %}
+          </ol>
+          <input type="hidden" name="order" id="orderField2">
+          <button>Save order</button>
+        </form>
+        <form hx-post="/draft/{{ year }}/order-revert" hx-target="#board" hx-swap="outerHTML"
+              style="margin-top:6px" onsubmit="return syncRevert()">
+          <input type="hidden" name="round" id="revertRound">
+          <button class="mini" type="submit">Revert to standings order</button>
+        </form>
+        <p class="sub" style="margin-top:8px">Picks per manager:
+          {% for name, n in order_ctx.counts %}<span class="pill">{{ name }} {{ n }}</span> {% endfor %}
+          <br>Reassigning a slot can legitimately give someone an extra pick — this is
+          shown so that happens visibly rather than by surprise.</p>
+      </details>
+      <details>
         <summary>Trade a pick</summary>
         <form hx-post="/draft/{{ year }}/trade-pick" hx-target="#board" hx-swap="outerHTML">
           <label>pick
@@ -112,6 +154,29 @@
         if (dir < 0 && li.previousElementSibling) list.insertBefore(li, li.previousElementSibling);
         if (dir > 0 && li.nextElementSibling) list.insertBefore(li.nextElementSibling, li);
         [].forEach.call(list.children, function(row, i){ row.querySelector('.grip').textContent = (i+1) + '.'; });
+      }
+      // effective order per round, so the selector can swap the list without a round-trip
+      var ORDER_BY_ROUND = {
+        "": {{ order_ctx.base | tojson }}{% for r in order_ctx.rounds %},
+        "{{ r.round }}": {{ r.order | tojson }}{% endfor %}
+      };
+      function loadRound(val) {
+        var rows = ORDER_BY_ROUND[val] || ORDER_BY_ROUND[""];
+        document.getElementById('orderList2').innerHTML = rows.map(function(m, i){
+          return '<li data-fpl="' + m.fpl + '"><span class="grip">' + (i+1) + '.</span>' +
+                 '<span class="oname">' + m.name + '</span><span class="movers">' +
+                 '<button type="button" onclick="moveRow(this,-1)" title="up">\u2191</button>' +
+                 '<button type="button" onclick="moveRow(this,1)" title="down">\u2193</button>' +
+                 '</span></li>';
+        }).join('');
+      }
+      function syncOrder2() {
+        var ids = [].map.call(document.querySelectorAll('#orderList2 li'), function(li){ return li.dataset.fpl; });
+        document.getElementById('orderField2').value = ids.join(',');
+      }
+      function syncRevert() {
+        document.getElementById('revertRound').value = document.getElementById('roundPick').value;
+        return confirm('Revert this order back to the standings?');
       }
       function syncOrder(form) {
         var ids = [].map.call(form.querySelectorAll('#orderList li'), function(li){ return li.dataset.fpl; });

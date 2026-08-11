@@ -455,6 +455,44 @@ class DraftLottery(Base):
     pick_result: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class DraftOrderOverride(Base):
+    """Commissioner-set pick order for rounds 2+, overriding reverse standings.
+
+    Rounds 2+ are normally derived from the (adjusted) final standings, but the
+    commissioner sometimes needs to say otherwise. One row per position in an
+    ordered list of managers:
+
+      round IS NULL -> the base order used by EVERY round from 2 on
+      round = N     -> that round only, beating the base
+
+    Round 1 is not expressible here — it keeps its own lottery order in
+    DraftLottery. Storing a list (rather than per-slot assignments) is what lets
+    the same table serve a whole-order shift, a single round, and moving one
+    manager within a round.
+    """
+
+    __tablename__ = "draft_order_override"
+    __table_args__ = (
+        UniqueConstraint(
+            "league_id", "season_year", "draft_type", "round", "position",
+            name="uq_draft_order_override_slot",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    season_year: Mapped[int] = mapped_column(Integer, index=True)
+    draft_type: Mapped[str] = mapped_column(String, server_default="main")
+    # NULL = the base order for all of rounds 2+
+    round: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    position: Mapped[int] = mapped_column(Integer)  # 1..N within this order
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+
+
 class GameweekPoints(Base):
     __tablename__ = "gameweek_points"
     __table_args__ = (

@@ -18,7 +18,7 @@ from auth import (
 )
 from db import get_db
 from models import InjuryList, Manager
-from rules import RuleViolation, SEASON_LAST_GW
+from rules import ROSTER_SIZE, RuleViolation, SEASON_LAST_GW
 from templating import templates
 
 router = APIRouter()
@@ -85,6 +85,7 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
         # names the season the search panel's Pts column is showing, so the sort
         # option can't drift from what search_players actually sorts by
         "stats_season_label": services.season_label(services.stats_season(db, league)),
+        "order_ctx": services.draft_order_context(db, league, year, draft_type),
     }
 
 
@@ -1450,6 +1451,41 @@ def draft_set_order(year: int, request: Request, order: str = Form(...), db: Ses
     ids = [s.strip() for s in order.split(",") if s.strip()]
     try:
         services.set_draft_order(db, league, ids)
+    except RuleViolation as e:
+        return _err(e)
+    return _board_response(request, db, league, year)
+
+
+@router.post("/draft/{year}/order-later", response_class=HTMLResponse)
+def draft_set_order_later(
+    year: int, request: Request, order: str = Form(...), round: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    """Set the pick order for rounds 2+. Empty `round` = the base order used by every
+    round from 2 on; a number overrides that round only. Round 1 is set separately."""
+    league = _league_or_404(db)
+    if not is_admin(request):
+        return _forbidden(request, "Only the commissioner can set the draft order.")
+    ids = [s.strip() for s in order.split(",") if s.strip()]
+    try:
+        rnd = _safe_int(round, 2, ROSTER_SIZE, field="round") if round.strip() else None
+        services.set_draft_order_override(db, league, year, ids, round=rnd)
+    except RuleViolation as e:
+        return _err(e)
+    return _board_response(request, db, league, year)
+
+
+@router.post("/draft/{year}/order-revert", response_class=HTMLResponse)
+def draft_revert_order(
+    year: int, request: Request, round: str = Form(""), db: Session = Depends(get_db),
+):
+    """Drop an override so the round goes back to following the standings."""
+    league = _league_or_404(db)
+    if not is_admin(request):
+        return _forbidden(request, "Only the commissioner can set the draft order.")
+    try:
+        rnd = _safe_int(round, 2, ROSTER_SIZE, field="round") if round.strip() else None
+        services.clear_draft_order_override(db, league, year, round=rnd)
     except RuleViolation as e:
         return _err(e)
     return _board_response(request, db, league, year)
