@@ -200,3 +200,46 @@ def test_a_league_with_no_standings_pays_no_position_slots(test_session):
     p = services.get_payouts(test_session, lg)
     for label in (FIRST, SECOND, THIRD, FINE):
         assert _holder(p, label) is None, f"{label} was paid with no standings"
+
+
+# ---- the archived-season page must explain itself --------------------------
+def test_an_archived_season_shows_why_its_table_differs_from_fpl(test_session):
+    """Both tables on /season/{id} are ordered by the ADJUSTED standings, so without
+    the adjustment log the page silently disagrees with FPL's official final table —
+    and now with the money too — and a manager has no way to see why."""
+    from fastapi.testclient import TestClient
+
+    from auth import hash_password
+    from main import app
+
+    lg, mgrs = _disagreeing(test_session)
+    test_session.query(StandingAdjustment).filter_by(
+        league_id=lg.id, manager_id=mgrs["Ann"].id
+    ).one().note = "illegal player"
+    mgrs["Ann"].password_hash = hash_password("pw")
+    test_session.commit()
+
+    client = TestClient(app, follow_redirects=False)
+    assert client.post("/login", data={"manager_id": "1", "password": "pw"}).status_code == 303
+    body = client.get(f"/season/{lg.fpl_league_id}").content.decode()
+
+    assert "commissioner-adjusted" in body, "no explanation on an adjusted season"
+    assert "illegal player" in body, "the commissioner's reason is not shown"
+    assert "-5 H2H" in body, "the size of the adjustment is not shown"
+
+
+def test_an_unadjusted_season_says_nothing_about_adjustments(test_session):
+    """The note must not appear on the seasons that don't need it."""
+    from fastapi.testclient import TestClient
+
+    from auth import hash_password
+    from main import app
+
+    lg, mgrs = _seed(test_session, DISAGREEING)
+    mgrs["Ann"].password_hash = hash_password("pw")
+    test_session.commit()
+
+    client = TestClient(app, follow_redirects=False)
+    client.post("/login", data={"manager_id": "1", "password": "pw"})
+    body = client.get(f"/season/{lg.fpl_league_id}").content.decode()
+    assert "commissioner-adjusted" not in body

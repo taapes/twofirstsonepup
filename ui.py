@@ -1261,6 +1261,10 @@ def season_detail(fpl_league_id: str, request: Request, db: Session = Depends(ge
         "request": request, "league": _league_or_404(db), "season_league": season,
         "season": season.season_year, "is_current": season.is_current,
         "standings": services.get_standings(db, season),
+        # Both tables below are ordered by the ADJUSTED standings, so without the log
+        # an archived season can differ from FPL's official final table — and now from
+        # the money too — with nothing on the page saying why.
+        "adjustments": services.get_standing_adjustments(db, season),
         "payouts": services.get_payouts(db, season),
         "cups": services.get_cups(db, season),
     })
