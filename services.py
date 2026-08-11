@@ -1303,6 +1303,30 @@ def season_identity(db: Session, league: League, player_ids=None) -> dict:
     return {ps.player_id: ps for ps in q}
 
 
+def stats_season(db: Session, league: League) -> League:
+    """The season whose player STATISTICS we display.
+
+    The most recent completed (`sync_locked`) season that actually has statistics,
+    falling back to `league` itself. Not simply `league`: after a rollover the new
+    season's numbers are zero for months — which is exactly when the owner is
+    drafting and needs last season's production.
+    """
+    completed = (
+        db.query(League)
+        .join(PlayerSeason, PlayerSeason.league_id == League.id)
+        .filter(League.sync_locked.is_(True), PlayerSeason.total_points.isnot(None))
+        .order_by(League.season_year.desc())
+        .first()
+    )
+    return completed or league
+
+
+def season_label(league: League) -> str:
+    """A season as the league writes it: 2025 -> '25/26'."""
+    y = league.season_year or 0
+    return f"{y % 100:02d}/{(y + 1) % 100:02d}"
+
+
 def _il_to_dict(entry: InjuryList, injured: Player, replacement: Player | None) -> dict:
     return {
         "id": str(entry.id),
@@ -1507,8 +1531,10 @@ def get_transactions(db: Session, league: League) -> list[dict]:
 
 
 def player_portal(db: Session, league: League) -> list[dict]:
-    """Every player with every stat + league context (owner, on-IL, ineligible, keeper
-    acquisition/years/eligibility) for the admin data portal. One row per player."""
+    """Every player with league context (owner, on-IL, ineligible, keeper
+    acquisition/years/eligibility) for the admin data portal, plus that player's
+    statistics from the most recent COMPLETED season (see stats_season). One row per
+    player; stat fields are None for anyone absent that season."""
     gw = latest_gameweek(db, league)
     owner_by_pid: dict = {}
     if gw:
@@ -1529,19 +1555,29 @@ def player_portal(db: Session, league: League) -> list[dict]:
         except (TypeError, ValueError):
             return None
 
+    # Identity + league context come from the live pool; STATISTICS come from the
+    # most recent completed season's snapshot. `players` only ever holds the current
+    # season, which during a draft is all zeros.
+    stats_lg = stats_season(db, league)
+    stats = season_identity(db, stats_lg)
+
     rows = []
     for p in db.query(Player).order_by(Player.name):
         owner_mid = owner_by_pid.get(p.id)
         ks = kstatus.get(owner_mid, {}).get(p.id) if owner_mid else None
+        s = stats.get(p.id)  # None for players absent that season
         rows.append({
             "fpl_id": p.fpl_id, "name": p.name, "position": p.position,
             "team": p.current_team, "status": p.status, "news": p.news,
             "price": (p.price / 10) if p.price is not None else None,
-            "last_season_points": p.last_season_points, "total_points": p.total_points,
-            "form": _f(p.form), "points_per_game": _f(p.points_per_game),
-            "goals_scored": p.goals_scored, "assists": p.assists,
-            "clean_sheets": p.clean_sheets, "bonus": p.bonus, "minutes": p.minutes,
-            "ict_index": _f(p.ict_index), "selected_by_percent": _f(p.selected_by_percent),
+            "total_points": s.total_points if s else None,
+            "points_per_game": _f(s.points_per_game) if s else None,
+            "goals_scored": s.goals_scored if s else None,
+            "assists": s.assists if s else None,
+            "clean_sheets": s.clean_sheets if s else None,
+            "bonus": s.bonus if s else None,
+            "minutes": s.minutes if s else None,
+            "ict_index": _f(s.ict_index) if s else None,
             "owner": names.get(owner_mid), "rostered": owner_mid is not None,
             "on_il": p.id in il_pids, "ineligible": p.fpl_id in inelig,
             "acquisition": ks["acquisition"] if ks else None,

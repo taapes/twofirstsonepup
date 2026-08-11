@@ -988,6 +988,8 @@ def admin_players(request: Request, db: Session = Depends(get_db)):
         "request": request, "league": league, "is_admin": is_admin(request),
         "is_owner": True,
         "players": services.player_portal(db, league),
+        # name the season the stats belong to, so it's never ambiguous on screen
+        "stats_season_label": services.season_label(services.stats_season(db, league)),
     })
 
 
