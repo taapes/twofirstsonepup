@@ -184,7 +184,12 @@ Write tests for these. They are custom and non-obvious:
   discovery picks) and ad-hoc player trades are commissioner-entered (not in the
   FPL feed): `POST /admin/.../draft/trade-pick|trade-player`; a pick trade
   reassigns the (season, type, round, original-owner) slot's owner. Selections
-  recorded live via `.../draft/record-pick`.
+  recorded live via `.../draft/record-pick`; `record_pick` refuses a player who is
+  already kept or already drafted (`_unavailable_reason`, mirroring `search_players`'
+  `taken` logic). **That guard is NOT waived by `overwrite`** — that flag grants
+  permission to replace a *slot*, not to take an unavailable player, and the live draft
+  passes `overwrite=is_admin`. To reassign, fix the keeper selection or
+  `delete_draft_pick` the conflicting pick first.
   **Reverse standings means the ADJUSTED standings** (`get_standings`, deltas from
   `standing_adjustments` applied and re-ranked) — a post-season deduction changes where
   a team finished, so it changes the order. `_reverse_standings_managers` used to sort

@@ -271,13 +271,17 @@ def test_submitting_keepers_still_enforces_the_cap(test_session):
 def test_search_still_reports_drafted_players(test_session):
     """Draft picks are public; over-redacting would blank them too."""
     lg, mgrs = _seed(test_session, locked=True)
+    # a player nobody kept — record_pick now refuses to draft someone else's keeper
+    free = Player(name="Saka", code=99, fpl_id=9, position="MID", current_team="ARS")
+    test_session.add(free)
+    test_session.commit()
     services.record_pick(
         test_session, lg, season_year=UPCOMING, pick_number=1,
-        owner_fpl="1", player_fpl_id=2,
+        owner_fpl="1", player_fpl_id=9,
     )
     rows = {r["name"]: r for r in services.search_players(
         test_session, lg, available_year=UPCOMING, include_taken=True)}
-    assert rows["Palmer"]["taken_by"] == "drafted: A"
+    assert rows["Saka"]["taken_by"] == "drafted: A"
 
 
 def test_the_autodraft_queue_never_hands_out_another_managers_keeper(test_session):

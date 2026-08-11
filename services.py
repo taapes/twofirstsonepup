@@ -3142,6 +3142,43 @@ def trade_player(
     return {"from": frm.display, "to": to.display, "player": player.name}
 
 
+def _unavailable_reason(
+    db: Session, league: League, player: Player, *,
+    season_year: int, draft_type: str, pick_number: int,
+) -> str | None:
+    """Why `player` can't be drafted into this slot — or None if they're free.
+
+    Mirrors search_players' `taken` logic so the board never offers someone that
+    record_pick would then refuse: keeper selections count for either draft, while
+    draft picks are scoped to their own. The current slot is excluded, so an admin
+    re-recording the same player into the same slot isn't blocked by themselves.
+    """
+    sel = (
+        db.query(KeeperSelection, Manager)
+        .join(Manager, Manager.id == KeeperSelection.manager_id)
+        .filter(KeeperSelection.league_id == league.id,
+                KeeperSelection.season_year == season_year,
+                KeeperSelection.player_id == player.id)
+        .first()
+    )
+    if sel:
+        return f"being kept by {sel[1].display}"
+    taken = (
+        db.query(DraftPick, Manager)
+        .outerjoin(Manager, Manager.id == DraftPick.manager_id)
+        .filter(DraftPick.league_id == league.id,
+                DraftPick.season_year == season_year,
+                DraftPick.draft_type == draft_type,
+                DraftPick.player_id == player.id,
+                DraftPick.pick_number != pick_number)
+        .first()
+    )
+    if taken:
+        who = taken[1].display if taken[1] else "another manager"
+        return f"already drafted by {who} at #{taken[0].pick_number}"
+    return None
+
+
 def record_pick(
     db: Session, league: League, *, season_year: int, pick_number: int,
     owner_fpl: str, player_fpl_id: int, draft_type: str = "main", round: int = 0,
@@ -3149,9 +3186,24 @@ def record_pick(
 ) -> dict:
     """Record a selection at a board slot (live). Upsert by slot. With concurrent
     devices, a slot that already has a player is NOT silently overwritten — raises
-    RuleViolation (a clean "pick already made") unless `overwrite` (admin correction)."""
+    RuleViolation (a clean "pick already made") unless `overwrite` (admin correction).
+
+    A player who is already kept or already drafted is refused outright. The board
+    hides them, so this is a backstop — but a stale board, a double-click race, the
+    /admin API and the autodraft queue can all still get here, and handing out a
+    player two managers now believe they own is not fixable by re-picking. Note this
+    is NOT waived by `overwrite`: that grants permission to replace a SLOT, which is
+    a different thing from permission to take an unavailable player. Correct the
+    keeper selection or delete the conflicting pick first.
+    """
     owner = _resolve_manager(db, league, owner_fpl)
     player = _resolve_player(db, player_fpl_id)
+    reason = _unavailable_reason(
+        db, league, player, season_year=season_year, draft_type=draft_type,
+        pick_number=pick_number,
+    )
+    if reason:
+        raise RuleViolation(f"{player.name} is {reason}")
     existing = (
         db.query(DraftPick)
         .filter_by(league_id=league.id, season_year=season_year, draft_type=draft_type, pick_number=pick_number)
