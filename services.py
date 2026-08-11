@@ -26,6 +26,7 @@ from models import (
     Match,
     Standing,
     Player,
+    PlayerSeason,
     Roster,
     Tournament,
     TournamentMatch,
@@ -1357,17 +1358,24 @@ def ineligible_players(db: Session, league: League) -> list[dict]:
     report + to exclude from draft/keeper search."""
     from models import PlayerIneligibility
 
+    # PlayerIneligibility is keyed (league_id, fpl_id) and that fpl_id is THAT
+    # season's element id — joining it to the global Player.fpl_id resolves to
+    # whoever holds the id now. Match its own composite key instead.
     rows = (
-        db.query(PlayerIneligibility, Player)
-        .join(Player, Player.fpl_id == PlayerIneligibility.fpl_id)
+        db.query(PlayerIneligibility, PlayerSeason)
+        .join(
+            PlayerSeason,
+            (PlayerSeason.league_id == PlayerIneligibility.league_id)
+            & (PlayerSeason.fpl_id == PlayerIneligibility.fpl_id),
+        )
         .filter(PlayerIneligibility.league_id == league.id)
-        .order_by(Player.name)
+        .order_by(PlayerSeason.name)
         .all()
     )
     return [
-        {"fpl_id": p.fpl_id, "name": p.name, "position": p.position,
-         "team": p.current_team, "reason": il.reason}
-        for il, p in rows
+        {"fpl_id": ps.fpl_id, "name": ps.name, "position": ps.position,
+         "team": ps.current_team, "reason": il.reason}
+        for il, ps in rows
     ]
 
 
@@ -1486,16 +1494,12 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
             ))
         seeded += 1
 
-    # 3. draft-day player-pool snapshot (skip ids already captured)
-    have = {
-        fid for (fid,) in db.query(PlayerPoolSnapshot.fpl_id)
-        .filter_by(league_id=new_league.id)
-    }
+    # 3. the draft-day player-pool snapshot is NOT taken here — see
+    #    snapshot_player_pool(). At this point `players` still holds the OUTGOING
+    #    season's element ids (sync_players is still gated), so capturing now would
+    #    record last season's ids as this season's draft-day pool and make
+    #    flag_ineligible mass-flag legitimate players.
     snapped = 0
-    for (fid,) in db.query(Player.fpl_id).filter(Player.fpl_id.isnot(None)):
-        if fid not in have:
-            db.add(PlayerPoolSnapshot(league_id=new_league.id, fpl_id=fid))
-            snapped += 1
 
     # 4. flip current + set preseason. The outgoing season is frozen against the
     # FPL feed for good: its league id is now free for FPL to hand to anyone.
@@ -1520,6 +1524,32 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
         "keepers_seeded": seeded,
         "pool_snapshot": snapped,
     }
+
+
+def snapshot_player_pool(db: Session, league: League) -> int:
+    """Capture the draft-day player pool (the set of element ids that existed) for
+    `league`. Idempotent — skips ids already recorded.
+
+    Must run AFTER the first post-rollover sync_players, not inside advance_season:
+    sync_players is gated on a league being current and unfrozen, so until the
+    rollover flips those flags `players` still holds the previous season's element
+    ids. Capturing early would record last season's ids as this season's draft-day
+    pool, and flag_ineligible would then flag most of the real pool as
+    'added after the draft'.
+    """
+    have = {
+        fid for (fid,) in db.query(PlayerPoolSnapshot.fpl_id).filter_by(
+            league_id=league.id
+        )
+    }
+    snapped = 0
+    for (fid,) in db.query(Player.fpl_id).filter(Player.fpl_id.isnot(None)):
+        if fid not in have:
+            db.add(PlayerPoolSnapshot(league_id=league.id, fpl_id=fid))
+            snapped += 1
+    if snapped:
+        db.commit()
+    return snapped
 
 
 def advance_phase_if_due(db: Session, league: League, now=None) -> bool:
@@ -1726,10 +1756,14 @@ def get_rosters(db: Session, league: League) -> list[dict]:
         players = []
         if gw is not None:
             players = (
-                db.query(Player)
-                .join(Roster, Roster.player_id == Player.id)
-                .filter(Roster.manager_id == m.id, Roster.gameweek_id == gw.id)
-                .order_by(Player.position, Player.name)
+                db.query(PlayerSeason)
+                .join(Roster, Roster.player_id == PlayerSeason.player_id)
+                .filter(
+                    Roster.manager_id == m.id,
+                    Roster.gameweek_id == gw.id,
+                    PlayerSeason.league_id == league.id,
+                )
+                .order_by(PlayerSeason.position, PlayerSeason.name)
                 .all()
             )
         out.append(
@@ -1744,19 +1778,27 @@ def get_rosters(db: Session, league: League) -> list[dict]:
     return out
 
 
-def _squad_players(db: Session, manager_id, gw_id) -> list[Player]:
+def _squad_players(db: Session, league: League, manager_id, gw_id) -> list[PlayerSeason]:
+    """`league` is positional and has no default on purpose: a missed caller must
+    fail loudly rather than silently filter on league_id IS NULL."""
     if gw_id is None:
         return []
     return (
-        db.query(Player)
-        .join(Roster, Roster.player_id == Player.id)
-        .filter(Roster.manager_id == manager_id, Roster.gameweek_id == gw_id)
-        .order_by(Player.position, Player.name)
+        db.query(PlayerSeason)
+        .join(Roster, Roster.player_id == PlayerSeason.player_id)
+        .filter(
+            Roster.manager_id == manager_id,
+            Roster.gameweek_id == gw_id,
+            PlayerSeason.league_id == league.id,
+        )
+        .order_by(PlayerSeason.position, PlayerSeason.name)
         .all()
     )
 
 
-def _player_stat_dict(p: Player) -> dict:
+def _player_stat_dict(p: "Player | PlayerSeason") -> dict:
+    """Duck-typed over both — PlayerSeason mirrors every attribute read here,
+    including `news`."""
     return {
         "fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team,
         "price": (p.price / 10) if p.price is not None else None,
@@ -1785,10 +1827,22 @@ def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None
     gw = latest_gameweek(db, league)
     if app_engine_on():
         # Squad from the app-owned ledger (fold) rather than the FPL roster snapshot.
+        # Yields PlayerSeason like the other branch: the shared code below reads
+        # .player_id, which a Player row doesn't have.
         squad_ids = get_v2_squad(db, league, fpl_manager_id)
-        players = db.query(Player).filter(Player.id.in_(squad_ids)).all() if squad_ids else []
+        players = (
+            db.query(PlayerSeason)
+            .filter(
+                PlayerSeason.league_id == league.id,
+                PlayerSeason.player_id.in_(squad_ids),
+            )
+            .order_by(PlayerSeason.position, PlayerSeason.name)
+            .all()
+            if squad_ids
+            else []
+        )
     else:
-        players = _squad_players(db, manager.id, gw.id if gw else None)
+        players = _squad_players(db, league, manager.id, gw.id if gw else None)
 
     # recent points trend per player (last 5 synced GWs, oldest->newest)
     recent = (
@@ -1799,10 +1853,18 @@ def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None
         .limit(5)
         .all()
     )
+    # player_points embeds THAT season's element ids, which FPL recycles — resolve
+    # them through player_season and key the trend by the stable player_id.
+    season_map = {
+        ps.fpl_id: ps.player_id
+        for ps in db.query(PlayerSeason).filter_by(league_id=league.id)
+    }
     trend: dict = {}
     for gp, _g in reversed(recent):
         for entry in (gp.player_points or []):
-            trend.setdefault(entry.get("fpl_id"), []).append(entry.get("points"))
+            pid = season_map.get(entry.get("fpl_id"))
+            if pid is not None:
+                trend.setdefault(pid, []).append(entry.get("points"))
 
     # keeper badges for the upcoming season
     upcoming = (league.season_year or 0) + 1
@@ -1815,8 +1877,10 @@ def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None
     out_players = []
     for p in players:
         d = _player_stat_dict(p)
-        d["trend"] = trend.get(p.fpl_id, [])
-        d["is_keeper"] = p.id in keeper_pids
+        d["trend"] = trend.get(p.player_id, [])
+        # p is a PlayerSeason row: p.id is the snapshot's own PK, and keeper_pids
+        # holds players.id — so this must compare player_id or it is always False.
+        d["is_keeper"] = p.player_id in keeper_pids
         out_players.append(d)
     out_players.sort(key=lambda d: (_POSITION_ORDER.get(d["position"], 9), d["name"]))
     return {
@@ -1846,9 +1910,10 @@ def _manager_status(db: Session, league: League, manager: Manager) -> dict:
 
     cur = current_gameweek(db, league)
     il_rows = (
-        db.query(InjuryList, Player)
-        .join(Player, Player.id == InjuryList.player_id)
-        .filter(InjuryList.manager_id == manager.id, InjuryList.status == "active")
+        db.query(InjuryList, PlayerSeason)
+        .join(PlayerSeason, PlayerSeason.player_id == InjuryList.player_id)
+        .filter(InjuryList.manager_id == manager.id, InjuryList.status == "active",
+                PlayerSeason.league_id == league.id)
         .all()
     )
     il = []
@@ -1870,9 +1935,11 @@ def _manager_status(db: Session, league: League, manager: Manager) -> dict:
 
     intl = []
     for entry, p in (
-        db.query(InternationalList, Player)
-        .join(Player, Player.id == InternationalList.player_id)
-        .filter(InternationalList.manager_id == manager.id, InternationalList.status == "active")
+        db.query(InternationalList, PlayerSeason)
+        .join(PlayerSeason, PlayerSeason.player_id == InternationalList.player_id)
+        .filter(InternationalList.manager_id == manager.id,
+                InternationalList.status == "active",
+                PlayerSeason.league_id == league.id)
         .all()
     ):
         repl = db.get(Player, entry.replacement_id) if entry.replacement_id else None
@@ -1927,7 +1994,7 @@ def get_upcoming_matchups(
     latest_id = latest.id if latest else None
 
     def squad_with_fixtures(manager_id, gw_num):
-        rows = _squad_players(db, manager_id, latest_id)
+        rows = _squad_players(db, league, manager_id, latest_id)
         gw_fix = fixtures.get(gw_num, {})
         out = []
         for p in rows:
@@ -1968,10 +2035,11 @@ def get_upcoming_matchups(
 def get_injury_list(db: Session, league: League) -> list[dict]:
     """Active injury-list entries for the league (admin-managed; may be empty)."""
     rows = (
-        db.query(InjuryList, Manager, Player)
+        db.query(InjuryList, Manager, PlayerSeason)
         .join(Manager, Manager.id == InjuryList.manager_id)
-        .join(Player, Player.id == InjuryList.player_id)
-        .filter(Manager.league_id == league.id, InjuryList.status == "active")
+        .join(PlayerSeason, PlayerSeason.player_id == InjuryList.player_id)
+        .filter(Manager.league_id == league.id, InjuryList.status == "active",
+                PlayerSeason.league_id == league.id)
         .all()
     )
     return [
@@ -2158,6 +2226,22 @@ def _resolve_player(db: Session, fpl_id: int) -> Player:
     return p
 
 
+def season_identity(db: Session, league: League, player_ids=None) -> dict:
+    """player_id -> PlayerSeason row for this league's season.
+
+    The single source of truth for season-scoped player attributes. `players` is
+    global and always holds whatever season synced last, so reading names/clubs
+    off it shows the wrong thing for any past season. This works identically for a
+    current or a frozen league: sync_players refreshes player_season on every run
+    while a league is unfrozen, then it stays put — so there is one code path, no
+    `if league.sync_locked` branching at call sites.
+    """
+    q = db.query(PlayerSeason).filter_by(league_id=league.id)
+    if player_ids is not None:
+        q = q.filter(PlayerSeason.player_id.in_(player_ids))
+    return {ps.player_id: ps for ps in q}
+
+
 def _il_to_dict(entry: InjuryList, injured: Player, replacement: Player | None) -> dict:
     return {
         "id": str(entry.id),
@@ -2330,7 +2414,7 @@ def get_transactions(db: Session, league: League) -> list[dict]:
     if app_engine_on():
         return _engine_transactions(db, league)
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    pnames = {p.id: p.name for p in db.query(Player)}
+    pnames = {pid: ps.name for pid, ps in season_identity(db, league).items()}
     # (manager_id, gw_number) -> set(player_id)
     rosters: dict = {}
     for mid, pid, gnum in (
@@ -2460,10 +2544,11 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
 
     # IL: season-end return-or-release, and 4+ GW eligible-to-return
     for il, m, p in (
-        db.query(InjuryList, Manager, Player)
+        db.query(InjuryList, Manager, PlayerSeason)
         .join(Manager, Manager.id == InjuryList.manager_id)
-        .join(Player, Player.id == InjuryList.player_id)
-        .filter(Manager.league_id == league.id, InjuryList.status == "active")
+        .join(PlayerSeason, PlayerSeason.player_id == InjuryList.player_id)
+        .filter(Manager.league_id == league.id, InjuryList.status == "active",
+                PlayerSeason.league_id == league.id)
     ):
         gws_on = (cur - il.start_gw + 1) if (cur and il.start_gw) else None
         if season_over:
@@ -2475,10 +2560,11 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
 
     # International: season-end return
     for il, m, p in (
-        db.query(InternationalList, Manager, Player)
+        db.query(InternationalList, Manager, PlayerSeason)
         .join(Manager, Manager.id == InternationalList.manager_id)
-        .join(Player, Player.id == InternationalList.player_id)
-        .filter(Manager.league_id == league.id, InternationalList.status == "active")
+        .join(PlayerSeason, PlayerSeason.player_id == InternationalList.player_id)
+        .filter(Manager.league_id == league.id, InternationalList.status == "active",
+                PlayerSeason.league_id == league.id)
     ):
         if season_over:
             out.append({"category": "International", "manager": m.display,
@@ -2503,10 +2589,11 @@ def get_international_list(db: Session, league: League) -> list[dict]:
     from models import InternationalList
 
     rows = (
-        db.query(InternationalList, Manager, Player)
+        db.query(InternationalList, Manager, PlayerSeason)
         .join(Manager, Manager.id == InternationalList.manager_id)
-        .join(Player, Player.id == InternationalList.player_id)
-        .filter(Manager.league_id == league.id, InternationalList.status == "active")
+        .join(PlayerSeason, PlayerSeason.player_id == InternationalList.player_id)
+        .filter(Manager.league_id == league.id, InternationalList.status == "active",
+                PlayerSeason.league_id == league.id)
         .all()
     )
     return [
@@ -3191,7 +3278,9 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
     if gw is None:
         return {}
     last_n = gw.number
-    players = {p.id: p for p in db.query(Player)}
+    # season-scoped identity: `players` is global and always holds the
+    # latest season, so names/positions off it are wrong for a past one.
+    players = season_identity(db, league)
 
     # Full per-GW roster presence so we can detect a DROP (a gap in a manager's
     # tenure of a player) vs continuous keeping.
@@ -3370,12 +3459,20 @@ def submit_keepers(
 
 
 def get_keeper_selections(db: Session, league: League, season_year: int) -> list[dict]:
-    """Submitted keeper selections for a season, grouped by manager."""
+    """Submitted keeper selections for a season, grouped by manager.
+
+    Identity resolves via the SUBMITTING league (`league`), not `season_year`:
+    selections name the season being kept FOR, whose league row doesn't exist yet
+    at submission time. So this shows the player as they were when picked, which
+    is the only data available and the right context anyway.
+    """
     rows = (
-        db.query(KeeperSelection, Manager, Player)
+        db.query(KeeperSelection, Manager, PlayerSeason)
         .join(Manager, Manager.id == KeeperSelection.manager_id)
-        .join(Player, Player.id == KeeperSelection.player_id)
-        .filter(KeeperSelection.league_id == league.id, KeeperSelection.season_year == season_year)
+        .join(PlayerSeason, PlayerSeason.player_id == KeeperSelection.player_id)
+        .filter(KeeperSelection.league_id == league.id,
+                KeeperSelection.season_year == season_year,
+                PlayerSeason.league_id == league.id)
         .all()
     )
     by_manager: dict = {}
@@ -3710,7 +3807,7 @@ def get_draft_board(
         )
     }
     fpl_by_id = {m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)}
-    pnames = {p.id: p.name for p in db.query(Player)}
+    pnames = {pid: ps.name for pid, ps in season_identity(db, league).items()}
     out = []
     for b in board:
         dp = picks.get(b["pick"])
@@ -3822,7 +3919,7 @@ def get_trades(db: Session, league: League) -> list[dict]:
     """All trades for the league — synced player trades and commissioner-entered
     pick/player trades — newest-ish first (by GW then id)."""
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    pnames = {p.id: p.name for p in db.query(Player)}
+    pnames = {pid: ps.name for pid, ps in season_identity(db, league).items()}
     rows = db.query(Trade).filter_by(league_id=league.id).all()
     out = []
     for t in rows:
@@ -4015,10 +4112,14 @@ def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
     gw = latest_gameweek(db, league)
     if gw is not None:
         for p in (
-            db.query(Player)
-            .join(Roster, Roster.player_id == Player.id)
-            .filter(Roster.manager_id == m.id, Roster.gameweek_id == gw.id)
-            .order_by(Player.position, Player.name)
+            db.query(PlayerSeason)
+            .join(Roster, Roster.player_id == PlayerSeason.player_id)
+            .filter(
+                Roster.manager_id == m.id,
+                Roster.gameweek_id == gw.id,
+                PlayerSeason.league_id == league.id,
+            )
+            .order_by(PlayerSeason.position, PlayerSeason.name)
         ):
             players.append({"fpl_id": p.fpl_id, "name": p.name, "position": p.position})
 

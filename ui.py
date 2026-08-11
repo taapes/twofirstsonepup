@@ -840,22 +840,43 @@ def admin_season_advance(
     old_league = services.current_league(db)
     if old_league and str(old_league.fpl_league_id) == new_id:
         return _err("that's already the current league")
-    # 1. sync the new league id (creates the new league row + managers + schedule)
+    # Ordering matters here. sync_players is gated on a league being current AND
+    # unfrozen, and it is what rekeys the pool on `code` and writes player_season.
+    # Before the rollover no such league exists, so a full sync now would resolve
+    # rosters through the OUTGOING season's element ids and leave the new league
+    # with no player_season rows at all (blank squads everywhere). So: create the
+    # league row first, flip it current, and only then run the full sync.
     import asyncio
     import sync as _sync
 
+    # 1. create the new league row + managers + schedule only — no rosters yet.
     try:
-        asyncio.run(_sync.sync_all(fpl_league_id=new_id))
+        asyncio.run(_sync.sync_league_and_managers(fpl_league_id=new_id))
+        asyncio.run(_sync.sync_gameweek_dates(fpl_league_id=new_id))
     except Exception as e:  # network / bad id
         return _err(f"sync of new league failed: {e}", status_code=502)
     new_league = services.resolve_league(db, new_id)
     if not new_league:
         return _err("new league did not sync (check the id)", status_code=502)
-    # 2. carry forward + flip current + preseason
+    # 2. carry forward + flip current + preseason (unfreezes the new league)
     try:
         services.advance_season(db, old_league, new_league)
     except RuleViolation as e:
         return _err(e)
+    # 3. NOW a full sync: the first un-gated sync_players run rekeys the pool on
+    #    `code`, writes player_season for the new league, and resolves rosters
+    #    against the new season's element ids.
+    try:
+        asyncio.run(_sync.sync_all(fpl_league_id=new_id))
+    except Exception as e:
+        return _err(
+            f"rollover completed but the post-rollover sync failed: {e}. "
+            "Run POST /admin/sync?force=1 before using the site.",
+            status_code=502,
+        )
+    # 4. capture the draft-day pool from the REKEYED players table (see
+    #    services.snapshot_player_pool for why this can't live in advance_season).
+    services.snapshot_player_pool(db, new_league)
     return RedirectResponse("/admin/season", status_code=303)
 
 
