@@ -20,7 +20,6 @@ from api import router as v1_router
 from audit import reset_actor, set_actor
 from auth import is_admin, is_logged_in, require_admin
 from db import get_db
-from settings import LEAGUE_ID
 from sync import LeagueIdentityError, sync_all
 from templating import templates
 from ui import router as ui_router
@@ -193,7 +192,9 @@ def health():
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request, db: Session = Depends(get_db)):
     """Minimal public homepage: standings, anti-tanking flags, injury list."""
-    league = services.resolve_league(db, LEAGUE_ID) if LEAGUE_ID else None
+    # is_current first — the rollover sets it, so a new season takes effect without
+    # a redeploy. current_league() still falls back to FPL_DRAFT_LEAGUE_ID.
+    league = services.current_league(db)
     ctx = {"request": request, "league": league, "is_admin": is_admin(request)}
     if league:
         ctx.update(

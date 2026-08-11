@@ -12,6 +12,9 @@
 <div class="card" style="padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:end">
   <label>Search<br><input id="f-q" type="search" placeholder="name / team / owner" style="width:180px"></label>
   <label>Position<br><select id="f-pos"><option value="">All</option><option>GKP</option><option>DEF</option><option>MID</option><option>FWD</option></select></label>
+  {% set teams = players | map(attribute='team') | select | unique | sort | list %}
+  <label>Team<br><select id="f-team"><option value="">All</option>
+    {% for t in teams %}<option>{{ t }}</option>{% endfor %}</select></label>
   <label>Ownership<br><select id="f-own"><option value="">All</option><option value="rostered">On a team</option><option value="free">Free agent</option></select></label>
   <label>On IL<br><select id="f-il"><option value="">All</option><option value="1">On IL</option><option value="0">Not on IL</option></select></label>
   <label>Keeper<br><select id="f-elig"><option value="">All</option><option value="1">Eligible</option><option value="0">Maxed</option></select></label>
@@ -42,6 +45,7 @@
         data-elig="{{ '1' if p.keeper_eligible else ('0' if p.keeper_eligible is not none else '') }}"
         data-acq="{{ p.acquisition or '' }}"
         data-inelig="{{ 1 if p.ineligible else 0 }}"
+        data-team="{{ p.team or '' }}"
         data-search="{{ (p.name ~ ' ' ~ (p.team or '') ~ ' ' ~ (p.owner or ''))|lower }}">
         <td>{{ p.name }}</td>
         <td class="sub">{{ p.position or "—" }}</td>
@@ -74,16 +78,17 @@
     var table = document.getElementById('ptable');
     var tbody = table.tBodies[0];
     var rows = Array.prototype.slice.call(tbody.rows);
-    var ctrls = ['f-q','f-pos','f-own','f-il','f-elig','f-acq','f-inelig'].map(function(id){return document.getElementById(id);});
+    var ctrls = ['f-q','f-pos','f-team','f-own','f-il','f-elig','f-acq','f-inelig'].map(function(id){return document.getElementById(id);});
     function val(id){ return document.getElementById(id).value; }
     function applyFilters(){
-      var q = val('f-q').toLowerCase().trim(), pos = val('f-pos'), own = val('f-own'),
+      var q = val('f-q').toLowerCase().trim(), pos = val('f-pos'), team = val('f-team'), own = val('f-own'),
           il = val('f-il'), elig = val('f-elig'), acq = val('f-acq'), inelig = val('f-inelig');
       var shown = 0;
       rows.forEach(function(r){
         var ok = true;
         if (q && r.dataset.search.indexOf(q) < 0) ok = false;
         if (pos && r.dataset.pos !== pos) ok = false;
+        if (team && r.dataset.team !== team) ok = false;
         if (own === 'rostered' && r.dataset.rostered !== '1') ok = false;
         if (own === 'free' && r.dataset.rostered !== '0') ok = false;
         if (il && r.dataset.il !== il) ok = false;

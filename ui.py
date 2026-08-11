@@ -19,14 +19,16 @@ from auth import (
 from db import get_db
 from models import InjuryList, Manager
 from rules import RuleViolation, SEASON_LAST_GW
-from settings import LEAGUE_ID
 from templating import templates
 
 router = APIRouter()
 
 
 def _league_or_404(db: Session):
-    league = services.resolve_league(db, LEAGUE_ID) if LEAGUE_ID else None
+    # is_current first — the rollover sets it, so a new season takes effect without a
+    # redeploy. current_league() still falls back to FPL_DRAFT_LEAGUE_ID, then to the
+    # only league row. Pinning to the env var meant a rollover looked like a no-op.
+    league = services.current_league(db)
     if not league:
         raise HTTPException(status_code=404, detail="league not configured")
     return league
