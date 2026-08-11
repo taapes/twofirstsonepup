@@ -3066,15 +3066,171 @@ def get_trades(db: Session, league: League) -> list[dict]:
         else:
             kind, what = "player", pnames.get(t.player_id, "—")
         out.append({
+            "id": str(t.id),
             "kind": kind,
             "what": what,
             "from": names.get(t.from_manager),
             "to": names.get(t.to_manager),
             "gw": t.event_gw,
             "source": "FPL" if t.fpl_trade_id else "site",
+            "edited": bool(t.manually_edited),
         })
     out.sort(key=lambda x: (x["gw"] is None, x["gw"] or 0), reverse=True)
     return out
+
+
+# ---- commissioner corrections -------------------------------------------------
+# Historical records get things wrong: an import mis-keys a name, a trade is entered
+# backwards, a pick is recorded against the wrong manager. Until now the only fix was
+# editing the database by hand. These follow override_cup_match (edit in place) and
+# delete_fine (resolve -> audit -> delete), and every one records the PREVIOUS values
+# in the audit details — "what did it used to say" is the point of a correction log.
+
+def _previous(row, fields: list[str]) -> dict:
+    """Prior field values, JSON-safe, for the audit trail."""
+    out = {}
+    for f in fields:
+        v = getattr(row, f, None)
+        out[f] = str(v) if v is not None else None
+    return out
+
+
+def _trade_or_404(db: Session, league: League, trade_id: str) -> Trade:
+    row = (
+        db.query(Trade).filter_by(league_id=league.id, id=trade_id).one_or_none()
+    )
+    if not row:
+        raise RuleViolation("trade not found")
+    return row
+
+
+def edit_trade(
+    db: Session, league: League, trade_id: str, *,
+    from_fpl: str | None = None, to_fpl: str | None = None,
+    event_gw: int | None = None, conditions: str | None = None,
+) -> dict:
+    """Correct a trade. Only the fields passed are changed.
+
+    Sets `manually_edited`, which stops sync_trades rewriting it back or, worse,
+    re-inserting the uncorrected version as a duplicate (its reconciliation matches
+    an exact from/to pair, so a flipped direction sails straight past it).
+    """
+    row = _trade_or_404(db, league, trade_id)
+    prev = _previous(row, ["from_manager", "to_manager", "event_gw", "conditions"])
+
+    if from_fpl:
+        row.from_manager = _resolve_manager(db, league, from_fpl).id
+    if to_fpl:
+        row.to_manager = _resolve_manager(db, league, to_fpl).id
+    if event_gw is not None:
+        row.event_gw = event_gw
+    if conditions is not None:
+        row.conditions = conditions or None
+    if row.from_manager == row.to_manager:
+        raise RuleViolation("a trade needs two different managers")
+
+    row.manually_edited = True
+    record_audit(
+        db, league, action="trade.edit",
+        summary=f"Corrected a trade ({'FPL-sourced' if row.fpl_trade_id else 'site'})",
+        manager_ids=[row.from_manager, row.to_manager],
+        details={"trade_id": str(row.id), "previous": prev},
+    )
+    db.commit()
+    return {"id": str(row.id)}
+
+
+def delete_trade(db: Session, league: League, trade_id: str) -> None:
+    row = _trade_or_404(db, league, trade_id)
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    record_audit(
+        db, league, action="trade.delete",
+        summary=(f"Deleted a trade: {names.get(row.from_manager, '?')} → "
+                 f"{names.get(row.to_manager, '?')}"
+                 + (f" (GW{row.event_gw})" if row.event_gw else "")),
+        manager_ids=[row.from_manager, row.to_manager],
+        details={"previous": _previous(row, [
+            "from_manager", "to_manager", "player_id", "event_gw", "fpl_trade_id",
+            "draft_pick", "pick_season_year", "pick_draft_type", "pick_round",
+        ])},
+    )
+    db.delete(row)
+    db.commit()
+
+
+def _discovery_or_404(db: Session, league: League, result_id: str):
+    from models import DiscoveryResult
+
+    row = (
+        db.query(DiscoveryResult)
+        .filter_by(league_id=league.id, id=result_id)
+        .one_or_none()
+    )
+    if not row:
+        raise RuleViolation("discovery pick not found")
+    return row
+
+
+def edit_discovery_result(
+    db: Session, league: League, result_id: str, *,
+    manager_name: str | None = None, player_name: str | None = None,
+) -> dict:
+    """Correct an imported discovery pick. Both fields are free text (these rows are
+    historical and predate the player table), so this is a plain text fix."""
+    row = _discovery_or_404(db, league, result_id)
+    prev = _previous(row, ["manager_name", "player_name"])
+    if manager_name is not None:
+        row.manager_name = manager_name.strip() or None
+    if player_name is not None:
+        row.player_name = player_name.strip() or None
+    record_audit(
+        db, league, action="discovery.edit",
+        summary=(f"Corrected {row.season} discovery pick {row.pick_number}: "
+                 f"{prev['manager_name']}/{prev['player_name']} → "
+                 f"{row.manager_name}/{row.player_name}"),
+        details={"result_id": str(row.id), "season": row.season, "previous": prev},
+    )
+    db.commit()
+    return {"id": str(row.id)}
+
+
+def delete_discovery_result(db: Session, league: League, result_id: str) -> None:
+    row = _discovery_or_404(db, league, result_id)
+    record_audit(
+        db, league, action="discovery.delete",
+        summary=(f"Deleted {row.season} discovery pick {row.pick_number} "
+                 f"({row.manager_name} — {row.player_name})"),
+        details={"season": row.season, "previous": _previous(
+            row, ["round", "pick_number", "manager_name", "player_name"])},
+    )
+    db.delete(row)
+    db.commit()
+
+
+def delete_draft_pick(db: Session, league: League, pick_id: str) -> None:
+    """Remove a recorded pick, freeing the slot so it can be re-recorded."""
+    from models import DraftPick
+
+    row = db.query(DraftPick).filter_by(league_id=league.id, id=pick_id).one_or_none()
+    if not row:
+        raise RuleViolation("draft pick not found")
+    mgr = db.get(Manager, row.manager_id) if row.manager_id else None
+    label = row.player_label
+    if row.player_id:
+        p = db.get(Player, row.player_id)
+        label = p.name if p else label
+    record_audit(
+        db, league, action="pick.delete",
+        summary=(f"Deleted {row.season_year} {row.draft_type} pick "
+                 f"{row.pick_number} ({mgr.display if mgr else '?'} — {label or '—'})"),
+        manager_ids=[row.manager_id] if row.manager_id else None,
+        details={"previous": _previous(row, [
+            "season_year", "draft_type", "round", "pick_number", "manager_id",
+            "player_id", "player_label",
+        ])},
+    )
+    db.delete(row)
+    db.commit()
 
 
 DISCOVERY_PICKS_PER_MANAGER = 2
@@ -3233,9 +3389,45 @@ def _discovery_by_season(db: Session, league: League) -> list[dict]:
         .all()
     ):
         by_season.setdefault(r.season, []).append(
-            {"pick": r.pick_number, "round": r.round, "manager": r.manager_name, "player": r.player_name}
+            {"id": str(r.id), "pick": r.pick_number, "round": r.round,
+             "manager": r.manager_name, "player": r.player_name}
         )
     return [{"year": y, "picks": rows} for y, rows in by_season.items()]
+
+
+def corrections_data(db: Session, league: League) -> dict:
+    """Everything the commissioner-corrections page edits, in one read: trades,
+    imported discovery picks, and recorded draft picks."""
+    from models import DraftPick
+
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    picks = []
+    for p in (
+        db.query(DraftPick)
+        .filter_by(league_id=league.id)
+        .order_by(DraftPick.season_year.desc(), DraftPick.draft_type,
+                  DraftPick.pick_number)
+        .all()
+    ):
+        label = p.player_label
+        if p.player_id:
+            pl = db.get(Player, p.player_id)
+            label = pl.name if pl else label
+        picks.append({
+            "id": str(p.id), "season_year": p.season_year, "draft_type": p.draft_type,
+            "round": p.round, "pick_number": p.pick_number,
+            "manager": names.get(p.manager_id), "player": label,
+        })
+    return {
+        "trades": get_trades(db, league),
+        "discovery": _discovery_by_season(db, league),
+        "picks": picks,
+        "managers": [
+            {"name": m.display, "fpl": m.fpl_manager_id}
+            for m in db.query(Manager).filter_by(league_id=league.id)
+            .order_by(Manager.display_name)
+        ],
+    }
 
 
 # ---- general trade entry (manager-usable, players + picks, no cap) ----
@@ -3314,8 +3506,18 @@ def record_trade(
         add_pick(A, B, spec)
     for spec in b_picks:
         add_pick(B, A, spec)
-    db.commit()
     moved = len(a_players) + len(b_players) + len(a_picks) + len(b_picks)
+    # This was the one write path in the app that never wrote an audit entry, which
+    # left the everyday trade form invisible in the log it exists to complete.
+    record_audit(
+        db, league, action="trade.record",
+        summary=(f"Trade: {A.display} ↔ {B.display} ({moved} asset"
+                 f"{'s' if moved != 1 else ''})"),
+        manager_ids=[A.id, B.id],
+        details={"a_players": list(a_players), "b_players": list(b_players),
+                 "a_picks": list(a_picks), "b_picks": list(b_picks)},
+    )
+    db.commit()
     return {"a": A.display, "b": B.display, "assets_moved": moved}
 
 

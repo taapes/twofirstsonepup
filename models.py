@@ -286,6 +286,13 @@ class Trade(Base):
         UUID(as_uuid=True), ForeignKey("managers.id"), nullable=True
     )
     conditions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Set when the commissioner corrects this row by hand. sync_trades then leaves it
+    # alone: its reconciliation matches on an exact (player, from, to) triple, so a
+    # corrected direction would otherwise come back as a DUPLICATE on the next sync,
+    # and its upsert would rewrite event_gw straight back to whatever the feed says.
+    manually_edited: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
 
 
 class InjuryList(Base):

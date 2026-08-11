@@ -1017,6 +1017,106 @@ def admin_players(request: Request, db: Session = Depends(get_db)):
     })
 
 
+# ---- commissioner corrections (edit/delete historical records) ----
+def _corrections_redirect():
+    return RedirectResponse("/admin/corrections", status_code=303)
+
+
+@router.get("/admin/corrections", response_class=HTMLResponse)
+def admin_corrections(request: Request, db: Session = Depends(get_db)):
+    """Fix historical records that are wrong: trades, imported discovery picks, and
+    recorded draft picks. Every change is written to the audit log with the previous
+    values, so a bad correction is traceable."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    return templates.TemplateResponse("admin_corrections.html", {
+        "request": request, "league": league, "is_admin": True,
+        **services.corrections_data(db, league),
+    })
+
+
+@router.post("/admin/corrections/trade/edit")
+def admin_trade_edit(
+    request: Request, db: Session = Depends(get_db), trade_id: str = Form(...),
+    from_fpl: str = Form(""), to_fpl: str = Form(""), event_gw: str = Form(""),
+    conditions: str = Form(""),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        gw = _safe_int(event_gw, 1, SEASON_LAST_GW, field="gameweek") if event_gw.strip() else None
+        services.edit_trade(
+            db, league, trade_id,
+            from_fpl=from_fpl.strip() or None, to_fpl=to_fpl.strip() or None,
+            event_gw=gw, conditions=conditions,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/trade/delete")
+def admin_trade_delete(
+    request: Request, db: Session = Depends(get_db), trade_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.delete_trade(db, league, trade_id)
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/discovery/edit")
+def admin_discovery_edit(
+    request: Request, db: Session = Depends(get_db), result_id: str = Form(...),
+    manager_name: str = Form(""), player_name: str = Form(""),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.edit_discovery_result(
+            db, league, result_id,
+            manager_name=manager_name, player_name=player_name,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/discovery/delete")
+def admin_discovery_delete(
+    request: Request, db: Session = Depends(get_db), result_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.delete_discovery_result(db, league, result_id)
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/pick/delete")
+def admin_pick_delete(
+    request: Request, db: Session = Depends(get_db), pick_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.delete_draft_pick(db, league, pick_id)
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
 @router.get("/admin/audit", response_class=HTMLResponse)
 def admin_audit(request: Request, db: Session = Depends(get_db)):
     """Commissioner audit log: every team-affecting action (who/what/when),
@@ -1279,6 +1379,10 @@ def draft_pick(
             services.record_pick(
                 db, league, season_year=year, pick_number=slot["pick"],
                 owner_fpl=slot["owner_fpl"], player_fpl_id=player_fpl_id, round=slot["round"],
+                # An admin may correct a slot that's already been made. For anyone
+                # else record_pick still refuses, so a live draft can't be overwritten
+                # by a double-click or a stale board.
+                overwrite=is_admin(request),
             )
         except RuleViolation:
             pass

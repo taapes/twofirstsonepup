@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Corrections{% endblock %}
+{% block content %}
+<h1>Corrections <span class="tag">commissioner</span></h1>
+<p class="sub">Fix historical records that are wrong. Every change is written to the
+  <a href="/admin/audit">audit log</a> along with the previous values, so a bad
+  correction can always be traced back.</p>
+
+<h2>Trades <span class="sub">({{ trades|length }})</span></h2>
+<div class="card" style="padding:10px;overflow-x:auto">
+  <p class="sub">Editing a trade marks it as hand-corrected, so a later sync can't
+    rewrite it or re-insert the old version alongside it.</p>
+  {% if trades %}
+  <table class="stats">
+    <thead><tr><th></th><th>What</th><th>From</th><th>To</th><th class="num">GW</th><th>Source</th><th></th></tr></thead>
+    <tbody>
+      {% for t in trades %}
+      <tr>
+        <td class="sub">{{ t.kind }}</td>
+        <td>{{ t.what }}</td>
+        <td>
+          <form method="post" action="/admin/corrections/trade/edit" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
+            <input type="hidden" name="trade_id" value="{{ t.id }}">
+            <select name="from_fpl"><option value="">{{ t['from'] or '—' }}</option>
+              {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select>
+        </td>
+        <td>
+            <select name="to_fpl"><option value="">{{ t.to or '—' }}</option>
+              {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select>
+        </td>
+        <td class="num">
+            <input name="event_gw" value="{{ t.gw if t.gw is not none else '' }}"
+                   style="width:48px" inputmode="numeric" placeholder="—">
+        </td>
+        <td class="sub">
+          {{ t.source }}{% if t.edited %} <span class="pill" title="hand-corrected; sync leaves it alone">edited</span>{% endif %}
+        </td>
+        <td style="white-space:nowrap">
+            <button type="submit">Save</button>
+          </form>
+          <form method="post" action="/admin/corrections/trade/delete" style="display:inline"
+                onsubmit="return confirm('Delete this trade? This cannot be undone from the UI.')">
+            <input type="hidden" name="trade_id" value="{{ t.id }}">
+            <button class="mini" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="empty">No trades recorded.</p>{% endif %}
+</div>
+
+<h2>Draft picks <span class="sub">({{ picks|length }})</span></h2>
+<div class="card" style="padding:10px;overflow-x:auto">
+  {% if picks %}
+  <table class="stats">
+    <thead><tr><th>Season</th><th>Type</th><th class="num">Rd</th><th class="num">Pick</th><th>Manager</th><th>Player</th><th></th></tr></thead>
+    <tbody>
+      {% for p in picks %}
+      <tr>
+        <td class="sub">{{ p.season_year }}</td>
+        <td class="sub">{{ p.draft_type }}</td>
+        <td class="num">{{ p.round }}</td>
+        <td class="num">{{ p.pick_number }}</td>
+        <td>{{ p.manager or "—" }}</td>
+        <td>{{ p.player or "—" }}</td>
+        <td>
+          <form method="post" action="/admin/corrections/pick/delete" style="display:inline"
+                onsubmit="return confirm('Delete this pick? The slot re-opens so it can be recorded again.')">
+            <input type="hidden" name="pick_id" value="{{ p.id }}">
+            <button class="mini" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No draft picks recorded. To change one that's already been made,
+    re-record it from the draft board — an admin can overwrite a filled slot.</p>
+  {% endif %}
+</div>
+
+<h2>Discovery picks <span class="sub">(historical)</span></h2>
+<div class="card" style="padding:10px;overflow-x:auto">
+  <p class="sub">Imported from CSV, so manager and player are free text — the most
+    likely place for a wrong name.</p>
+  {% for season in discovery %}
+  <h3 style="margin:12px 0 4px">{{ season.year }}</h3>
+  <table class="stats">
+    <thead><tr><th class="num">Pick</th><th class="num">Rd</th><th>Manager</th><th>Player</th><th></th></tr></thead>
+    <tbody>
+      {% for d in season.picks %}
+      <tr>
+        <td class="num">{{ d.pick }}</td>
+        <td class="num">{{ d.round }}</td>
+        <form method="post" action="/admin/corrections/discovery/edit">
+          <input type="hidden" name="result_id" value="{{ d.id }}">
+          <td><input name="manager_name" value="{{ d.manager or '' }}" style="width:120px"></td>
+          <td><input name="player_name" value="{{ d.player or '' }}" style="width:180px"></td>
+          <td style="white-space:nowrap"><button type="submit">Save</button>
+        </form>
+          <form method="post" action="/admin/corrections/discovery/delete" style="display:inline"
+                onsubmit="return confirm('Delete this discovery pick?')">
+            <input type="hidden" name="result_id" value="{{ d.id }}">
+            <button class="mini" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty">No discovery results imported.</p>
+  {% endfor %}
+</div>
+{% endblock %}

@@ -789,6 +789,18 @@ async def sync_trades(fpl_league_id: str | None = None):
                 manual.fpl_trade_id = tid
                 manual.event_gw = event
                 return
+
+            # A row the commissioner has corrected is left exactly as-is. The upsert
+            # below would otherwise rewrite event_gw back to the feed's value, and the
+            # reconciliation above only matches an exact (player, from, to) triple —
+            # so a corrected DIRECTION would sail past it and land as a duplicate.
+            edited = (
+                session.query(Trade)
+                .filter_by(league_id=league.id, fpl_trade_id=tid, manually_edited=True)
+                .first()
+            )
+            if edited:
+                return
             _upsert(
                 session,
                 Trade,
