@@ -133,17 +133,20 @@ async def sync_players():
         session.add(log)
         session.commit()
 
-        # `players` is global but FPL REASSIGNS element ids every season, so this
-        # upsert (keyed on fpl_id) rewrites each row's identity to whoever holds
-        # that id now. Rosters point at players.id, so refreshing the pool while
-        # every season we have is finished silently puts the wrong names on every
-        # historical team. Only track the pool while a season is actually live.
-        if not session.query(League).filter_by(sync_locked=False).count():
-            log.ok = True
-            log.notes = "all seasons frozen; player pool left at its final state"
-            log.finished_at = datetime.datetime.now(datetime.timezone.utc)
-            session.commit()
-            return
+        # The pool refreshes even when every season is frozen, because it has to:
+        # between seasons the live pool is the ONLY way to see promoted clubs and new
+        # signings, and drafting off a stale pool is worse than useless.
+        #
+        # This used to be gated, for a good reason that no longer applies. Back when
+        # this upsert keyed on fpl_id, refreshing rewrote each row's identity to
+        # whoever holds that element id now, which put the wrong names on every
+        # historical team. Two things fixed that: matching on the permanent `code`
+        # (phase 1a below) so a row always means one human, and player_season, which
+        # freezes each finished season's identity and stats. Every historical read
+        # resolves through that snapshot, so `players` is free to track the present.
+        #
+        # Phase 3 still only writes player_season for a league that is current AND
+        # unfrozen, so a finished season's snapshot is never touched by this.
 
         async with httpx.AsyncClient() as client:
             data = await _get_json(client, f"{API_BASE}/bootstrap-static")

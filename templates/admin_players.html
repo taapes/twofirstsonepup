@@ -8,6 +8,10 @@
 <p class="sub">Stats are the last completed season's totals, so they stay useful for
   drafting while the new season is still scoreless. Blank means the player wasn't in the
   Premier League that season.</p>
+<p class="sub">Player pool last pulled
+  {% if pool.synced_at %}<strong>{{ pool.synced_at.strftime('%Y-%m-%d %H:%M') }} UTC</strong>{% else %}<strong>never</strong>{% endif %}
+  — {{ pool.live }} players currently in the Premier League,
+  {{ pool.historical }} kept for history only.</p>
 
 <div class="card" style="padding:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:end">
   <label>Search<br><input id="f-q" type="search" placeholder="name / team / owner" style="width:180px"></label>

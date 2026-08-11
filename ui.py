@@ -592,7 +592,25 @@ def admin_phase_draft(request: Request, db: Session = Depends(get_db)):
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
     league = _league_or_404(db)
+    # Start the draft FIRST and let it commit. The pool refresh below is a
+    # best-effort nicety; a flaky FPL call must not leave the draft unstarted.
     services.enter_draft_phase(db, league)
+
+    # Then pull a fresh pool: the weekly out-of-season drumbeat could otherwise
+    # leave it six days stale at the exact moment people start picking. Network
+    # lives in the route, not in services, per the two-truths boundary.
+    import asyncio
+
+    import sync as _sync
+
+    try:
+        asyncio.run(_sync.sync_players())
+    except Exception as e:
+        return _err(
+            f"Draft started, but the player refresh failed: {e}. "
+            "Run POST /admin/sync?force=1 before picking.",
+            status_code=502,
+        )
     return RedirectResponse("/admin/health", status_code=303)
 
 
@@ -995,6 +1013,7 @@ def admin_players(request: Request, db: Session = Depends(get_db)):
         "players": services.player_portal(db, league),
         # name the season the stats belong to, so it's never ambiguous on screen
         "stats_season_label": services.season_label(services.stats_season(db, league)),
+        "pool": services.player_pool_freshness(db),
     })
 
 

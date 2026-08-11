@@ -80,22 +80,20 @@ def test_frozen_season_is_never_synced(task, frozen_league, no_network, clean_lo
         db.close()
 
 
-def test_player_pool_not_refreshed_when_every_season_is_frozen(
-    frozen_league, no_network, clean_logs
-):
-    """FPL reassigns element ids each season, and `players` is global and keyed on
-    fpl_id — so refreshing the pool with no live season rewrites every historical
-    roster's names in place. This is what put the wrong players on every team.
-    """
-    asyncio.run(sync.sync_players())  # raises if it hits the API
+def test_freeze_covers_league_data_but_NOT_the_global_player_pool(frozen_league):
+    """The freeze is deliberately scoped to league-owned data.
 
-    db = SessionLocal()
-    try:
-        log = db.query(SyncLog).order_by(SyncLog.started_at.desc()).first()
-        assert log.kind == "players" and log.ok is True
-        assert "frozen" in (log.notes or "")
-    finally:
-        db.close()
+    `sync_players` used to be gated too, because it keyed on fpl_id and refreshing
+    rewrote every historical roster's names. That is fixed at the root now (it matches
+    on the permanent `code`, and player_season freezes each finished season), and the
+    gate had to go: between seasons the live feed is the only source of promoted clubs
+    and new signings. See tests/test_pool_refresh.py for the refresh behaviour and the
+    invariant that a frozen season's snapshot is never touched.
+
+    What must stay frozen is everything league-scoped, which the TASKS list above
+    covers — this asserts the pool is deliberately NOT in that list.
+    """
+    assert sync.sync_players not in TASKS
 
 
 def test_foreign_feed_aborts_before_writing(frozen_league, clean_logs, monkeypatch):

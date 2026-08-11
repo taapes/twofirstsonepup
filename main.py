@@ -253,5 +253,8 @@ def admin_sync(force: bool = False):
                 if plan == "full":
                     services.flag_ineligible(db, league)
                 services.reconcile_absences(db, league)
-    # plan == "skip": nothing to do (phase advance already ran)
+    # plan == "skip": nothing to do (phase advance already ran). Note the daily
+    # "full" run calls sync_players first, so the global player pool refreshes once a
+    # day even while every season is frozen — that's what keeps promoted clubs and new
+    # signings arriving between seasons.
     return {"ok": True, "plan": plan, "phase_advanced": advanced}

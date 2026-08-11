@@ -176,6 +176,7 @@ def decide_sync(*, full_today: bool, live_fixture: bool, gw_starts_today: bool) 
         return "live"
     return "skip"
 
+
 # Anti-tanking (across gameweeks): a manager is flagged when, for >= MIN_WEEKS
 # consecutive gameweeks, each of those gameweeks has >= MIN_ZERO_PLAYERS rostered
 # players (the entire 15-man squad, not just the XI) who recorded 0 real-match

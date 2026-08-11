@@ -1536,6 +1536,31 @@ def get_transactions(db: Session, league: League) -> list[dict]:
     ]
 
 
+def player_pool_freshness(db: Session) -> dict:
+    """When the global player pool was last pulled, and how much of it is live.
+
+    `players` accumulates: a player who leaves the PL keeps their row (so history
+    still renders) but loses their `fpl_id`, since that slot goes back to FPL. So
+    "in the current pool" means fpl_id IS NOT NULL, and the rest are historical.
+    """
+    from models import SyncLog
+
+    last = (
+        db.query(SyncLog)
+        .filter(SyncLog.kind == "players", SyncLog.ok.is_(True))
+        .order_by(SyncLog.started_at.desc())
+        .first()
+    )
+    total = db.query(Player).count()
+    live = db.query(Player).filter(Player.fpl_id.isnot(None)).count()
+    return {
+        "synced_at": last.started_at if last else None,
+        "notes": last.notes if last else None,
+        "live": live,
+        "historical": total - live,
+    }
+
+
 def player_portal(db: Session, league: League) -> list[dict]:
     """Every player with league context (owner, on-IL, ineligible, keeper
     acquisition/years/eligibility) for the admin data portal, plus that player's
@@ -2450,7 +2475,9 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
             _dropped(mid, pid),
             seed_remaining.get(pid),
         )
-        p = players.get(pid)
+        # Season identity first; fall back to the live pool rather than rendering a
+        # raw UUID at someone, which is what a player with no snapshot row used to do.
+        p = players.get(pid) or db.get(Player, pid)
         status.setdefault(mid, {})[pid] = {
             "player": p.name if p else str(pid),
             "position": p.position if p else None,
@@ -3377,7 +3404,18 @@ def keeper_candidates(db: Session, league: League, fpl_manager_id: str) -> dict:
     manager = _resolve_manager(db, league, fpl_manager_id)
     status = _derive_keeper_status(db, league).get(manager.id, {})
     fpl_by_id = {p.id: p.fpl_id for p in db.query(Player)}
-    items = [{**v, "fpl_id": fpl_by_id.get(pid)} for pid, v in status.items()]
+    # A player who has left the Premier League keeps their row but loses their
+    # fpl_id (the slot goes back to FPL). The form submits by fpl_id, so without
+    # this they'd render as a selectable candidate and then silently fail. Mark
+    # them ineligible with a reason instead.
+    items = []
+    for pid, v in status.items():
+        fid = fpl_by_id.get(pid)
+        item = {**v, "fpl_id": fid, "_pid": pid}
+        if fid is None:
+            item["eligible"] = False
+            item["reason"] = "no longer in the Premier League"
+        items.append(item)
     items.sort(key=lambda x: (not x["eligible"], -x["years_remaining"], x["player"]))
     # current submitted selection (upcoming season) so the form can preselect
     upcoming = (league.season_year or 0) + 1
@@ -3387,10 +3425,12 @@ def keeper_candidates(db: Session, league: League, fpl_manager_id: str) -> dict:
             league_id=league.id, manager_id=manager.id, season_year=upcoming
         )
     }
-    sel_fpl = {fpl_by_id.get(pid): disc for pid, disc in selected.items()}
+    # Match on the stable player_id, not fpl_id: a departed player's fpl_id is None,
+    # and keying on that would make EVERY departed player look selected.
     for it in items:
-        it["selected"] = it["fpl_id"] in sel_fpl
-        it["is_discovery"] = sel_fpl.get(it["fpl_id"], False)
+        it["selected"] = it["_pid"] in selected
+        it["is_discovery"] = selected.get(it["_pid"], False)
+        del it["_pid"]
     # the saved discovery keeper may be off-roster (it can be any player), so
     # surface it independently for the search UI to pre-fill
     discovery = None
