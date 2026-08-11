@@ -1332,7 +1332,9 @@ def flag_ineligible(db: Session, league: League) -> int:
         fid for (fid,) in db.query(PlayerIneligibility.fpl_id).filter_by(league_id=league.id)
     }
     added = 0
-    for p in db.query(Player):
+    # fpl_id is nullable since the code rekey (a departed player holds no slot);
+    # a NULL would otherwise be written as an ineligibility row.
+    for p in db.query(Player).filter(Player.fpl_id.isnot(None)):
         if p.fpl_id in snapshot or p.fpl_id in already:
             continue
         if (p.position or "").upper() == "DEF":  # defenders added later stay eligible
@@ -1490,7 +1492,7 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
         .filter_by(league_id=new_league.id)
     }
     snapped = 0
-    for (fid,) in db.query(Player.fpl_id):
+    for (fid,) in db.query(Player.fpl_id).filter(Player.fpl_id.isnot(None)):
         if fid not in have:
             db.add(PlayerPoolSnapshot(league_id=new_league.id, fpl_id=fid))
             snapped += 1

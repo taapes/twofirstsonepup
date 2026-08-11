@@ -22,6 +22,7 @@ from models import (
     Manager,
     Match,
     Player,
+    PlayerSeason,
     Roster,
     Standing,
     SyncLog,
@@ -174,13 +175,72 @@ async def sync_players():
             except (TypeError, ValueError):
                 return None
 
-        for e in data.get("elements", []):
+        elements = data.get("elements", [])
+
+        # -- phase 0: index what we already have -------------------------------
+        by_code = {
+            p.code: p for p in session.query(Player).filter(Player.code.isnot(None))
+        }
+        by_fpl = {
+            p.fpl_id: p for p in session.query(Player).filter(Player.fpl_id.isnot(None))
+        }
+
+        def _pos(e):
+            return positions.get(e.get("element_type")) or _POSITION_FALLBACK.get(
+                e.get("element_type")
+            )
+
+        def _name(e):
+            return e.get("web_name") or e.get("second_name") or ""
+
+        # -- phase 1a: decide who will OWN each incoming element id ------------
+        targets: dict[int, Player | None] = {}
+        adopted = 0
+        for e in elements:
+            code = e.get("code")
+            row = by_code.get(code) if code is not None else None
+            if row is None:
+                # Row not yet backfilled with a code. Adopt an existing row by
+                # fpl_id ONLY when name AND position BOTH agree. fpl_id alone is
+                # NOT evidence of identity: FPL reassigns element ids every season
+                # and many reassignments keep the same position.
+                # False negative = a duplicate row (fixable via a code backfill).
+                # False positive = permanently rewriting a row that 12 FK columns
+                # point at (unrecoverable). Fail safe.
+                cand = by_fpl.get(e["id"])
+                if (
+                    cand is not None
+                    and cand.code is None
+                    and cand.name == _name(e)
+                    and (cand.position or _pos(e)) == _pos(e)
+                ):
+                    row = cand
+                    adopted += 1
+            targets[e["id"]] = row
+
+        # -- phase 1b: free EVERY fpl_id whose holder is not its new owner -----
+        # Covers swaps (5<->12), chains (5->12->30), ids handed to a different
+        # human, and players who left the PL. Without this the partial unique
+        # index rejects the very first reassignment (measured against the live
+        # 26/27 feed: 572 of 577 ids are held by a different row than their new
+        # owner).
+        freed = 0
+        for fid, row in list(by_fpl.items()):
+            if targets.get(fid) is not row:
+                row.fpl_id = None  # ORM-level so the UPDATE is emitted
+                freed += 1
+        if freed:
+            session.flush()
+
+        # -- phase 2: assign (order no longer matters; conflicts are all NULL) --
+        created = 0
+        for e in elements:
             c = classic_by_id.get(e["id"], {})
-            match = {"fpl_id": e["id"]}
             values = {
-                "name": e.get("web_name") or e.get("second_name") or "",
-                "position": positions.get(e.get("element_type"))
-                or _POSITION_FALLBACK.get(e.get("element_type")),
+                "code": e.get("code"),
+                "fpl_id": e["id"],
+                "name": _name(e),
+                "position": _pos(e),
                 "current_team": teams.get(e.get("team")),
                 "status": e.get("status") or c.get("status") or None,
                 "price": c.get("now_cost"),  # now_cost from classic FPL (tenths)
@@ -198,9 +258,65 @@ async def sync_players():
                 "selected_by_percent": c.get("selected_by_percent"),
                 "news": c.get("news") or None,
             }
-            _upsert(session, Player, match, values)
+            row = targets[e["id"]]
+            if row is None:
+                row = Player()
+                session.add(row)
+                created += 1
+            for k, v in values.items():
+                setattr(row, k, v)
+            session.flush()
+            if e.get("code") is not None:
+                by_code[e["code"]] = row
+            by_fpl[e["id"]] = row  # phase 3 still reads this
+
+        # -- phase 3: snapshot this season's identity --------------------------
+        # Only for the live season. Frozen seasons keep the snapshot they already
+        # have, which is the whole point: `players` moves on, player_season does not.
+        cur = (
+            session.query(League)
+            .filter_by(is_current=True, sync_locked=False)
+            .one_or_none()
+        )
+        snapped = 0
+        if cur is not None:
+            for e in elements:
+                c = classic_by_id.get(e["id"], {})
+                row = by_code.get(e.get("code")) or by_fpl.get(e["id"])
+                if row is None:
+                    continue
+                _upsert(
+                    session,
+                    PlayerSeason,
+                    {"league_id": cur.id, "fpl_id": e["id"]},
+                    {
+                        "player_id": row.id,
+                        "name": row.name,
+                        "position": row.position,
+                        "current_team": row.current_team,
+                        "price": c.get("now_cost"),
+                        "status": row.status,
+                        "news": row.news,
+                        "total_points": _int(c.get("total_points")),
+                        "goals_scored": _int(c.get("goals_scored")),
+                        "assists": _int(c.get("assists")),
+                        "clean_sheets": _int(c.get("clean_sheets")),
+                        "bonus": _int(c.get("bonus")),
+                        "minutes": _int(c.get("minutes")),
+                        "form": c.get("form"),
+                        "points_per_game": c.get("points_per_game"),
+                        "ict_index": c.get("ict_index"),
+                        "selected_by_percent": c.get("selected_by_percent"),
+                    },
+                )
+                snapped += 1
 
         log.ok = True
+        # Make a season boundary auditable rather than silent.
+        log.notes = (
+            f"{len(elements)} elements; {created} created, {adopted} adopted by "
+            f"name+position, {freed} fpl_ids freed, {snapped} player_season rows"
+        )
         log.finished_at = datetime.datetime.now(datetime.timezone.utc)
         session.commit()
 
