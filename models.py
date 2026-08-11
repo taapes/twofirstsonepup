@@ -20,11 +20,13 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -120,9 +122,27 @@ class Manager(Base):
 
 class Player(Base):
     __tablename__ = "players"
+    # Partial unique index: many departed players may sit at fpl_id NULL
+    # simultaneously, while every live element id stays unique.
+    __table_args__ = (
+        Index(
+            "uq_players_fpl_id_live",
+            "fpl_id",
+            unique=True,
+            postgresql_where=text("fpl_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
-    fpl_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    # FPL's PERMANENT player id (stable across seasons). `fpl_id` below is only
+    # that player's element id in the CURRENT season — FPL reassigns those every
+    # year, so `code` is what makes players.id mean one human forever.
+    code: Mapped[int | None] = mapped_column(
+        Integer, unique=True, index=True, nullable=True
+    )
+    # Current season's element id. Nullable: a player who leaves the PL keeps no
+    # slot, and their old id gets reassigned to somebody else.
+    fpl_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     name: Mapped[str] = mapped_column(String)
     position: Mapped[str | None] = mapped_column(String, nullable=True)
     current_team: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -852,6 +872,52 @@ class PlayerPoolSnapshot(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class PlayerSeason(Base):
+    """Per-season snapshot of a player's identity and stats.
+
+    `players` is global and mutable — it always holds the CURRENT season. This table
+    freezes what each player was during a given season, so historical rosters render
+    the right name, club and numbers. Written by sync_players on every run in which a
+    league is BOTH is_current AND not sync_locked.
+
+    Carries BOTH ids on purpose:
+      - player_id -> resolve a stable UUID (rosters, keepers) to season identity
+      - fpl_id    -> resolve that season's element id (gameweek_points.player_points,
+                     v2 lineups) back to a player
+    """
+
+    __tablename__ = "player_season"
+    __table_args__ = (
+        UniqueConstraint("league_id", "fpl_id", name="uq_player_season_league_fpl"),
+        Index("ix_player_season_league_player", "league_id", "player_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), index=True
+    )
+    fpl_id: Mapped[int] = mapped_column(Integer, index=True)
+    name: Mapped[str] = mapped_column(String)
+    position: Mapped[str | None] = mapped_column(String, nullable=True)
+    current_team: Mapped[str | None] = mapped_column(String, nullable=True)
+    price: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str | None] = mapped_column(String, nullable=True)
+    news: Mapped[str | None] = mapped_column(Text, nullable=True)
+    total_points: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    goals_scored: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    assists: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    clean_sheets: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    bonus: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    form: Mapped[str | None] = mapped_column(String, nullable=True)
+    points_per_game: Mapped[str | None] = mapped_column(String, nullable=True)
+    ict_index: Mapped[str | None] = mapped_column(String, nullable=True)
+    selected_by_percent: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class PlayerIneligibility(Base):
