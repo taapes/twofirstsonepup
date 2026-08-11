@@ -303,11 +303,32 @@ Repair: `scripts/restore_player_identity.py` (restores from a snapshot by
 `players.id`; season stats added after the snapshot are cleared, since showing
 another player's numbers is worse than showing none).
 
-⚠️ **Still open:** the guard only holds while no season is live. The moment 26/27
-rolls over and syncs, the 26/27 pool overwrites the 25/26 identities again and
-every historical roster breaks. Making player identity season-scoped (snapshot
-name/position/club per season like `player_pool_snapshot` does for eligibility, and
-resolve historical views through it) is the real fix and is **not yet built**.
+**Season-scoped player identity (built).** Two pieces close this:
+- **`players.code`** — FPL's *permanent* player id (Raya: per-season `id`=1, `code`=154561).
+  `sync_players` matches on `code` first, so `players.id` permanently means one human and
+  the 12 FK columns pointing at it (rosters, keeper seeds/selections, trades, IL, draft
+  picks, v2 ledger) stay correct across seasons. `fpl_id` is now just "this season's
+  element id": nullable, with a **partial** unique index (`WHERE fpl_id IS NOT NULL`) so
+  departed players can release their slot. Sync runs in phases — decide who owns each
+  incoming id, free every id whose holder isn't its new owner, then assign — because a
+  straight swap otherwise violates that index mid-transaction. A not-yet-coded row is
+  adopted only when **name AND position** both match; position alone can't tell Gabriel
+  from J.Timber, who are both DEF.
+- **`player_season`** (`league_id`, `player_id`, `fpl_id` + identity/stats) — per-season
+  snapshot, refreshed by `sync_players` on every run while a league is current+unfrozen,
+  then frozen in place. Read paths resolve through it via `services.season_identity`, so
+  there is **one code path** for current and historical seasons (no `if sync_locked`
+  branching). It carries both ids so it resolves either direction — UUID→identity for
+  roster joins, and season `fpl_id`→player for the ids embedded in
+  `gameweek_points.player_points` and v2 lineups.
+
+Gotchas worth remembering: a `PlayerSeason` row's `.id` is the snapshot's own PK, **not** a
+`players.id` — comparing it against a keeper/roster FK silently yields False. And
+`snapshot_player_pool` must run *after* the first post-rollover sync, since `sync_players`
+is gated on a league being current+unfrozen (`advance_season` no longer captures it).
+Backfills: `scripts/backfill_player_code.py` (conservative; hard-stops rather than leave a
+rostered/keeper player uncoded) and `scripts/capture_player_season.py`. 25/26 rich stats are
+permanently NULL — they were cleared after the incident and can't be recovered.
 
 **Sync cadence** is fixture-aligned + code-gated: `/admin/sync` runs
 `services.sync_plan` (pure `rules.decide_sync`) → `full | live | skip` from
