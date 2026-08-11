@@ -172,6 +172,26 @@ Write tests for these. They are custom and non-obvious:
 - **Trades:** Allowed only end of GW38 -> Jan 31. Player-for-player,
   pick-for-player, or pick-for-pick. Conditions free-text initially. Trades
   update keeper clocks and the draft board.
+  **A commissioner-entered player trade moves the player via an OVERLAY ON READ**
+  (`services.player_ownership`, the sibling of `pick_ownership`), never by writing
+  `rosters` — those are FPL-canonical, and a fabricated row would be indistinguishable
+  from a synced one to `get_transactions` / anti-tanking / `reconcile_absences`.
+  Discriminator: `player_id` set, `pick_round`/`fpl_trade_id`/`event_gw` all NULL —
+  a trade FPL processed is already in the snapshots, so overlaying it would move the
+  player twice. It **self-retires**: `sync_trades` back-fills those fields when the feed
+  confirms the move, exactly when the snapshot takes over — hence no phase gate.
+  Applied only when `from_manager` is the current owner, so a typo'd direction fails
+  closed (`/admin/health` → "site trades applied" surfaces the ones that didn't apply).
+  **The acquisition label follows the player** — a waiver pickup traded to you still
+  eats one of your two waiver keeper slots — and the clock arrives already capped by any
+  drop the sender took, or trading out and back would launder the penalty away. Roster
+  HISTORY (presence, drops, IL) stays keyed to the manager who actually rostered him.
+  In-season *synced* trades still relabel the receiver to `trade`; that inconsistency is
+  known and unresolved. A submitted keeper for a player since traded away is **not**
+  deleted and doesn't block the trade — it just stops counting
+  (`effective_keeper_selections`), so the manager is one keeper short and gets the pick
+  back. `trades.created_at` is the only reliable ordering (`date` is NULL on
+  commissioner rows and the PK is a random uuid4); both ownership readers depend on it.
 - **Discovery draft:** Snake, 2 picks/manager, held in September. If a picked
   player joins the PL during the year they become a bonus (6th) keeper — only
   one bonus keeper allowed. *Built:* `services.get_discovery_board` (2-round snake

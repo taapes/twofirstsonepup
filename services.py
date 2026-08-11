@@ -573,11 +573,15 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
         nm = new_mgrs.get(om.fpl_manager_id) if om else None
         if not nm:
             continue
-        prior = (
-            status.get(ks.manager_id, {}).get(ks.player_id, {}).get("years_remaining")
-        )
-        prior = prior if prior is not None else KEEPER_FRESH_REMAINING
-        new_remaining = max(prior - 1, 0)
+        derived = status.get(ks.manager_id, {}).get(ks.player_id)
+        if derived is None:
+            # The selecting manager no longer holds this player — they traded him
+            # away after submitting. The selection just doesn't count (they end up
+            # one keeper short), and crucially it must NOT fall through to a fresh
+            # clock: that silently wrote a brand-new 2-year keeper into the season
+            # for a player the manager doesn't own, permanently and invisibly.
+            continue
+        new_remaining = max(derived["years_remaining"] - 1, 0)
         seed = (
             db.query(KeeperSeed)
             .filter_by(manager_id=nm.id, player_id=ks.player_id)
@@ -849,21 +853,11 @@ def get_rosters(db: Session, league: League) -> list[dict]:
     managers = (
         db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
     )
+    # one overlay for the whole loop rather than one per manager
+    moved = player_ownership(db, league) if gw is not None else {}
     out = []
     for m in managers:
-        players = []
-        if gw is not None:
-            players = (
-                db.query(PlayerSeason)
-                .join(Roster, Roster.player_id == PlayerSeason.player_id)
-                .filter(
-                    Roster.manager_id == m.id,
-                    Roster.gameweek_id == gw.id,
-                    PlayerSeason.league_id == league.id,
-                )
-                .order_by(PlayerSeason.position, PlayerSeason.name)
-                .all()
-            )
+        players = _squad_players(db, league, m.id, gw.id if gw else None, moved=moved)
         out.append(
             {
                 "manager": m.display,
@@ -876,17 +870,26 @@ def get_rosters(db: Session, league: League) -> list[dict]:
     return out
 
 
-def _squad_players(db: Session, league: League, manager_id, gw_id) -> list[PlayerSeason]:
+def _squad_players(
+    db: Session, league: League, manager_id, gw_id, *, moved: dict | None = None
+) -> list[PlayerSeason]:
     """`league` is positional and has no default on purpose: a missed caller must
-    fail loudly rather than silently filter on league_id IS NULL."""
+    fail loudly rather than silently filter on league_id IS NULL.
+
+    Resolves membership through _effective_roster_pids, not a join on Roster, so a
+    commissioner-entered trade moves the player in BOTH directions — the join alone
+    would neither add him to the buyer nor remove him from the seller. Pass `moved`
+    when looping over managers to compute the overlay once.
+    """
     if gw_id is None:
+        return []
+    pids = _effective_roster_pids(db, league, manager_id, gw_id, moved)
+    if not pids:
         return []
     return (
         db.query(PlayerSeason)
-        .join(Roster, Roster.player_id == PlayerSeason.player_id)
         .filter(
-            Roster.manager_id == manager_id,
-            Roster.gameweek_id == gw_id,
+            PlayerSeason.player_id.in_(pids),
             PlayerSeason.league_id == league.id,
         )
         .order_by(PlayerSeason.position, PlayerSeason.name)
@@ -1641,6 +1644,10 @@ def player_portal(db: Session, league: League) -> list[dict]:
     if gw:
         for mid, pid in db.query(Roster.manager_id, Roster.player_id).filter_by(gameweek_id=gw.id):
             owner_by_pid[pid] = mid
+        # Must move in step with _derive_keeper_status below: this row renders the
+        # owner and the keeper facts side by side, so overlaying only one of them
+        # shows the new owner with a blank keeper column.
+        owner_by_pid.update(player_ownership(db, league))
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
     il_pids = {
         e.player_id for e in
@@ -2529,7 +2536,14 @@ def set_keeper_override(
 
     manager = _resolve_manager(db, league, fpl_manager_id)
     player = _resolve_player(db, player_fpl_id)
-    derived = _derive_keeper_status(db, league).get(manager.id, {}).get(player.id, {})
+    derived = _derive_keeper_status(db, league).get(manager.id, {}).get(player.id)
+    if derived is None:
+        # Without this, overriding a player this manager doesn't hold defaulted
+        # years_remaining to 0 and silently wrote a 0-year seed against a non-owner.
+        # The UI can't reach it (the page only lists candidates) but the endpoint can.
+        raise RuleViolation(
+            f"{player.name} is not one of {manager.display}'s keeper candidates"
+        )
 
     seed = (
         db.query(KeeperSeed)
@@ -2731,26 +2745,48 @@ def _derive_keeper_status(
         # means the player was dropped (to FA) and later re-acquired
         return any(g not in gws and g not in il_gws for g in range(first, last_n + 1))
 
+    # Ownership follows commissioner-entered trades (see player_ownership); roster
+    # HISTORY does not. `hist` is the manager whose Roster rows and IL entries
+    # actually describe this player, `owner` is whoever may now keep him. They differ
+    # only for an overlaid player — and re-keying the history to the new owner would
+    # be a lie, as well as a crash: presence[(new owner, pid)] is empty, so _dropped
+    # would read False and quietly un-cap the clock.
+    moved = player_ownership(db, league)
+
     status: dict = {}
-    for mid, pid in final_candidates:
+    for hist, pid in final_candidates:
+        owner = moved.get(pid, hist)
+        # The commissioner's override applies to whoever holds the player now, but
+        # falls back to the sender's — transitional, since advance_season rewrites the
+        # seed owner-keyed at rollover. `is not None` because 0 years is meaningful.
+        seed_years = seed_remaining.get((owner, pid))
+        if seed_years is None:
+            seed_years = seed_remaining.get((hist, pid))
+        seed_a = seed_acq.get((owner, pid)) or seed_acq.get((hist, pid))
         acq, remaining = keeper_status(
-            1 in presence[(mid, pid)],   # started_with_manager (on GW1 roster)
-            (mid, pid) in traded_in,
-            _dropped(mid, pid),
-            seed_remaining.get((mid, pid)),
-            acquisition=seed_acq.get((mid, pid)),
+            1 in presence[(hist, pid)],   # started_with_manager (on GW1 roster)
+            (hist, pid) in traded_in,
+            _dropped(hist, pid),
+            seed_years,
+            acquisition=seed_a,
         )
+        # A traded player arrives with the sender's DERIVED status intact: the label
+        # follows the player (a waiver pickup traded to you still eats one of your two
+        # waiver keeper slots), and the clock arrives already capped by any drop the
+        # sender took — otherwise trading a player out and back would restore keeper
+        # years the drop was supposed to cost.
         # Season identity first; fall back to the live pool rather than rendering a
         # raw UUID at someone, which is what a player with no snapshot row used to do.
         p = players.get(pid) or db.get(Player, pid)
-        status.setdefault(mid, {})[pid] = {
+        status.setdefault(owner, {})[pid] = {
             "player": p.name if p else str(pid),
             "position": p.position if p else None,
             "acquisition": acq,
             "years_remaining": remaining,
             "eligible": keeper_eligible(remaining),
-            "kept": (mid, pid) in kept,  # submitted keeper for next season
-            "kept_discovery": kept.get((mid, pid), False),
+            # keyed on the OWNER: a KeeperSelection belongs to whoever submitted it
+            "kept": (owner, pid) in kept,  # submitted keeper for next season
+            "kept_discovery": kept.get((owner, pid), False),
         }
     return status
 
@@ -2832,7 +2868,8 @@ def submit_keepers(
                       "years_remaining": KEEPER_FRESH_REMAINING}
             else:
                 raise RuleViolation(
-                    f"{player.name} is not on {manager.name}'s final roster"
+                    f"{player.name} is not one of {manager.display}'s keeper "
+                    "candidates (traded away?)"
                 )
         selections.append({**st, "fpl_id": fid, "player_id": player.id,
                            "is_discovery": is_discovery})
@@ -2903,8 +2940,14 @@ def get_keeper_selections(
         .all()
     )
     show_all = viewer_is_admin or keepers_revealed(league)
+    # A selection whose player has since been traded away no longer counts, so it
+    # must not be listed as a keeper either — the manager is simply one short.
+    counts = {(s.manager_id, s.player_id)
+              for s in effective_keeper_selections(db, league, season_year)}
     by_manager: dict = {}
     for sel, m, p in rows:
+        if (sel.manager_id, sel.player_id) not in counts:
+            continue
         mine = viewer_fpl is not None and m.fpl_manager_id == str(viewer_fpl)
         if not (show_all or mine):
             continue
@@ -3379,18 +3422,124 @@ def pick_ownership(
         league_id=league.id, season_year=season_year, draft_type=draft_type
     ):
         reassigned[(fp.round, fp.original_owner)] = fp.owner
-    # then live pick trades, in entry order (latest wins)
+    # then live pick trades, in entry order (latest wins). Ordered on created_at:
+    # this used to sort on Trade.id, which is a random uuid4 — so "latest wins" was
+    # actually "whichever id sorted higher" the moment a pick changed hands twice.
     for t in (
         db.query(Trade)
         .filter(Trade.league_id == league.id, Trade.pick_round.isnot(None),
                 Trade.pick_season_year == season_year, Trade.pick_draft_type == draft_type)
-        .order_by(Trade.id)
+        .order_by(Trade.created_at, Trade.id)
         .all()
     ):
         orig, to = person_by_id.get(t.pick_original_manager), person_by_id.get(t.to_manager)
         if orig and to:
             reassigned[(t.pick_round, orig)] = to
     return reassigned
+
+
+def player_ownership(db: Session, league: League) -> dict:
+    """SINGLE SOURCE OF TRUTH for who holds a PLAYER when the roster snapshot is
+    stale. Returns {player_id: current_owner_manager_id} for players whose owner
+    differs from the latest synced roster — empty when nothing has moved. The
+    sibling of pick_ownership, one table over.
+
+    A commissioner-entered trade writes a Trade row and nothing else: it can't move a
+    Roster row, because rosters come from FPL and FPL never saw this trade. Rosters
+    are canonical truth, so the correction is an overlay on READ — never a write.
+    (Writing a fabricated Roster row would be indistinguishable from a synced one,
+    and get_transactions, anti-tanking and reconcile_absences would all ingest it as
+    fact.)
+
+    The discriminator is "no fpl_trade_id and no event_gw" — a trade FPL processed
+    carries the event it processed in, and every snapshot from that gameweek on
+    already shows the new owner, so overlaying it would move the player a SECOND
+    time. It is self-retiring: sync_trades back-fills both fields onto a matching
+    manual row exactly when the feed confirms the move, which is exactly when the
+    snapshots take over. So there is no phase gate — needing the overlay is a
+    property of the row, not of the calendar.
+
+    To make a corrected FPL-sourced trade take effect here, delete it and re-enter it
+    via trade_player; widening the filter to include `manually_edited` would let a
+    conditions-only edit move a player by coincidence.
+    """
+    base, owner = _owner_maps(db, league)
+    return {pid: mid for pid, mid in owner.items() if base.get(pid) != mid}
+
+
+def effective_owner(db: Session, league: League) -> dict:
+    """{player_id: manager_id} for EVERY rostered player, trades applied. Use this
+    when you need to ask "does this manager still hold him?"; player_ownership
+    returns only the players who moved."""
+    return _owner_maps(db, league)[1]
+
+
+def _owner_maps(db: Session, league: League) -> tuple[dict, dict]:
+    """(snapshot owners, owners after site trades) — shared by the two readers above
+    so the seeding and the fold can't drift apart."""
+    gw = latest_gameweek(db, league)
+    if gw is None:
+        return {}, {}
+    # Seeded from the SNAPSHOT, never from Trade: a trade naming a player nobody
+    # rosters must move nobody rather than conjure a phantom squad member.
+    owner = {
+        pid: mid
+        for mid, pid in db.query(Roster.manager_id, Roster.player_id).filter_by(
+            gameweek_id=gw.id
+        )
+    }
+    base = dict(owner)
+    for t in (
+        db.query(Trade)
+        .filter(Trade.league_id == league.id,
+                Trade.player_id.isnot(None),
+                Trade.pick_round.is_(None),
+                Trade.fpl_trade_id.is_(None),
+                Trade.event_gw.is_(None))
+        .order_by(Trade.created_at, Trade.id)
+        .all()
+    ):
+        # Only from the CURRENT owner, so a mis-entered direction fails closed —
+        # the player stays where the snapshot says instead of teleporting — and two
+        # edges out of one manager apply once, not twice.
+        if owner.get(t.player_id) == t.from_manager:
+            owner[t.player_id] = t.to_manager
+    return base, owner
+
+
+def effective_keeper_selections(
+    db: Session, league: League, season_year: int
+) -> list[KeeperSelection]:
+    """Submitted selections that still COUNT — i.e. the selecting manager still holds
+    the player. A manager who trades a player away after submitting him doesn't have
+    the trade blocked and doesn't have the row deleted: it simply stops counting, and
+    they end up one keeper short (they can re-submit while keepers are unlocked)."""
+    owner = effective_owner(db, league)
+    return [
+        s
+        for s in db.query(KeeperSelection).filter_by(
+            league_id=league.id, season_year=season_year
+        )
+        if owner.get(s.player_id) == s.manager_id
+    ]
+
+
+def _effective_roster_pids(
+    db: Session, league: League, manager_id, gw_id, moved: dict | None = None
+) -> set:
+    """The player ids a manager effectively holds at `gw_id`, after site trades.
+
+    Subtracts EVERY moved player and re-adds only this manager's: any player in
+    `moved` has a definitive owner, so the snapshot's opinion about them is
+    irrelevant. Pass a precomputed `moved` when looping over managers.
+    """
+    moved = player_ownership(db, league) if moved is None else moved
+    base = {
+        pid for (pid,) in db.query(Roster.player_id).filter_by(
+            manager_id=manager_id, gameweek_id=gw_id
+        )
+    }
+    return (base - set(moved)) | {pid for pid, mid in moved.items() if mid == manager_id}
 
 
 def get_draft_board(
@@ -3405,8 +3554,10 @@ def get_draft_board(
     r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
     rev = _reverse_standings_managers(db, league)
 
+    # Only selections that still count: a manager who traded away a player he'd
+    # already submitted gets that pick back rather than drafting one short.
     keeper_counts: dict = {}
-    for sel in db.query(KeeperSelection).filter_by(league_id=league.id, season_year=season_year):
+    for sel in effective_keeper_selections(db, league, season_year):
         keeper_counts[sel.manager_id] = keeper_counts.get(sel.manager_id, 0) + 1
 
     slots = generate_draft_slots(
@@ -4095,8 +4246,36 @@ def data_health(db: Session, league: League) -> list[dict]:
             counts[mid] = counts.get(mid, 0) + 1
         names = {m.id: m.display for m in mgrs}
         bad_rosters = [f"{names.get(m.id)}={counts.get(m.id, 0)}" for m in mgrs if counts.get(m.id, 0) != 15]
-    add(f"15-man rosters (GW{gw.number if gw else '?'})", not bad_rosters,
+    # Deliberately raw Roster, NOT the trade overlay: this check validates the SYNC.
+    # A player-for-pick trade legitimately leaves one manager at 14 and another at 16
+    # until the draft fills them back, and overlaying it here would turn a legal trade
+    # into a permanent red check while hiding a genuine sync gap.
+    add(f"15-man rosters (FPL, GW{gw.number if gw else '?'})", not bad_rosters,
         ", ".join(bad_rosters) if bad_rosters else "all 15")
+
+    # Commissioner-entered trades that didn't apply, because the player isn't where
+    # the trade says he is. player_ownership skips these deliberately (failing closed
+    # beats teleporting someone), which means a typo'd direction otherwise does
+    # nothing at all, silently.
+    unapplied = []
+    if gw is not None:
+        owner = effective_owner(db, league)
+        names = {m.id: m.display for m in mgrs}
+        pnames = player_names(db, league)
+        for t in (
+            db.query(Trade)
+            .filter(Trade.league_id == league.id, Trade.player_id.isnot(None),
+                    Trade.pick_round.is_(None), Trade.fpl_trade_id.is_(None),
+                    Trade.event_gw.is_(None))
+            .order_by(Trade.created_at, Trade.id)
+        ):
+            if owner.get(t.player_id) != t.to_manager:
+                unapplied.append(
+                    f"{pnames.get(t.player_id, '?')} -> {names.get(t.to_manager, '?')}"
+                    f" (held by {names.get(owner.get(t.player_id), 'nobody')})"
+                )
+    add("site trades applied", not unapplied,
+        "; ".join(unapplied) if unapplied else "all applied")
 
     # players on the latest roster with no keeper seed (they default to fresh)
     seeded = {pid for (pid,) in db.query(KeeperSeed.player_id).filter_by(league_id=league.id)}

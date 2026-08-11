@@ -293,6 +293,14 @@ class Trade(Base):
     manually_edited: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # The ONLY reliable ordering for trades: `date` is NULL on every
+    # commissioner-entered row and the PK is a random uuid4. Two readers depend on
+    # chronology — pick_ownership ("latest reassignment wins") and player_ownership
+    # (a trade and a trade-back must resolve to where the player actually ended up,
+    # which no amount of graph-walking can determine without a time).
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class InjuryList(Base):
