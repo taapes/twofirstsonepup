@@ -2409,6 +2409,135 @@ def set_keeper_seed(
     return {"manager": manager.display, "player": player.name, "years_remaining": years_remaining}
 
 
+def set_keeper_override(
+    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int,
+    years_remaining: int | None = None, acquisition: str | None = None,
+) -> dict:
+    """Correct a player's derived keeper facts for a manager.
+
+    `acquisition` is 'draft' | 'waiver' | 'trade'; both fields are optional, and only
+    what's passed is changed. Overriding acquisition matters because the =<2 waiver
+    keeper cap counts on it, and the derivation calls any unexplained roster gap a
+    drop — a missing injury-list record is enough to cost someone a waiver slot.
+    """
+    from rules import KEEPER_ACQUISITIONS
+
+    if years_remaining is None and acquisition is None:
+        raise RuleViolation("nothing to set")
+    if acquisition is not None and acquisition not in KEEPER_ACQUISITIONS:
+        raise RuleViolation(
+            f"acquisition must be one of {', '.join(KEEPER_ACQUISITIONS)}"
+        )
+    if years_remaining is not None and not 0 <= years_remaining <= 4:
+        raise RuleViolation("years_remaining must be 0..4")
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    player = _resolve_player(db, player_fpl_id)
+    derived = _derive_keeper_status(db, league).get(manager.id, {}).get(player.id, {})
+
+    seed = (
+        db.query(KeeperSeed)
+        .filter_by(manager_id=manager.id, player_id=player.id)
+        .one_or_none()
+    )
+    if not seed:
+        seed = KeeperSeed(
+            league_id=league.id, manager_id=manager.id, player_id=player.id,
+            years_remaining=(years_remaining if years_remaining is not None
+                             else derived.get("years_remaining", 0)),
+            season_year=league.season_year,
+        )
+        db.add(seed)
+    elif years_remaining is not None:
+        seed.years_remaining = years_remaining
+    if acquisition is not None:
+        seed.acquisition = acquisition
+
+    record_audit(
+        db, league, action="keeper.override",
+        summary=(f"Keeper override for {manager.display} — {player.name}: "
+                 + ", ".join(filter(None, [
+                     f"acquisition {derived.get('acquisition')} → {acquisition}"
+                     if acquisition is not None else None,
+                     f"years {derived.get('years_remaining')} → {years_remaining}"
+                     if years_remaining is not None else None,
+                 ]))),
+        manager_ids=[manager.id],
+        details={"player_fpl_id": player_fpl_id, "derived": derived,
+                 "acquisition": acquisition, "years_remaining": years_remaining},
+    )
+    db.commit()
+    return {"manager": manager.display, "player": player.name,
+            "acquisition": seed.acquisition, "years_remaining": seed.years_remaining}
+
+
+def keeper_overrides_context(db: Session, league: League) -> dict:
+    """Per-manager rostered players with their effective keeper facts, which of those
+    the commissioner has overridden, and the waiver count against the cap.
+
+    The waiver count is the number the commissioner is actually trying to influence —
+    the =<2 cap is what blocks a keeper submission — so it's shown alongside rather
+    than left to be discovered at submit time.
+    """
+    from rules import KEEPER_MAX_WAIVER
+
+    status = _derive_keeper_status(db, league)
+    seeds = {
+        (s.manager_id, s.player_id): s
+        for s in db.query(KeeperSeed).filter_by(league_id=league.id)
+    }
+    fpl_by_pid = {p.id: p.fpl_id for p in db.query(Player)}
+    out = []
+    for m in (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name)
+    ):
+        rows = []
+        for pid, v in status.get(m.id, {}).items():
+            seed = seeds.get((m.id, pid))
+            rows.append({
+                "player": v["player"], "position": v["position"],
+                "fpl_id": fpl_by_pid.get(pid),
+                "acquisition": v["acquisition"],
+                "years_remaining": v["years_remaining"],
+                "eligible": v["eligible"],
+                "kept": v.get("kept"),
+                "acq_overridden": bool(seed and seed.acquisition),
+                "has_seed": bool(seed),
+            })
+        rows.sort(key=lambda r: (r["acquisition"], r["player"]))
+        waivers = sum(1 for r in rows if r["acquisition"] == "waiver" and r["eligible"])
+        out.append({
+            "manager": m.display, "fpl": m.fpl_manager_id, "players": rows,
+            "waiver_eligible": waivers,
+        })
+    return {"managers": out, "max_waiver": KEEPER_MAX_WAIVER}
+
+
+def clear_keeper_override(
+    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int,
+) -> None:
+    """Drop the correction entirely so the player falls back to the derived values."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    player = _resolve_player(db, player_fpl_id)
+    seed = (
+        db.query(KeeperSeed)
+        .filter_by(manager_id=manager.id, player_id=player.id)
+        .one_or_none()
+    )
+    if not seed:
+        raise RuleViolation("no keeper override set for that player")
+    record_audit(
+        db, league, action="keeper.override.clear",
+        summary=f"Cleared keeper override for {manager.display} — {player.name}",
+        manager_ids=[manager.id],
+        details={"player_fpl_id": player_fpl_id,
+                 "previous": {"acquisition": seed.acquisition,
+                              "years_remaining": seed.years_remaining}},
+    )
+    db.delete(seed)
+    db.commit()
+
+
 def _derive_keeper_status(db: Session, league: League) -> dict:
     """Core keeper derivation, shared by the report and selection validation.
     Returns {manager_id: {player_id: {player, position, acquisition,
@@ -2461,9 +2590,15 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
         (t.to_manager, t.player_id)
         for t in db.query(Trade).filter_by(league_id=league.id)
     }
-    seed_remaining: dict = {}  # player_id -> imported years remaining
+    # Keyed on (manager, player), matching the table's own unique constraint. Keying
+    # on player alone let two managers' seeds for the same player collide, with one
+    # silently winning.
+    seed_remaining: dict = {}   # (manager_id, player_id) -> commissioner years
+    seed_acq: dict = {}         # (manager_id, player_id) -> commissioner acquisition
     for s in db.query(KeeperSeed).filter_by(league_id=league.id):
-        seed_remaining[s.player_id] = s.years_remaining
+        seed_remaining[(s.manager_id, s.player_id)] = s.years_remaining
+        if s.acquisition:
+            seed_acq[(s.manager_id, s.player_id)] = s.acquisition
 
     # submitted keepers for the upcoming season (so rosters can flag them locked)
     upcoming = (league.season_year or 0) + 1
@@ -2486,7 +2621,8 @@ def _derive_keeper_status(db: Session, league: League) -> dict:
             1 in presence[(mid, pid)],   # started_with_manager (on GW1 roster)
             (mid, pid) in traded_in,
             _dropped(mid, pid),
-            seed_remaining.get(pid),
+            seed_remaining.get((mid, pid)),
+            acquisition=seed_acq.get((mid, pid)),
         )
         # Season identity first; fall back to the live pool rather than rendering a
         # raw UUID at someone, which is what a player with no snapshot row used to do.

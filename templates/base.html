@@ -85,18 +85,24 @@
       {% if phase and phase.label %}<span class="tag">{{ phase.label }}</span> {% endif %}
       {% if current_name %}<span class="tag">{{ current_name }}</span> {% endif %}
       {% if is_owner %}<a href="/admin/players">Players</a> {% endif %}
-      {% if is_admin %}<span class="tag">admin</span> <a href="/admin/standings">Adjust</a> <a href="/admin/cups">Cups</a> <a href="/admin/corrections">Corrections</a> <a href="/admin/audit">Audit</a> <a href="/admin/health">Health</a> {% endif %}
+      {% if is_admin %}<span class="tag">admin</span> <a href="/admin/standings">Adjust</a> <a href="/admin/cups">Cups</a> <a href="/admin/corrections">Corrections</a> <a href="/admin/keepers">Keepers</a> <a href="/admin/audit">Audit</a> <a href="/admin/health">Health</a> {% endif %}
       {% if is_admin or current_fpl %}<a href="/logout">Log out</a>{% else %}<a href="/admin/login?next={{ request.url.path }}">Commissioner login</a>{% endif %}
     </nav>
     {% endif %}
     {% block content %}{% endblock %}
   </div>
   <script>
-    // Keeper selection: cap FA/waiver-acquired keepers at 2.
+    // Keeper selection: client-side mirror of the waiver cap. Server-side
+    // validate_keeper_selection is authoritative; this is just a nicety, so read the
+    // limit from the rules constant rather than hardcoding it out of step with it.
+    var MAX_WAIVER = {{ max_waiver_keepers }};
     function limitWaiver(cb) {
       if (cb.checked && cb.dataset.acq === 'waiver') {
         var n = document.querySelectorAll("input[name='keeper_fpl_ids'][data-acq='waiver']:checked").length;
-        if (n > 2) { cb.checked = false; alert('At most 2 FA/waiver-acquired keepers allowed.'); }
+        if (n > MAX_WAIVER) {
+          cb.checked = false;
+          alert('At most ' + MAX_WAIVER + ' FA/waiver-acquired keepers allowed.');
+        }
       }
     }
     // Discovery keeper: choose any player from the search results.

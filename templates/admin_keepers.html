@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Keeper Overrides{% endblock %}
+{% block content %}
+<h1>Keeper Overrides <span class="tag">commissioner</span></h1>
+<p class="sub">Keeper facts are <em>derived</em> from roster history and synced trades —
+  never entered. Two rules depend on them: at most <strong>{{ max_waiver }}</strong>
+  waiver-acquired keepers per manager, and the 4-year clock. Correct either here when the
+  derivation is wrong; every change is written to the <a href="/admin/audit">audit log</a>.</p>
+<p class="sub">The derivation treats <strong>any unexplained gap</strong> in a manager's
+  tenure as a drop, which both relabels the player as waiver-acquired and caps their
+  clock. A missing injury-list record is enough to trigger that — which is exactly why
+  these two live together.</p>
+
+{% for m in managers %}
+<h2>{{ m.manager }}
+  <span class="sub">— {{ m.waiver_eligible }} waiver-eligible
+    {% if m.waiver_eligible > max_waiver %}<span class="pill warn">can keep at most {{ max_waiver }}</span>{% endif %}
+  </span></h2>
+<div class="card" style="padding:10px;overflow-x:auto">
+  <table class="stats">
+    <thead><tr>
+      <th>Player</th><th>Pos</th><th>Acquired</th><th class="num">Yrs</th>
+      <th>Keeper?</th><th>Set acquisition</th><th class="num">Set yrs</th><th></th>
+    </tr></thead>
+    <tbody>
+      {% for p in m.players %}
+      <tr>
+        <td>{{ p.player }}{% if p.kept %} <span class="pill">kept</span>{% endif %}</td>
+        <td class="sub">{{ p.position or "—" }}</td>
+        <td>
+          {{ p.acquisition }}
+          {% if p.acq_overridden %}<span class="pill warn" title="set by the commissioner, not derived">override</span>{% endif %}
+        </td>
+        <td class="num">{{ p.years_remaining }}</td>
+        <td class="sub">{{ "eligible" if p.eligible else "maxed" }}</td>
+        <form method="post" action="/admin/keepers/override">
+          <input type="hidden" name="fpl_manager_id" value="{{ m.fpl }}">
+          <input type="hidden" name="player_fpl_id" value="{{ p.fpl_id }}">
+          <td>
+            <select name="acquisition">
+              <option value="">— leave —</option>
+              <option value="draft">draft</option>
+              <option value="waiver">waiver</option>
+              <option value="trade">trade</option>
+            </select>
+          </td>
+          <td class="num">
+            <input name="years_remaining" style="width:44px" inputmode="numeric"
+                   placeholder="{{ p.years_remaining }}">
+          </td>
+          <td style="white-space:nowrap"><button type="submit">Save</button>
+        </form>
+          {% if p.has_seed %}
+          <form method="post" action="/admin/keepers/clear" style="display:inline"
+                onsubmit="return confirm('Clear the override and go back to the derived values?')">
+            <input type="hidden" name="fpl_manager_id" value="{{ m.fpl }}">
+            <input type="hidden" name="player_fpl_id" value="{{ p.fpl_id }}">
+            <button class="mini" type="submit">Clear</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endfor %}
+{% endblock %}

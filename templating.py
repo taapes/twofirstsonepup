@@ -41,7 +41,17 @@ def _phase(request: Request) -> dict:
         return {"phase": None}
 
 
-templates = Jinja2Templates(directory="templates", context_processors=[_identity, _phase])
+def _rules(request: Request) -> dict:
+    """League-rule constants the templates need, so a client-side mirror of a rule
+    (e.g. the waiver-keeper cap in the nav script) can't drift from the rule itself."""
+    from rules import KEEPER_MAX_WAIVER
+
+    return {"max_waiver_keepers": KEEPER_MAX_WAIVER}
+
+
+templates = Jinja2Templates(
+    directory="templates", context_processors=[_identity, _phase, _rules]
+)
 # Escape HTML by default (defense-in-depth against XSS; explicit so a config change
 # can't silently disable it).
 templates.env.autoescape = True

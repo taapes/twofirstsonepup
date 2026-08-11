@@ -1118,6 +1118,60 @@ def admin_pick_delete(
     return _corrections_redirect()
 
 
+@router.get("/admin/keepers", response_class=HTMLResponse)
+def admin_keepers(request: Request, db: Session = Depends(get_db)):
+    """Correct a player's derived keeper facts. Acquisition drives the =<2 waiver
+    keeper cap and the derivation calls any unexplained roster gap a drop, so a
+    missing injury-list record can quietly cost a manager a waiver slot."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/keepers", status_code=303)
+    league = _league_or_404(db)
+    return templates.TemplateResponse("admin_keepers.html", {
+        "request": request, "league": league, "is_admin": True,
+        **services.keeper_overrides_context(db, league),
+    })
+
+
+@router.post("/admin/keepers/override")
+def admin_keeper_override(
+    request: Request, db: Session = Depends(get_db), fpl_manager_id: str = Form(...),
+    player_fpl_id: str = Form(...), acquisition: str = Form(""),
+    years_remaining: str = Form(""),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/keepers", status_code=303)
+    league = _league_or_404(db)
+    try:
+        yrs = _safe_int(years_remaining, 0, 4, field="years remaining") \
+            if years_remaining.strip() else None
+        services.set_keeper_override(
+            db, league, fpl_manager_id=fpl_manager_id,
+            player_fpl_id=_safe_int(player_fpl_id, 1, 10_000_000, field="player"),
+            acquisition=acquisition.strip() or None, years_remaining=yrs,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/keepers", status_code=303)
+
+
+@router.post("/admin/keepers/clear")
+def admin_keeper_override_clear(
+    request: Request, db: Session = Depends(get_db), fpl_manager_id: str = Form(...),
+    player_fpl_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/keepers", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.clear_keeper_override(
+            db, league, fpl_manager_id=fpl_manager_id,
+            player_fpl_id=_safe_int(player_fpl_id, 1, 10_000_000, field="player"),
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/keepers", status_code=303)
+
+
 @router.get("/admin/audit", response_class=HTMLResponse)
 def admin_audit(request: Request, db: Session = Depends(get_db)):
     """Commissioner audit log: every team-affecting action (who/what/when),

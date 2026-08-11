@@ -357,9 +357,17 @@ class KeeperException(Base):
 
 
 class KeeperSeed(Base):
-    """Imported keeper state per (manager, player) from the Current Teams sheet:
-    `years_remaining` = how many more seasons the player may be kept (0 = maxed,
-    can't keep), as of entering the next selection. One row per (manager, player)."""
+    """The commissioner's correction of a player's keeper facts, per (manager, player).
+
+    Started life as the Current Teams import ("Option B"): `years_remaining` = how many
+    more seasons the player may be kept (0 = maxed), as of entering the next selection.
+    It now also carries `acquisition`, because the derivation gets both wrong in the same
+    breath — `rules.keeper_status` treats any unexplained gap in a manager's tenure as a
+    drop, which both relabels the player 'waiver' (eating one of only two waiver keeper
+    slots) and caps their clock. A missing injury-list record is enough to trigger it.
+
+    NULL `acquisition` means no override — use whatever the roster history implies.
+    """
 
     __tablename__ = "keeper_seeds"
     __table_args__ = (
@@ -378,6 +386,8 @@ class KeeperSeed(Base):
     )
     years_remaining: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     season_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 'draft' | 'waiver' | 'trade', or NULL to use the derived value
+    acquisition: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 class KeeperSelection(Base):

@@ -370,9 +370,13 @@ KEEPER_FRESH_REMAINING = 2
 KEEPER_MAX_WAIVER = 2
 
 
+KEEPER_ACQUISITIONS = ("draft", "waiver", "trade")
+
+
 def keeper_status(
     started_with_manager: bool, traded_in: bool, dropped: bool, seed_remaining,
     fresh: int = KEEPER_FRESH_REMAINING,
+    acquisition: str | None = None,
 ) -> tuple:
     """-> (acquisition, years_remaining).
       - started_with_manager: on this manager's start-of-season (GW1) roster,
@@ -386,7 +390,19 @@ def keeper_status(
     'waiver' with remaining capped at the LOWER of the prior remaining and the
     fresh cap (so a dropped drafted player can't keep his full clock). A player
     held from the draft ('draft') or acquired by trade ('trade') carries the
-    imported remaining (fresh if none)."""
+    imported remaining (fresh if none).
+
+    `acquisition` is the commissioner asserting how the player was really acquired,
+    overriding all of the above. It has to lift the waiver clock cap too, not just
+    swap the label: the same missing evidence that mislabels a player 'waiver' also
+    caps their clock, so correcting only the label would leave them short a keeper
+    year they never actually lost.
+    """
+    if acquisition:
+        remaining = seed_remaining if seed_remaining is not None else fresh
+        if acquisition == "waiver":
+            remaining = min(remaining, fresh)
+        return (acquisition, remaining)
     if dropped or (not started_with_manager and not traded_in):
         prev = seed_remaining if seed_remaining is not None else fresh
         return ("waiver", min(prev, fresh))
