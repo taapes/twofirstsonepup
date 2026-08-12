@@ -399,6 +399,7 @@ def keeper_status(
     started_with_manager: bool, traded_in: bool, dropped: bool, seed_remaining,
     fresh: int = KEEPER_FRESH_REMAINING,
     acquisition: str | None = None,
+    traded_from: str | None = None,
 ) -> tuple:
     """-> (acquisition, years_remaining).
       - started_with_manager: on this manager's start-of-season (GW1) roster,
@@ -419,6 +420,13 @@ def keeper_status(
     swap the label: the same missing evidence that mislabels a player 'waiver' also
     caps their clock, so correcting only the label would leave them short a keeper
     year they never actually lost.
+
+    `traded_from` is the label the SENDER held this player under. A trade changes who
+    owns a player and nothing else — the clock transfers unchanged (the caller passes
+    the sender's remaining as `seed_remaining`) and so does the label, so a waiver
+    pickup still eats one of the receiver's two waiver keeper slots. Without it a
+    trade silently re-labelled the player 'trade' and reset the clock to `fresh`,
+    which both GAVE years to a player with fewer left and TOOK them from a seeded one.
     """
     if acquisition:
         remaining = seed_remaining if seed_remaining is not None else fresh
@@ -430,7 +438,8 @@ def keeper_status(
         return ("waiver", min(prev, fresh))
     if started_with_manager:
         return ("draft", seed_remaining if seed_remaining is not None else fresh)
-    return ("trade", seed_remaining if seed_remaining is not None else fresh)
+    return (traded_from or "trade",
+            seed_remaining if seed_remaining is not None else fresh)
 
 
 def keeper_eligible(years_remaining: int) -> bool:

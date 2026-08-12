@@ -481,3 +481,88 @@ def test_a_pick_traded_twice_lands_with_the_later_owner(test_session):
 
     own = services.pick_ownership(test_session, lg, UPCOMING)
     assert own[(1, "A")] == "C"
+
+
+# ---- a trade changes ownership and nothing else ----------------------------
+def _traded_at(session, lg, m, gws, *, seller_gws, buyer_gws, event_gw, seed=None):
+    """A SYNCED trade: the roster snapshots already move the player at `event_gw`,
+    so both managers have real history and the sender's tail is empty by design."""
+    p = _player(session, lg, "P", 1)
+    _hold(session, m["A"], p, gws, seller_gws)
+    _hold(session, m["B"], p, gws, buyer_gws)
+    if seed is not None:
+        session.add(KeeperSeed(league_id=lg.id, manager_id=m["A"].id, player_id=p.id,
+                               years_remaining=seed, season_year=2025))
+        session.commit()
+    _trade(session, lg, m["A"], m["B"], p, fpl_trade_id="1", event_gw=event_gw)
+    return p
+
+
+def test_a_synced_trade_carries_the_keeper_years(test_session):
+    """The live bug: a seeded 3-year clock became 2 the moment the player changed
+    hands, because the receiver had no seed of their own and fell back to fresh."""
+    lg, m, gws = _seed(test_session)
+    p = _traded_at(test_session, lg, m, gws, seller_gws=range(1, 15),
+                   buyer_gws=range(15, LAST_GW + 1), event_gw=15, seed=3)
+    assert _status(test_session, lg)[m["B"].id][p.id]["years_remaining"] == 3
+
+
+def test_a_synced_trade_carries_the_acquisition_label(test_session):
+    """A drafted player stays drafted for the receiver; the trade isn't a new way of
+    acquiring him, it's a change of owner."""
+    lg, m, gws = _seed(test_session)
+    p = _traded_at(test_session, lg, m, gws, seller_gws=range(1, 15),
+                   buyer_gws=range(15, LAST_GW + 1), event_gw=15)
+    assert _status(test_session, lg)[m["B"].id][p.id]["acquisition"] == "draft"
+
+
+def test_a_traded_waiver_pickup_still_counts_as_waiver(test_session):
+    """...and the taint follows, so he eats one of the receiver's two waiver slots."""
+    lg, m, gws = _seed(test_session)
+    p = _traded_at(test_session, lg, m, gws, seller_gws=range(5, 15),
+                   buyer_gws=range(15, LAST_GW + 1), event_gw=15)
+    assert _status(test_session, lg)[m["B"].id][p.id]["acquisition"] == "waiver"
+
+
+def test_being_traded_away_is_not_a_drop(test_session):
+    """The sender's roster tail is empty after the trade. Evaluating them to GW38
+    reads that as a drop, so their whole tenure derives 'waiver' — and the receiver
+    would then inherit a waiver label and a capped clock from a player who was
+    never dropped."""
+    lg, m, gws = _seed(test_session)
+    p = _traded_at(test_session, lg, m, gws, seller_gws=range(1, 15),
+                   buyer_gws=range(15, LAST_GW + 1), event_gw=15, seed=4)
+    row = _status(test_session, lg)[m["B"].id][p.id]
+    assert row["acquisition"] == "draft"
+    assert row["years_remaining"] == 4
+
+
+def test_a_trade_chain_carries_the_years_the_whole_way(test_session):
+    lg, m, gws = _seed(test_session)
+    p = _player(test_session, lg, "P", 1)
+    _hold(test_session, m["A"], p, gws, range(1, 10))
+    _hold(test_session, m["B"], p, gws, range(10, 20))
+    _hold(test_session, m["C"], p, gws, range(20, LAST_GW + 1))
+    test_session.add(KeeperSeed(league_id=lg.id, manager_id=m["A"].id, player_id=p.id,
+                                years_remaining=4, season_year=2025))
+    test_session.commit()
+    _trade(test_session, lg, m["A"], m["B"], p, fpl_trade_id="1", event_gw=10)
+    _trade(test_session, lg, m["B"], m["C"], p, fpl_trade_id="2", event_gw=20)
+
+    row = _status(test_session, lg)[m["C"].id][p.id]
+    assert (row["acquisition"], row["years_remaining"]) == ("draft", 4)
+
+
+def test_a_drop_after_the_trade_still_caps_the_clock(test_session):
+    """The trade doesn't touch the clock, but the receiver's OWN drop does."""
+    lg, m, gws = _seed(test_session)
+    p = _player(test_session, lg, "P", 1)
+    _hold(test_session, m["A"], p, gws, range(1, 15))
+    _hold(test_session, m["B"], p, gws, [g for g in range(15, LAST_GW + 1) if g != 30])
+    test_session.add(KeeperSeed(league_id=lg.id, manager_id=m["A"].id, player_id=p.id,
+                                years_remaining=4, season_year=2025))
+    test_session.commit()
+    _trade(test_session, lg, m["A"], m["B"], p, fpl_trade_id="1", event_gw=15)
+
+    row = _status(test_session, lg)[m["B"].id][p.id]
+    assert (row["acquisition"], row["years_remaining"]) == ("waiver", KEEPER_FRESH_REMAINING)

@@ -2737,13 +2737,63 @@ def _derive_keeper_status(
     if not kept_all:
         kept = {k: v for k, v in kept.items() if k[0] in (kept_for or set())}
 
-    def _dropped(mid, pid) -> bool:
+    def _dropped(mid, pid, upto=None) -> bool:
         gws = presence[(mid, pid)]
         il_gws = il.get((mid, pid), set())
         first = min(gws)
         # a gap between first appearance and the final GW, not covered by the IL,
-        # means the player was dropped (to FA) and later re-acquired
-        return any(g not in gws and g not in il_gws for g in range(first, last_n + 1))
+        # means the player was dropped (to FA) and later re-acquired.
+        # `upto` is the last GW this manager could have held him: for a manager who
+        # TRADED HIM AWAY that's the gameweek before the trade, or the empty tail
+        # after it reads as a drop and their whole tenure derives as 'waiver'.
+        end = last_n if upto is None else upto
+        return any(g not in gws and g not in il_gws for g in range(first, end + 1))
+
+    # Who handed us each player, and when they stopped holding him. Ordered so the
+    # most recent acquisition wins if a player arrives at the same manager twice.
+    trade_from: dict = {}
+    for t in (
+        db.query(Trade)
+        .filter(Trade.league_id == league.id, Trade.player_id.isnot(None),
+                Trade.pick_round.is_(None))
+        .order_by(Trade.created_at, Trade.id)
+    ):
+        trade_from[(t.to_manager, t.player_id)] = (
+            t.from_manager, (t.event_gw - 1) if t.event_gw else None
+        )
+
+    memo: dict = {}
+
+    def _status_for(mid, pid, upto=None, seen=()):
+        """(acquisition, years_remaining) for a manager's tenure of a player.
+
+        A trade transfers the player and changes nothing else, so when he arrived by
+        trade both the clock and the label come from the SENDER — evaluated as of the
+        moment he left them. Recursive so a chain carries the whole way, with `seen`
+        guarding a trade-and-trade-back from looping.
+        """
+        key = (mid, pid, upto)
+        if key in memo:
+            return memo[key]
+        carried = seed_remaining.get((mid, pid))
+        inherited = None
+        src = trade_from.get((mid, pid))
+        if src and (src[0], pid) in presence and (mid, pid) not in seen:
+            s_acq, s_years = _status_for(
+                src[0], pid, src[1], seen + ((mid, pid),)
+            )
+            inherited = s_acq
+            if carried is None:
+                carried = s_years
+        memo[key] = keeper_status(
+            1 in presence[(mid, pid)],   # started_with_manager (on GW1 roster)
+            (mid, pid) in traded_in,
+            _dropped(mid, pid, upto),
+            carried,
+            acquisition=seed_acq.get((mid, pid)),
+            traded_from=inherited,
+        )
+        return memo[key]
 
     # Ownership follows commissioner-entered trades (see player_ownership); roster
     # HISTORY does not. `hist` is the manager whose Roster rows and IL entries
@@ -2756,25 +2806,15 @@ def _derive_keeper_status(
     status: dict = {}
     for hist, pid in final_candidates:
         owner = moved.get(pid, hist)
-        # The commissioner's override applies to whoever holds the player now, but
-        # falls back to the sender's — transitional, since advance_season rewrites the
-        # seed owner-keyed at rollover. `is not None` because 0 years is meaningful.
-        seed_years = seed_remaining.get((owner, pid))
-        if seed_years is None:
-            seed_years = seed_remaining.get((hist, pid))
-        seed_a = seed_acq.get((owner, pid)) or seed_acq.get((hist, pid))
-        acq, remaining = keeper_status(
-            1 in presence[(hist, pid)],   # started_with_manager (on GW1 roster)
-            (hist, pid) in traded_in,
-            _dropped(hist, pid),
-            seed_years,
-            acquisition=seed_a,
-        )
-        # A traded player arrives with the sender's DERIVED status intact: the label
-        # follows the player (a waiver pickup traded to you still eats one of your two
-        # waiver keeper slots), and the clock arrives already capped by any drop the
-        # sender took — otherwise trading a player out and back would restore keeper
-        # years the drop was supposed to cost.
+        acq, remaining = _status_for(hist, pid)
+        # An overlaid player carries the sender's status wholesale, exactly as a
+        # synced trade does above — the commissioner's own override for the new owner
+        # still wins, since advance_season rewrites the seed owner-keyed at rollover.
+        if owner != hist:
+            if seed_remaining.get((owner, pid)) is not None:
+                remaining = seed_remaining[(owner, pid)]
+            if seed_acq.get((owner, pid)):
+                acq = seed_acq[(owner, pid)]
         # Season identity first; fall back to the live pool rather than rendering a
         # raw UUID at someone, which is what a player with no snapshot row used to do.
         p = players.get(pid) or db.get(Player, pid)

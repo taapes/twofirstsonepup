@@ -186,8 +186,12 @@ Write tests for these. They are custom and non-obvious:
   eats one of your two waiver keeper slots — and the clock arrives already capped by any
   drop the sender took, or trading out and back would launder the penalty away. Roster
   HISTORY (presence, drops, IL) stays keyed to the manager who actually rostered him.
-  In-season *synced* trades still relabel the receiver to `trade`; that inconsistency is
-  known and unresolved. A submitted keeper for a player since traded away is **not**
+  **A trade changes ownership and nothing else** — this holds for synced in-season trades
+  too, via `rules.keeper_status(traded_from=...)`: the clock transfers unchanged and the
+  label comes from the sender, chained the whole way through A->B->C. The sender must be
+  evaluated as of the trade (`_dropped(..., upto=event_gw-1)`), or their empty roster tail
+  reads as a drop and the receiver inherits a bogus `waiver`/capped clock. The receiver's
+  OWN later drop still caps it. A submitted keeper for a player since traded away is **not**
   deleted and doesn't block the trade — it just stops counting
   (`effective_keeper_selections`), so the manager is one keeper short and gets the pick
   back. `trades.created_at` is the only reliable ordering (`date` is NULL on
