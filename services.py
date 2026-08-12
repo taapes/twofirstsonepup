@@ -10,6 +10,7 @@ import os
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+import draftprep
 from audit import current_actor
 from models import (
     AuditLog,
@@ -2730,12 +2731,20 @@ def _derive_keeper_status(
 
     # submitted keepers for the upcoming season (so rosters can flag them locked)
     upcoming = (league.season_year or 0) + 1
-    kept = {
-        (s.manager_id, s.player_id): s.is_discovery
-        for s in db.query(KeeperSelection).filter_by(league_id=league.id, season_year=upcoming)
-    }
-    if not kept_all:
-        kept = {k: v for k, v in kept.items() if k[0] in (kept_for or set())}
+    # Don't even ASK when nothing could be shown: with no viewer and no kept_all every
+    # flag would be redacted to False anyway, so the query is pure waste — and not
+    # issuing it turns "this caller can't see submitted keepers" from a promise about
+    # the output into a fact about the SQL. draft_preparation relies on that.
+    kept = {}
+    if kept_all or kept_for:
+        kept = {
+            (s.manager_id, s.player_id): s.is_discovery
+            for s in db.query(KeeperSelection).filter_by(
+                league_id=league.id, season_year=upcoming
+            )
+        }
+        if not kept_all:
+            kept = {k: v for k, v in kept.items() if k[0] in kept_for}
 
     def _dropped(mid, pid, upto=None) -> bool:
         gws = presence[(mid, pid)]
@@ -3580,6 +3589,120 @@ def _effective_roster_pids(
         )
     }
     return (base - set(moved)) | {pid for pid, mid in moved.items() if mid == manager_id}
+
+
+def draft_preparation(db: Session, league: League, season_year: int) -> dict:
+    """Predict every manager's keepers, then who's left and roughly when they go.
+
+    BLIND ON PURPOSE: this never reads `keeper_selections`, not even the owner's own
+    and not even once keepers are revealed. Some managers have submitted and most
+    haven't, so a model that mixed real and predicted sets would be trustworthy in
+    patches and there'd be no way to tell which patch you were reading. It also keeps
+    an owner-only tool from being an information advantage over the league — the edge
+    is the projections and the model, not seeing other people's submissions.
+
+    Deliberately does NOT consult `_ineligible_fpl_ids`: that means "added to FPL
+    after the draft", a mid-season concept, and applying it to a pre-draft question
+    would be wrong even when it isn't empty (which it is today).
+
+    Pick order comes from the same helpers as get_draft_board, so the two can't
+    disagree about who picks when.
+    """
+    proj_year = projection_season_year(db)
+    if proj_year is None:
+        return {"available": False, "reason": "no projections imported"}
+    proj = projection_index(db, proj_year)
+
+    # The pool, defined ONCE and used for both draftability and the replacement-level
+    # denominator: still in the Premier League, and covered by the projections. Keyed
+    # on having a projection rather than on Player.status — those two sets coincide
+    # today by coincidence, and `status` is FPL-canonical and changes every sync.
+    live = db.query(Player).filter(Player.fpl_id.isnot(None)).all()
+    pool = [
+        draftprep.Rec(p.id, p.name, p.position, proj[p.id].points)
+        for p in live if p.id in proj and p.position in draftprep.POSITIONS
+    ]
+    excluded = sorted(
+        (p.name for p in live if p.id not in proj or p.position not in draftprep.POSITIONS)
+    )
+    pool_by_id = {r.player_id: r for r in pool}
+    replacement, rep_diag = draftprep.replacement_levels(
+        pool, teams=db.query(Manager).filter_by(league_id=league.id).count() or 10
+    )
+
+    managers = db.query(Manager).filter_by(league_id=league.id).all()
+    names = {m.id: m.display for m in managers}
+    id_by_person = {m.display: m.id for m in managers}
+    # No kept_for/kept_all: the defaults already redact the submitted flags, and this
+    # tool must not consult them at all.
+    status = _derive_keeper_status(db, league)
+
+    predictions, keeper_counts, rosters = {}, {}, {}
+    departed: dict = {}
+    for m in managers:
+        rows = status.get(m.id, {})
+        cands = []
+        for pid, v in rows.items():
+            rec = pool_by_id.get(pid)
+            if rec is None:
+                # left the PL, or no projection — can't be kept and can't be drafted
+                departed.setdefault(names[m.id], []).append(v["player"])
+                continue
+            cands.append(draftprep.Rec(
+                pid, rec.name,
+                # Player.position (26/27), NOT the derived one: _derive_keeper_status
+                # resolves identity through season_identity, so its position is last
+                # season's and would corrupt next season's quota accounting.
+                rec.position, rec.points, v["acquisition"], v["eligible"],
+            ))
+        out = draftprep.predict_keepers(cands, replacement)
+        predictions[m.id] = out
+        keeper_counts[m.id] = len(out["keepers"])
+        rosters[m.id] = out["keepers"]
+
+    r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
+    rev = _reverse_standings_managers(db, league)
+    slots = generate_draft_slots(
+        [m.id for m in r1], [m.id for m in rev], keeper_counts, ROSTER_SIZE,
+        overrides=_order_overrides(db, league, season_year, "main"),
+    )
+    # Same pick-trade overlay as get_draft_board, keyed on (round, original owner).
+    own = pick_ownership(db, league, season_year, "main")
+    ordered = []
+    for i, s in enumerate(slots, start=1):
+        orig = names.get(s["manager"])
+        cur = own.get((s["round"], orig), orig)
+        ordered.append({"pick": i, "round": s["round"],
+                        "manager": id_by_person.get(cur, s["manager"]),
+                        "original": s["manager"]})
+
+    kept_ids = {r.player_id for v in rosters.values() for r in v}
+    available = [r for r in pool if r.player_id not in kept_ids]
+    sim = draftprep.simulate_draft(ordered, available, rosters, replacement)
+
+    gone_by = {}
+    for row in sim["picks"]:
+        if row["player"] is not None:
+            gone_by[row["player"].player_id] = row["pick"]
+    values = draftprep.player_values(pool, replacement)
+    return {
+        "available": True,
+        "season_year": season_year,
+        "projection_year": proj_year,
+        "rounds": max((s["round"] for s in slots), default=0),
+        "replacement": replacement,
+        "replacement_diag": rep_diag,
+        "names": names,
+        "predictions": predictions,
+        "slots": ordered,
+        "sim": sim,
+        "gone_by": gone_by,
+        # NOT "values": Jinja resolves `.values` to the dict METHOD, not the key
+        "vor": values,
+        "pool": pool,
+        "excluded": excluded,
+        "departed": departed,
+    }
 
 
 def get_draft_board(

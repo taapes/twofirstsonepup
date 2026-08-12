@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+{% block title %}Draft Prep{% endblock %}
+{% block head %}
+<style>
+  .wrap { max-width:1400px; }
+  table.dp th, table.dp td { white-space:nowrap; padding:6px 10px; }
+  .dp .alt { color:var(--muted); font-size:.82rem; }
+  .need { color:var(--accent); }
+  .thin { color:var(--warn); }
+</style>
+{% endblock %}
+{% block content %}
+<h1>Draft Prep — {{ year }} <span class="tag">commissioner</span></h1>
+
+{% if not prep.available %}
+<div class="card" style="padding:14px">No projections imported yet, so there's nothing to
+  model. Run <code>scripts/import_projections.py</code> first.</div>
+{% else %}
+
+<p class="sub">Predictions are <strong>blind</strong>: no manager's submitted keepers are
+  read, not even yours. Every keeper set below is the model's guess from public
+  eligibility plus the {{ prep.projection_year % 100 }}/{{ (prep.projection_year + 1) % 100 }}
+  projections — so it will disagree with whatever has actually been submitted, by design.</p>
+<p class="sub">Predicted draft: <strong>{{ prep.rounds }} rounds</strong>,
+  {{ prep.slots|length }} picks, from a pool of {{ prep.pool|length }} projected players.</p>
+
+<!-- 1. the pick sheet ------------------------------------------------------>
+<h2>Your picks{% if me %} — {{ me }}{% endif %}</h2>
+{% if mine %}
+<div class="card" style="overflow-x:auto">
+  <table class="dp">
+    <thead><tr><th>Pick</th><th>Rd</th><th>Likely available</th><th class="num">Proj</th>
+      <th>Then</th></tr></thead>
+    <tbody>
+      {% for r in mine %}
+      <tr>
+        <td>{{ r.pick }}</td><td class="sub">{{ r.round }}</td>
+        <td>{% if r.player %}<strong>{{ r.player.name }}</strong>
+          <span class="tag">{{ r.player.position }}</span>
+          {% if r.reason == "need" %}<span class="pill need">need</span>{% endif %}
+          {% elif r.reason == "forfeited" %}<span class="sub">— squad full, pick lapses</span>
+          {% else %}<span class="sub">—</span>{% endif %}</td>
+        <td class="num">{{ "%.0f"|format(r.player.points) if r.player else "—" }}</td>
+        <td class="alt">{{ r.alternatives | map(attribute='name') | join(', ') or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card" style="padding:12px" class="sub">No picks resolved for you — are you
+  logged in as a manager with slots in this draft?</div>
+{% endif %}
+
+<!-- 2. predicted keepers + ledger ------------------------------------------>
+<h2>Predicted keepers &amp; pick ledger</h2>
+<p class="sub">A <strong class="thin">thin margin</strong> means the model was nearly
+  indifferent between two legal sets — those managers could easily keep someone else, so
+  treat their leftovers as genuinely uncertain.</p>
+<p class="sub"><strong>Net</strong> is picks traded in or out, and it is the <em>only</em>
+  thing that moves a squad off 15: your own slots are 15 − keepers and your keepers are
+  keepers, so those two always cancel regardless of how many you keep. A manager who is
+  net positive holds more picks than he has room for and the extras
+  <strong>lapse</strong>; net negative means he finishes short and fills from free agency.</p>
+<div class="card" style="overflow-x:auto">
+  <table class="dp">
+    <thead><tr><th>Manager</th><th class="num">Keep</th><th class="num">Slots</th>
+      <th class="num">Net</th><th class="num">Uses</th><th class="num">Lapses</th>
+      <th class="num">Squad</th><th class="num">Margin</th><th>Predicted keepers</th></tr></thead>
+    <tbody>
+      {% for m in ledger %}
+      <tr>
+        <td>{{ m.manager }}</td>
+        <td class="num">{{ m.keepers }}</td>
+        <td class="num">{{ m.held }}</td>
+        <td class="num {{ 'pos' if m.net > 0 else ('neg' if m.net < 0 else '') }}">{{ "%+d"|format(m.net) if m.net else "0" }}</td>
+        <td class="num">{{ m.used }}</td>
+        <td class="num {{ 'neg' if m.lapsed }}">{{ m.lapsed or "—" }}</td>
+        <td class="num {{ 'neg' if m.squad != 15 }}">{{ m.squad }}</td>
+        <td class="num {{ 'thin' if m.margin is not none and m.margin < 2 }}">{{ "%.1f"|format(m.margin) if m.margin is not none else "—" }}</td>
+        <td class="sub">{{ m.players | map(attribute='name') | join(', ') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- 3. the big board ------------------------------------------------------->
+<h2>Big board</h2>
+<div class="card" style="padding:10px;display:flex;gap:8px;align-items:end">
+  <label>Search<br><input id="f-q" type="search" placeholder="name" style="width:170px"></label>
+  <label>Position<br><select id="f-pos"><option value="">All</option>
+    <option>GKP</option><option>DEF</option><option>MID</option><option>FWD</option></select></label>
+  <label>Gone by pick<br><input id="f-gone" type="number" min="1" style="width:90px"
+    placeholder="e.g. 40"></label>
+  <span class="sub" id="bcount"></span>
+</div>
+<div class="card" style="overflow:auto;max-height:70vh;margin-top:10px">
+  <table class="dp" id="board">
+    <thead><tr>
+      <th>Player</th><th>Pos</th><th class="num">Proj</th><th class="num">Value</th>
+      <th class="num">Gone by</th><th>Status</th></tr></thead>
+    <tbody>
+      {% set kept_ids = [] %}
+      {% for m in ledger %}{% for k in m.players %}{% set _ = kept_ids.append(k.player_id) %}{% endfor %}{% endfor %}
+      {% for p in prep.pool | sort(attribute='points', reverse=true) %}
+      <tr data-pos="{{ p.position }}" data-name="{{ p.name|lower }}"
+          data-gone="{{ prep.gone_by.get(p.player_id, '') }}">
+        <td>{{ p.name }}</td>
+        <td class="sub">{{ p.position }}</td>
+        <td class="num">{{ "%.0f"|format(p.points) }}</td>
+        <td class="num {{ 'pos' if prep.vor[p.player_id] > 0 else 'neg' }}">{{ "%+.0f"|format(prep.vor[p.player_id]) }}</td>
+        <td class="num">{{ prep.gone_by.get(p.player_id, "—") }}</td>
+        <td class="sub">{% if p.player_id in kept_ids %}<span class="pill warn">predicted keeper</span>
+          {% elif p.player_id not in prep.gone_by %}undrafted{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- 4. assumptions --------------------------------------------------------->
+<h2>Assumptions</h2>
+<div class="card" style="padding:12px">
+  <p class="sub">Replacement level is the best <em>freely available</em> player at each
+    position — pegged to how many actually START, not how many sit on a roster. A second
+    goalkeeper never plays, so pegging it to roster depth values backups like starters and
+    has the league keeping a dozen of them.</p>
+  <table class="dp">
+    <thead><tr><th>Position</th><th class="num">Replacement</th><th class="sub">from</th></tr></thead>
+    <tbody>
+      {% for pos, v in prep.replacement.items() %}
+      <tr><td>{{ pos }}</td><td class="num">{{ "%.1f"|format(v) }}</td>
+        <td class="sub">{{ prep.replacement_diag[pos].index }}th of {{ prep.replacement_diag[pos].pool }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="sub" style="margin-top:10px"><strong>Not modelled:</strong> the discovery
+    (6th) keeper — predictions are capped at 5, so anyone claiming a 6th will keep one more
+    player than shown here.</p>
+  <p class="sub"><strong>Excluded ({{ prep.excluded|length }})</strong> — in the pool but
+    with no projection, so unrankable: {{ prep.excluded | join(', ') }}</p>
+  {% if prep.departed %}
+  <p class="sub"><strong>Left the Premier League</strong> — rostered last season, can't be
+    kept or drafted:
+    {% for mgr, players in prep.departed.items() %}{{ mgr }} ({{ players|join(', ') }}){% if not loop.last %}; {% endif %}{% endfor %}</p>
+  {% endif %}
+</div>
+
+<!-- 5. full simulation, below the fold ------------------------------------->
+<details style="margin-top:14px">
+  <summary>Full simulated draft ({{ prep.sim.picks|length }} picks)</summary>
+  <p class="sub">Every pick compounds the ones before it, so treat the late rounds as
+    illustrative rather than a forecast.</p>
+  <div class="card" style="overflow:auto;max-height:60vh">
+    <table class="dp">
+      <thead><tr><th>Pick</th><th>Rd</th><th>Manager</th><th>Player</th><th>Pos</th></tr></thead>
+      <tbody>
+        {% for r in prep.sim.picks %}
+        <tr {% if me and prep.names[r.manager] == me %}class="you"{% endif %}>
+          <td>{{ r.pick }}</td><td class="sub">{{ r.round }}</td>
+          <td>{{ prep.names[r.manager] }}</td>
+          <td>{{ r.player.name if r.player else ("— lapsed" if r.reason == "forfeited" else "—") }}</td>
+          <td class="sub">{{ r.player.position if r.player else "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+
+<script>
+  (function(){
+    var rows = Array.prototype.slice.call(document.getElementById('board').tBodies[0].rows);
+    function apply(){
+      var q = document.getElementById('f-q').value.toLowerCase().trim(),
+          pos = document.getElementById('f-pos').value,
+          gone = parseInt(document.getElementById('f-gone').value, 10);
+      var shown = 0;
+      rows.forEach(function(r){
+        var ok = true;
+        if (q && r.dataset.name.indexOf(q) < 0) ok = false;
+        if (pos && r.dataset.pos !== pos) ok = false;
+        if (!isNaN(gone)) {
+          var g = parseInt(r.dataset.gone, 10);
+          // blank = never drafted in the simulation, so still there at any pick
+          if (!isNaN(g) && g < gone) ok = false;
+        }
+        r.style.display = ok ? '' : 'none';
+        if (ok) shown++;
+      });
+      document.getElementById('bcount').textContent = shown + ' shown';
+    }
+    ['f-q','f-pos','f-gone'].forEach(function(id){
+      document.getElementById(id).addEventListener('input', apply);
+    });
+    apply();
+  })();
+</script>
+{% endif %}
+{% endblock %}

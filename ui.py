@@ -1045,6 +1045,61 @@ def admin_players(request: Request, db: Session = Depends(get_db)):
     })
 
 
+@router.get("/admin/draft-prep", response_class=HTMLResponse)
+def admin_draft_prep(request: Request, db: Session = Depends(get_db)):
+    """Owner-only draft preparation: predicted keepers, who that leaves available,
+    and roughly when they go. Same gate as /admin/players.
+
+    Predictions are BLIND — nobody's submitted keepers are read, including the
+    owner's. See services.draft_preparation.
+    """
+    if not is_owner(request):
+        if current_manager_id(request):
+            return _forbidden(request, "This page is restricted to the league owner.")
+        return RedirectResponse("/login?next=/admin/draft-prep", status_code=303)
+    league = _league_or_404(db)
+    year = (league.season_year or 0) + 1
+    prep = services.draft_preparation(db, league, year)
+
+    me = _current_manager(request, db, league)
+    mine, ledger = [], []
+    if prep.get("available"):
+        by_pick = {r["pick"]: r for r in prep["sim"]["picks"]}
+        mine = [by_pick[s["pick"]] for s in prep["slots"]
+                if me is not None and s["manager"] == me.id]
+        held: dict = {}
+        own: dict = {}
+        for s in prep["slots"]:
+            held[s["manager"]] = held.get(s["manager"], 0) + 1
+            own[s["original"]] = own.get(s["original"], 0) + 1
+        used: dict = {}
+        lapsed: dict = {}
+        for r in prep["sim"]["picks"]:
+            if r["player"] is not None:
+                used[r["manager"]] = used.get(r["manager"], 0) + 1
+            elif r["reason"] == "forfeited":
+                lapsed[r["manager"]] = lapsed.get(r["manager"], 0) + 1
+        for mid, name in sorted(prep["names"].items(), key=lambda kv: kv[1]):
+            keepers = len(prep["predictions"][mid]["keepers"])
+            ledger.append({
+                "manager": name, "keepers": keepers,
+                "held": held.get(mid, 0),
+                # net picks traded in or out — the ONLY thing that moves a squad off
+                # 15, since your own slots are 15 - keepers and your keepers are
+                # keepers, so the two always cancel
+                "net": held.get(mid, 0) - own.get(mid, 0),
+                "used": used.get(mid, 0), "lapsed": lapsed.get(mid, 0),
+                "squad": len(prep["sim"]["squads"].get(mid, [])),
+                "margin": prep["predictions"][mid]["margin"],
+                "players": prep["predictions"][mid]["keepers"],
+            })
+    return templates.TemplateResponse("draft_prep.html", {
+        "request": request, "league": league, "is_admin": is_admin(request),
+        "is_owner": True, "prep": prep, "year": year, "mine": mine,
+        "ledger": ledger, "me": me.display if me else None,
+    })
+
+
 # ---- commissioner corrections (edit/delete historical records) ----
 def _corrections_redirect():
     return RedirectResponse("/admin/corrections", status_code=303)

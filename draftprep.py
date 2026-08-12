@@ -206,11 +206,16 @@ def simulate_draft(slots, available, rosters, replacement, *, roster_size=ROSTER
         # +1 because `remaining` was already decremented for the pick being made now
         if unmet and len(unmet) >= remaining[m] + 1:
             room = [p for p in unmet if p in room] or room
-        pick = next((r for r in pool if r.position in room), None)
-        if pick is None:
+        usable = [r for r in pool if r.position in room]
+        # What else was on the board at this slot, in the order this manager would
+        # have considered them. Recorded here rather than recomputed later because
+        # only the simulation knows the pool state at each pick.
+        row["alternatives"] = usable[1:6]
+        if not usable:
             row["reason"] = "no eligible player"
             out.append(row)
             continue
+        pick = usable[0]
         pool.remove(pick)
         squads[m].append(pick)
         have[pick.position] += 1
