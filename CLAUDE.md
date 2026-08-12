@@ -39,6 +39,13 @@ before any non-trivial work.
 - Tests: `pytest`. Pure rule tests run anywhere; anything touching the DB needs
   `TEST_DATABASE_URL` (local Postgres recipe in `tests/conftest.py`) and **silently skips
   without it** — confirm a run says `passed`, not `skipped`, before trusting it.
+- **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
+  verifying a test is to break the code, confirm the test fails, then restore the file. But
+  `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
+  Python happily imports it — so mutations report "no bite" and the *baseline* goes red
+  against a clean tree. The tell is a `grep` of the file disagreeing with what
+  `python -c "import x; print(x.CONST)"` reports. `find . -name __pycache__ -not -path
+  "./.venv/*" -exec rm -rf {} +` clears a tree already in that state.
 - Env vars: Neon DB URL + sync secret live in env (Render dashboard / local `.env`, never committed)
 
 ## Architecture: Pull -> Normalize -> Store -> Serve

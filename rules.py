@@ -490,6 +490,14 @@ def validate_keeper_selection(
 # ---- Drafts ----
 ROSTER_SIZE = 15
 
+# FPL squad shape. Canonical FPL rules, not league-custom — the app has never enforced
+# them (record_pick doesn't check position), but anything reasoning about what a squad
+# will look like has to, or goalkeepers end up drafted in round 2.
+SQUAD_POSITION_LIMITS = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}   # sums to ROSTER_SIZE
+# The floor a starting XI has to satisfy; what a manager must still have room for when
+# their remaining picks run down.
+XI_POSITION_MINIMUMS = {"GKP": 1, "DEF": 3, "MID": 2, "FWD": 1}
+
 
 def generate_draft_slots(
     r1_order: list,
