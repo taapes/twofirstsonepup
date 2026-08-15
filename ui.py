@@ -18,7 +18,7 @@ from auth import (
 )
 from db import get_db
 from models import InjuryList, Manager
-from rules import ROSTER_SIZE, RuleViolation, SEASON_LAST_GW
+from rules import ROSTER_SIZE, RuleViolation, SEASON_LAST_GW, goalie_teams_on
 from templating import templates
 
 router = APIRouter()
@@ -82,6 +82,7 @@ def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str
         "pick_rounds": pick_rounds,
         "players": services.list_players(db, league),
         "is_admin": is_admin(request),
+        "goalie_teams_on": goalie_teams_on(league.goalie_team_mode),
         # names the season the search panel's Pts column is showing, so the sort
         # option can't drift from what search_players actually sorts by
         "stats_season_label": services.season_label(services.stats_season(db, league)),
@@ -1476,7 +1477,8 @@ def draft_queue_partial(year: int, request: Request, draft_type: str = "main", d
 
 @router.post("/draft/{year}/queue/add", response_class=HTMLResponse)
 def draft_queue_add(
-    year: int, request: Request, player_fpl_id: int = Form(...),
+    year: int, request: Request, player_fpl_id: int | None = Form(None),
+    team_code: int | None = Form(None),
     draft_type: str = Form("main"), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
@@ -1485,7 +1487,7 @@ def draft_queue_add(
         return _forbidden(request, "Log in to queue picks.")
     try:
         services.add_to_queue(db, league, fpl_manager_id=fpl, player_fpl_id=player_fpl_id,
-                              season_year=year, draft_type=draft_type)
+                              team_code=team_code, season_year=year, draft_type=draft_type)
     except RuleViolation as e:
         return _err(e)
     return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
@@ -1493,15 +1495,19 @@ def draft_queue_add(
 
 @router.post("/draft/{year}/queue/remove", response_class=HTMLResponse)
 def draft_queue_remove(
-    year: int, request: Request, player_fpl_id: int = Form(...),
+    year: int, request: Request, player_fpl_id: int | None = Form(None),
+    team_code: int | None = Form(None),
     draft_type: str = Form("main"), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
     fpl = current_manager_id(request)
     if not fpl:
         return _forbidden(request, "Log in to manage your queue.")
-    services.remove_from_queue(db, league, fpl_manager_id=fpl, player_fpl_id=player_fpl_id,
-                              season_year=year, draft_type=draft_type)
+    try:
+        services.remove_from_queue(db, league, fpl_manager_id=fpl, player_fpl_id=player_fpl_id,
+                                   team_code=team_code, season_year=year, draft_type=draft_type)
+    except RuleViolation as e:
+        return _err(e)
     return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
 
 
@@ -1515,6 +1521,27 @@ def draft_approve_queued(year: int, request: Request, db: Session = Depends(get_
     except RuleViolation as e:
         return _err(e)
     return _board_response(request, db, league, year)
+
+
+def _search_viewer_id(request: Request, db: Session, league, year: int, me):
+    """Whose 'you already have a goalie team' the club search should reflect.
+
+    A manager sees their own. The commissioner drafts ON BEHALF of whoever is on the
+    clock, so theirs is that manager's — using the admin's own would grey out clubs
+    for a team that isn't picking.
+    """
+    if not is_admin(request):
+        return me.id if me else None
+    slot = services.next_open_pick(services.get_draft_board(db, league, year))
+    owner_fpl = slot.get("owner_fpl") if slot else None
+    if not owner_fpl:
+        return None
+    owner = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(owner_fpl))
+        .one_or_none()
+    )
+    return owner.id if owner else None
 
 
 @router.get("/draft/{year}/search", response_class=HTMLResponse)
@@ -1535,6 +1562,11 @@ def draft_search(
             sort=sort or None, available_year=year, include_taken=True,
             kept_for={me.id} if me else None,
             kept_all=is_admin(request) or services.keepers_revealed(league),
+            # Greys out every club for a manager who already has a goalie team,
+            # mirroring the rule record_pick enforces. For the admin, who acts for
+            # whoever is on the clock rather than as themselves, that would grey out
+            # the board on somebody else's behalf — so resolve it from the slot.
+            for_manager_id=_search_viewer_id(request, db, league, year, me),
             limit=50,
         )
     on_clock = services.next_open_pick(services.get_draft_board(db, league, year))
@@ -1547,7 +1579,8 @@ def draft_search(
 
 @router.post("/draft/{year}/pick", response_class=HTMLResponse)
 def draft_pick(
-    year: int, request: Request, player_fpl_id: int = Form(...),
+    year: int, request: Request, player_fpl_id: int | None = Form(None),
+    team_code: int | None = Form(None),
     pick_number: int | None = Form(None), db: Session = Depends(get_db),
 ):
     league = _league_or_404(db)
@@ -1566,7 +1599,8 @@ def draft_pick(
         try:
             services.record_pick(
                 db, league, season_year=year, pick_number=slot["pick"],
-                owner_fpl=slot["owner_fpl"], player_fpl_id=player_fpl_id, round=slot["round"],
+                owner_fpl=slot["owner_fpl"], player_fpl_id=player_fpl_id,
+                team_code=team_code, round=slot["round"],
                 # An admin may correct a slot that's already been made. For anyone
                 # else record_pick still refuses, so a live draft can't be overwritten
                 # by a double-click or a stale board.

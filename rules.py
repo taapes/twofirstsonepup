@@ -507,20 +507,72 @@ SQUAD_POSITION_LIMITS = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}   # sums to ROS
 XI_POSITION_MINIMUMS = {"GKP": 1, "DEF": 3, "MID": 2, "FWD": 1}
 
 
+# ---- Goalie teams ----
+# From 2026 the league drafts a CLUB instead of individual goalkeepers: a manager
+# takes one Premier League club and owns every keeper at it. A squad is then 13
+# outfielders + 1 goalie team, so a manager makes 14 picks, not 15.
+#
+# The mode lives on `leagues` (per-season) rather than as a module constant on
+# purpose. `services.get_draft_board` regenerates the slot list on EVERY read with no
+# season parameter, so a global 15 -> 14 would silently truncate every archived board
+# at /season/{fpl_league_id}. 'off' is the pre-2026 behaviour, unchanged.
+GOALIE_TEAM_MODES = ("off", "redraft", "keeper")
+GOALIE_TEAM_SLOTS = 1
+
+# The outfield half of SQUAD_POSITION_LIMITS. Note it already sums to 13 — FPL's
+# outfield shape is exactly what the new rule asks for, so nothing about outfielders
+# changes; only the goalkeeper pair collapses into one club slot.
+OUTFIELD_POSITIONS = ("DEF", "MID", "FWD")
+OUTFIELD_POSITION_LIMITS = {p: SQUAD_POSITION_LIMITS[p] for p in OUTFIELD_POSITIONS}
+OUTFIELD_XI_MINIMUMS = {p: XI_POSITION_MINIMUMS[p] for p in OUTFIELD_POSITIONS}
+OUTFIELD_SQUAD_SIZE = sum(OUTFIELD_POSITION_LIMITS.values())   # 13
+
+
+def goalie_teams_on(mode: str | None) -> bool:
+    """Is the goalie-team rule in force for this league?"""
+    return mode in ("redraft", "keeper")
+
+
+def goalie_team_keepable(mode: str | None) -> bool:
+    """May a goalie team be carried into next season as one of the <=5 keepers?
+
+    Only under 'keeper'. Under 'redraft' every manager drafts a club afresh each
+    year, which is the default because it needs no keeper clock at all.
+    """
+    return mode == "keeper"
+
+
+def draft_picks_per_manager(mode: str | None, roster_size: int = ROSTER_SIZE) -> int:
+    """How many draft slots a manager holds before keepers are subtracted.
+
+    15 with the rule off; 13 outfielders + 1 goalie team = 14 with it on. This is
+    what `generate_draft_slots` should be handed — it is a count of PICKS, which is
+    no longer the same number as a roster size.
+    """
+    if not goalie_teams_on(mode):
+        return roster_size
+    return OUTFIELD_SQUAD_SIZE + GOALIE_TEAM_SLOTS
+
+
 def generate_draft_slots(
     r1_order: list,
     reverse_order: list,
     keeper_counts: dict,
-    roster_size: int = ROSTER_SIZE,
+    picks_per_manager: int = ROSTER_SIZE,
     overrides: dict | None = None,
 ) -> list[dict]:
     """Ordered (round, manager) pick slots BEFORE any pick trades.
 
     Round 1 uses `r1_order` (commissioner-set); rounds 2+ use `reverse_order`
     (reverse standings). Keepers are free: a manager with K keepers makes
-    roster_size-K picks, i.e. holds a slot in rounds 1..(roster_size-K) and drops
-    out of the latest rounds once their 15-man roster is full. Manager keys are
+    picks_per_manager-K picks, i.e. holds a slot in rounds 1..(picks_per_manager-K)
+    and drops out of the latest rounds once they have no slots left. Manager keys are
     opaque (ids or names). Returns dicts {round, manager} in overall pick order.
+
+    `picks_per_manager` is deliberately NOT called `roster_size` any more: once the
+    goalie-team rule is on, a manager makes 14 picks for a 15- or 16-man squad, so the
+    two stopped being the same number. Callers get it from
+    `draft_picks_per_manager(league.goalie_team_mode)`.
 
     `overrides` lets the commissioner replace the derived order for rounds 2+:
     `{None: [...]}` is a base order for every round from 2 on, and `{N: [...]}`
@@ -532,7 +584,7 @@ def generate_draft_slots(
     below still applies, so nobody picks in a round they have no roster space for.
     """
     overrides = overrides or {}
-    picks_needed = {m: roster_size - keeper_counts.get(m, 0) for m in r1_order}
+    picks_needed = {m: picks_per_manager - keeper_counts.get(m, 0) for m in r1_order}
     max_round = max(picks_needed.values(), default=0)
     slots = []
     for rnd in range(1, max_round + 1):

@@ -29,6 +29,7 @@ from models import (
     Player,
     PlayerProjection,
     PlayerSeason,
+    PlTeam,
     Roster,
     Tournament,
     TournamentMatch,
@@ -62,8 +63,9 @@ from rules import (
     h2h_standings,
     il_can_return,
     il_same_position,
-    ROSTER_SIZE,
+    draft_picks_per_manager,
     generate_draft_slots,
+    goalie_teams_on,
     keeper_eligible,
     keeper_status,
     match_winner,
@@ -1316,6 +1318,49 @@ def _resolve_player(db: Session, fpl_id: int) -> Player:
     if not p:
         raise RuleViolation(f"player {fpl_id} not found")
     return p
+
+
+def _resolve_team(db: Session, team_code: int) -> PlTeam:
+    """A goalie team by FPL's permanent team `code` — the twin of _resolve_player.
+
+    `code`, not `pl_teams.id`, is what travels over the wire: it is a small stable
+    integer that survives every season, exactly like `fpl_id` does for players, so
+    forms and hx-vals stay the same shape they already were.
+    """
+    if team_code is None:
+        raise RuleViolation("no goalie team specified")
+    t = db.query(PlTeam).filter_by(code=team_code).one_or_none()
+    if not t:
+        raise RuleViolation(f"goalie team {team_code} not found")
+    return t
+
+
+def goalie_team_keepers(db: Session, teams=None) -> dict:
+    """{pl_teams.id: [Player, ...]} — every goalkeeper at each club, right now.
+
+    Derived on read, never stored. Owning a goalie team means owning whoever keeps
+    for that club TODAY: a January signing joins your squad and a sale leaves it,
+    with nothing to reconcile. A stored keeper list would be a snapshot that goes
+    stale the first time a club buys a goalkeeper.
+
+    Departed players (fpl_id NULL) are excluded — they are no longer in the league.
+    """
+    rows = teams if teams is not None else db.query(PlTeam).all()
+    by_short = {t.short_name: t for t in rows}
+    out: dict = {t.id: [] for t in rows}
+    if not by_short:
+        return out
+    keepers = (
+        db.query(Player)
+        .filter(Player.position == "GKP",
+                Player.fpl_id.isnot(None),
+                Player.current_team.in_(list(by_short)))
+        .order_by(Player.name)
+        .all()
+    )
+    for p in keepers:
+        out[by_short[p.current_team].id].append(p)
+    return out
 
 
 def season_identity(db: Session, league: League, player_ids=None) -> dict:
@@ -3228,10 +3273,20 @@ def trade_pick(
     round: int, season_year: int, draft_type: str = "main",
 ) -> dict:
     """Record a draft-pick trade (commissioner-entered, live). Reassigns ownership
-    of the (season, draft_type, round) slot originally belonging to original_fpl."""
+    of the (season, draft_type, round) slot originally belonging to original_fpl.
+
+    Refuses to leave the seller with no way to get a goalie team. Trading away your
+    last slot after thirteen outfielders is the same dead end `record_pick` guards
+    against, reached by a different door."""
     frm = _resolve_manager(db, league, from_fpl)
     to = _resolve_manager(db, league, to_fpl)
     orig = _resolve_manager(db, league, original_fpl)
+    stranded = _goalie_team_required_reason(
+        db, league, frm, season_year=season_year, draft_type=draft_type,
+        pick_number=None,
+    )
+    if stranded:
+        raise RuleViolation(f"{stranded} — trading it away would strand them")
     label = f"{season_year} {draft_type} R{round} (orig {orig.name})"
     db.add(
         Trade(
@@ -3302,14 +3357,102 @@ def _unavailable_reason(
     return None
 
 
+def _team_unavailable_reason(
+    db: Session, league: League, team: PlTeam, *,
+    season_year: int, draft_type: str, pick_number: int, manager: Manager,
+) -> str | None:
+    """Why `team` can't be drafted into this slot — or None if it's free.
+
+    The sibling of `_unavailable_reason`, and it lives beside it for the same reason:
+    search mirrors this, so the board never offers a club that record_pick would then
+    refuse. Two rules — a club goes once, and a manager has one goalie team. Both are
+    also partial unique indexes, but a constraint violation is a 500; this is the
+    sentence a human reads.
+    """
+    taken = (
+        db.query(DraftPick, Manager)
+        .outerjoin(Manager, Manager.id == DraftPick.manager_id)
+        .filter(DraftPick.league_id == league.id,
+                DraftPick.season_year == season_year,
+                DraftPick.draft_type == draft_type,
+                DraftPick.team_id == team.id,
+                DraftPick.pick_number != pick_number)
+        .first()
+    )
+    if taken:
+        who = taken[1].display if taken[1] else "another manager"
+        return f"already drafted by {who} at #{taken[0].pick_number}"
+    mine = (
+        db.query(DraftPick)
+        .filter(DraftPick.league_id == league.id,
+                DraftPick.season_year == season_year,
+                DraftPick.draft_type == draft_type,
+                DraftPick.manager_id == manager.id,
+                DraftPick.team_id.isnot(None),
+                DraftPick.pick_number != pick_number)
+        .first()
+    )
+    if mine:
+        return (f"a second goalie team — {manager.display} already has one "
+                f"(#{mine.pick_number})")
+    return None
+
+
+def _goalie_team_required_reason(
+    db: Session, league: League, owner: Manager, *,
+    season_year: int, draft_type: str, pick_number: int, board: list[dict] | None = None,
+) -> str | None:
+    """Why this manager must spend THIS slot on a goalie team — or None.
+
+    Deliberately NOT part of `_unavailable_reason`. That function doubles as search's
+    taken-oracle, and a striker is not "taken" because you are out of slots; folding
+    this in would grey out the entire board for everyone at once.
+
+    The rule: if a manager has no goalie team and this is their last remaining slot,
+    they may only take a club. Without it a manager finishes the draft with thirteen
+    outfielders, no keepers at all, and no way to fix it that doesn't involve deleting
+    somebody else's picks.
+    """
+    if not goalie_teams_on(league.goalie_team_mode) or draft_type != "main":
+        return None
+    has_team = (
+        db.query(DraftPick)
+        .filter(DraftPick.league_id == league.id,
+                DraftPick.season_year == season_year,
+                DraftPick.draft_type == draft_type,
+                DraftPick.manager_id == owner.id,
+                DraftPick.team_id.isnot(None))
+        .first()
+    )
+    if has_team:
+        return None
+    board = board if board is not None else get_draft_board(db, league, season_year, draft_type)
+    # Slots this manager still has, counting the one being used right now.
+    remaining = sum(
+        1 for b in board
+        if b.get("owner_fpl") == owner.fpl_manager_id
+        and (not b.get("player") or b["pick"] == pick_number)
+    )
+    # Exactly one, not "at most one". Zero means either the draft hasn't been set up
+    # yet (no order, so no board) or this manager has no slots at all — in neither
+    # case does refusing a pick or a trade help anyone.
+    if remaining != 1:
+        return None
+    return (f"{owner.display} has one pick left and no goalie team — "
+            "it has to be a club")
+
+
 def record_pick(
     db: Session, league: League, *, season_year: int, pick_number: int,
-    owner_fpl: str, player_fpl_id: int, draft_type: str = "main", round: int = 0,
-    overwrite: bool = False,
+    owner_fpl: str, player_fpl_id: int | None = None, draft_type: str = "main",
+    round: int = 0, overwrite: bool = False, team_code: int | None = None,
 ) -> dict:
     """Record a selection at a board slot (live). Upsert by slot. With concurrent
     devices, a slot that already has a player is NOT silently overwritten — raises
     RuleViolation (a clean "pick already made") unless `overwrite` (admin correction).
+
+    Exactly one of `player_fpl_id` / `team_code` — a slot holds a player or a goalie
+    team, never both.
 
     A player who is already kept or already drafted is refused outright. The board
     hides them, so this is a backstop — but a stale board, a double-click race, the
@@ -3318,52 +3461,88 @@ def record_pick(
     is NOT waived by `overwrite`: that grants permission to replace a SLOT, which is
     a different thing from permission to take an unavailable player. Correct the
     keeper selection or delete the conflicting pick first.
+
+    Two goalie-team rules join it, and for the same reason — neither is recoverable
+    after the fact: a manager gets one club, and a manager down to their last slot
+    with no club must spend it on one. Note what is still NOT enforced here: squad
+    quotas. A sixth defender is legal and always was.
     """
+    if (player_fpl_id is None) == (team_code is None):
+        raise RuleViolation("pick exactly one of a player or a goalie team")
     owner = _resolve_manager(db, league, owner_fpl)
-    player = _resolve_player(db, player_fpl_id)
-    reason = _unavailable_reason(
-        db, league, player, season_year=season_year, draft_type=draft_type,
-        pick_number=pick_number,
-    )
-    if reason:
-        raise RuleViolation(f"{player.name} is {reason}")
+
+    if team_code is not None:
+        if not goalie_teams_on(league.goalie_team_mode):
+            raise RuleViolation("goalie teams aren't drafted in this league")
+        team = _resolve_team(db, team_code)
+        reason = _team_unavailable_reason(
+            db, league, team, season_year=season_year, draft_type=draft_type,
+            pick_number=pick_number, manager=owner,
+        )
+        if reason:
+            raise RuleViolation(f"{team.name} is {reason}")
+        selection, label = team, team.name
+    else:
+        player = _resolve_player(db, player_fpl_id)
+        reason = _unavailable_reason(
+            db, league, player, season_year=season_year, draft_type=draft_type,
+            pick_number=pick_number,
+        )
+        if reason:
+            raise RuleViolation(f"{player.name} is {reason}")
+        reserved = _goalie_team_required_reason(
+            db, league, owner, season_year=season_year, draft_type=draft_type,
+            pick_number=pick_number,
+        )
+        if reserved:
+            raise RuleViolation(reserved)
+        selection, label = player, player.name
+
+    is_team = team_code is not None
     existing = (
         db.query(DraftPick)
         .filter_by(league_id=league.id, season_year=season_year, draft_type=draft_type, pick_number=pick_number)
         .one_or_none()
     )
     if existing:
-        if existing.player_id is not None and not overwrite:
+        if (existing.player_id is not None or existing.team_id is not None) and not overwrite:
             raise RuleViolation(f"pick {pick_number} has already been made")
-        existing.manager_id, existing.player_id = owner.id, player.id
+        existing.manager_id = owner.id
+        existing.player_id = None if is_team else selection.id
+        existing.team_id = selection.id if is_team else None
     else:
         db.add(DraftPick(
             league_id=league.id, season_year=season_year, draft_type=draft_type,
             pick_number=pick_number, round=round, manager_id=owner.id,
-            player_id=player.id, source="draft",
+            player_id=None if is_team else selection.id,
+            team_id=selection.id if is_team else None,
+            source="draft",
         ))
     record_audit(db, league, action="draft.pick",
-                 summary=(f"{owner.display} drafted {player.name} "
+                 summary=(f"{owner.display} drafted {label} "
                           f"({draft_type} #{pick_number})"
                           + (" [overwrite]" if overwrite else "")),
                  manager_ids=[owner.id],
                  details={"season_year": season_year, "pick_number": pick_number,
                           "draft_type": draft_type, "player_fpl_id": player_fpl_id,
-                          "overwrite": overwrite})
+                          "team_code": team_code, "overwrite": overwrite})
     db.commit()
-    return {"pick": pick_number, "owner": owner.name, "player": player.name}
+    return {"pick": pick_number, "owner": owner.name, "player": label}
 
 
 def get_draft_queue(
     db: Session, league: League, fpl_manager_id: str, season_year: int, draft_type: str = "main"
 ) -> list[dict]:
-    """A manager's ranked autodraft queue (player name/fpl_id in rank order)."""
+    """A manager's ranked autodraft queue, players and goalie teams in one order.
+
+    Each row is `{kind, fpl_id, team_code, name, position}` — `kind` says which of
+    the two ids is set, and a club reports the TEAM pseudo-position.
+    """
     from models import DraftQueue
 
     manager = _resolve_manager(db, league, fpl_manager_id)
     rows = (
-        db.query(DraftQueue, Player)
-        .join(Player, Player.id == DraftQueue.player_id)
+        db.query(DraftQueue)
         .filter(
             DraftQueue.league_id == league.id, DraftQueue.season_year == season_year,
             DraftQueue.draft_type == draft_type, DraftQueue.manager_id == manager.id,
@@ -3371,25 +3550,64 @@ def get_draft_queue(
         .order_by(DraftQueue.rank)
         .all()
     )
-    return [{"fpl_id": p.fpl_id, "name": p.name, "position": p.position} for _q, p in rows]
+    if not rows:
+        return []
+    players = {
+        p.id: p for p in db.query(Player).filter(
+            Player.id.in_([r.player_id for r in rows if r.player_id])
+        )
+    }
+    teams = {
+        t.id: t for t in db.query(PlTeam).filter(
+            PlTeam.id.in_([r.team_id for r in rows if r.team_id])
+        )
+    }
+    out = []
+    for r in rows:
+        if r.team_id:
+            t = teams.get(r.team_id)
+            if t:
+                out.append({"kind": "team", "fpl_id": None, "team_code": t.code,
+                            "name": t.name, "position": GOALIE_TEAM_POSITION})
+            continue
+        p = players.get(r.player_id)
+        if p:
+            out.append({"kind": "player", "fpl_id": p.fpl_id, "team_code": None,
+                        "name": p.name, "position": p.position})
+    return out
+
+
+def _queue_match(manager, *, league, season_year, draft_type, player=None, team=None) -> dict:
+    return {
+        "league_id": league.id, "season_year": season_year, "draft_type": draft_type,
+        "manager_id": manager.id,
+        "player_id": player.id if player else None,
+        "team_id": team.id if team else None,
+    }
 
 
 def add_to_queue(
-    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int,
-    season_year: int, draft_type: str = "main",
+    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int | None = None,
+    season_year: int, draft_type: str = "main", team_code: int | None = None,
 ) -> None:
-    """Append a player to the manager's queue (idempotent; no-op if already queued)."""
+    """Append a player or a goalie team to the manager's queue (idempotent).
+
+    One ranked list for both: `rank` is a single ordering over everything the manager
+    wants, and a manager whose last slot must be a club needs that club rankable
+    among the players.
+    """
     from models import DraftQueue
 
+    if (player_fpl_id is None) == (team_code is None):
+        raise RuleViolation("queue exactly one of a player or a goalie team")
     manager = _resolve_manager(db, league, fpl_manager_id)
-    player = _resolve_player(db, player_fpl_id)
-    exists = (
-        db.query(DraftQueue).filter_by(
-            league_id=league.id, season_year=season_year, draft_type=draft_type,
-            manager_id=manager.id, player_id=player.id,
-        ).one_or_none()
-    )
-    if exists:
+    player = _resolve_player(db, player_fpl_id) if player_fpl_id is not None else None
+    team = _resolve_team(db, team_code) if team_code is not None else None
+    if team is not None and not goalie_teams_on(league.goalie_team_mode):
+        raise RuleViolation("goalie teams aren't drafted in this league")
+    match = _queue_match(manager, league=league, season_year=season_year,
+                         draft_type=draft_type, player=player, team=team)
+    if db.query(DraftQueue).filter_by(**match).one_or_none():
         return
     next_rank = (
         db.query(func.coalesce(func.max(DraftQueue.rank), -1)).filter_by(
@@ -3397,24 +3615,24 @@ def add_to_queue(
             manager_id=manager.id,
         ).scalar()
     ) + 1
-    db.add(DraftQueue(
-        league_id=league.id, season_year=season_year, draft_type=draft_type,
-        manager_id=manager.id, player_id=player.id, rank=next_rank,
-    ))
+    db.add(DraftQueue(**match, rank=next_rank))
     db.commit()
 
 
 def remove_from_queue(
-    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int,
-    season_year: int, draft_type: str = "main",
+    db: Session, league: League, *, fpl_manager_id: str, player_fpl_id: int | None = None,
+    season_year: int, draft_type: str = "main", team_code: int | None = None,
 ) -> None:
     from models import DraftQueue
 
+    if (player_fpl_id is None) == (team_code is None):
+        raise RuleViolation("remove exactly one of a player or a goalie team")
     manager = _resolve_manager(db, league, fpl_manager_id)
-    player = _resolve_player(db, player_fpl_id)
+    player = _resolve_player(db, player_fpl_id) if player_fpl_id is not None else None
+    team = _resolve_team(db, team_code) if team_code is not None else None
     db.query(DraftQueue).filter_by(
-        league_id=league.id, season_year=season_year, draft_type=draft_type,
-        manager_id=manager.id, player_id=player.id,
+        **_queue_match(manager, league=league, season_year=season_year,
+                       draft_type=draft_type, player=player, team=team)
     ).delete(synchronize_session=False)
     db.commit()
 
@@ -3423,10 +3641,8 @@ def approve_queued_pick(
     db: Session, league: League, *, season_year: int, draft_type: str = "main"
 ) -> dict:
     """Admin: fill the on-the-clock slot from its owner's queue — picks their top
-    still-available, eligible queued player. Raises RuleViolation if the draft is
-    complete or the on-the-clock manager has no usable queued player."""
-    from models import DraftQueue
-
+    still-available, eligible queued player or goalie team. Raises RuleViolation if
+    the draft is complete or the on-the-clock manager has no usable queued pick."""
     board = (
         get_discovery_board(db, league, season_year)
         if draft_type == "discovery"
@@ -3436,39 +3652,53 @@ def approve_queued_pick(
     if not slot or not slot.get("owner_fpl"):
         raise RuleViolation("the draft is complete")
     owner = _resolve_manager(db, league, slot["owner_fpl"])
-    queued = (
-        db.query(DraftQueue, Player)
-        .join(Player, Player.id == DraftQueue.player_id)
-        .filter(
-            DraftQueue.league_id == league.id, DraftQueue.season_year == season_year,
-            DraftQueue.draft_type == draft_type, DraftQueue.manager_id == owner.id,
-        )
-        .order_by(DraftQueue.rank)
-        .all()
-    )
+    queued = get_draft_queue(db, league, owner.fpl_manager_id, season_year, draft_type)
     if not queued:
         raise RuleViolation(f"{owner.display} has no queued picks")
+
+    # This manager is down to their last slot and has no club, so only a club will
+    # do — skip straight past the outfielders they queued.
+    reserved = _goalie_team_required_reason(
+        db, league, owner, season_year=season_year, draft_type=draft_type,
+        pick_number=slot["pick"], board=board,
+    )
+
     # exclude already-taken (kept/drafted) + ineligible players.
     # kept_all: this is a CORRECTNESS filter, not a disclosure — with the redacted
     # default the queue would hand this manager another manager's keeper, and
     # record_pick has no availability guard to catch it.
     available = search_players(
         db, league, available_year=season_year, draft_type=draft_type,
-        include_taken=False, kept_all=True, limit=10_000,
+        include_taken=False, kept_all=True, for_manager_id=owner.id,
+        include_teams=True, limit=10_000,
     )
-    available_ids = {r["fpl_id"] for r in available}
-    for _q, p in queued:
-        if p.fpl_id in available_ids:
-            record_pick(
-                db, league, season_year=season_year, pick_number=slot["pick"],
-                owner_fpl=owner.fpl_manager_id, player_fpl_id=p.fpl_id,
-                draft_type=draft_type, round=slot["round"],
-            )
-            remove_from_queue(
-                db, league, fpl_manager_id=owner.fpl_manager_id, player_fpl_id=p.fpl_id,
-                season_year=season_year, draft_type=draft_type,
-            )
-            return {"pick": slot["pick"], "owner": owner.display, "player": p.name}
+    # Keyed by (kind, id), never by fpl_id alone: every club row carries fpl_id None,
+    # and a set containing None makes every DEPARTED player (also fpl_id None) look
+    # available again.
+    available_keys = {(r["kind"], r["fpl_id"] if r["kind"] == "player" else r["team_code"])
+                      for r in available}
+    for entry in queued:
+        if reserved and entry["kind"] != "team":
+            continue
+        key = (entry["kind"], entry["fpl_id"] if entry["kind"] == "player" else entry["team_code"])
+        if key not in available_keys:
+            continue
+        ids = ({"player_fpl_id": entry["fpl_id"]} if entry["kind"] == "player"
+               else {"team_code": entry["team_code"]})
+        record_pick(
+            db, league, season_year=season_year, pick_number=slot["pick"],
+            owner_fpl=owner.fpl_manager_id, draft_type=draft_type,
+            round=slot["round"], **ids,
+        )
+        remove_from_queue(
+            db, league, fpl_manager_id=owner.fpl_manager_id,
+            season_year=season_year, draft_type=draft_type, **ids,
+        )
+        return {"pick": slot["pick"], "owner": owner.display, "player": entry["name"]}
+    if reserved:
+        raise RuleViolation(
+            f"{reserved} — and no goalie team is queued"
+        )
     raise RuleViolation(f"{owner.display}'s queued players are all unavailable")
 
 
@@ -3684,7 +3914,8 @@ def draft_preparation(db: Session, league: League, season_year: int) -> dict:
     r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
     rev = _reverse_standings_managers(db, league)
     slots = generate_draft_slots(
-        [m.id for m in r1], [m.id for m in rev], keeper_counts, ROSTER_SIZE,
+        [m.id for m in r1], [m.id for m in rev], keeper_counts,
+        draft_picks_per_manager(league.goalie_team_mode),
         overrides=_order_overrides(db, league, season_year, "main"),
     )
     # Same pick-trade overlay as get_draft_board, keyed on (round, original owner).
@@ -3780,7 +4011,8 @@ def draft_preparation_live(db: Session, league: League, season_year: int) -> dic
     r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
     rev = _reverse_standings_managers(db, league)
     slots = generate_draft_slots(
-        [m.id for m in r1], [m.id for m in rev], keeper_counts, ROSTER_SIZE,
+        [m.id for m in r1], [m.id for m in rev], keeper_counts,
+        draft_picks_per_manager(league.goalie_team_mode),
         overrides=_order_overrides(db, league, season_year, "main"),
     )
     own = pick_ownership(db, league, season_year, "main")
@@ -3886,7 +4118,8 @@ def get_draft_board(
         keeper_counts[sel.manager_id] = keeper_counts.get(sel.manager_id, 0) + 1
 
     slots = generate_draft_slots(
-        [m.id for m in r1], [m.id for m in rev], keeper_counts, ROSTER_SIZE,
+        [m.id for m in r1], [m.id for m in rev], keeper_counts,
+        draft_picks_per_manager(league.goalie_team_mode),
         overrides=_order_overrides(db, league, season_year, draft_type),
     )
     board = [
@@ -3910,6 +4143,7 @@ def get_draft_board(
     }
     fpl_by_id = {m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)}
     pnames = player_names(db, league)
+    tnames = {t.id: t.name for t in db.query(PlTeam)}
     out = []
     for b in board:
         dp = picks.get(b["pick"])
@@ -3932,7 +4166,15 @@ def get_draft_board(
             # the order moved under a pick that was already made — surface it rather
             # than paper over it
             "reassigned": bool(recorded_owner_id and recorded_owner_id != b["owner_id"]),
-            "player": pnames.get(dp.player_id) if dp and dp.player_id else None,
+            # `next_open_pick` treats a falsy `player` as "still on the clock", so a
+            # goalie-team pick MUST render a label here — otherwise the club is
+            # recorded, the slot still looks empty, and the draft never completes.
+            "player": (
+                tnames.get(dp.team_id) if dp and dp.team_id
+                else pnames.get(dp.player_id) if dp and dp.player_id
+                else None
+            ),
+            "is_goalie_team": bool(dp and dp.team_id),
         })
     return out
 
@@ -3963,6 +4205,85 @@ def get_future_picks(db: Session, league: League) -> list[dict]:
 
 
 # ---- player search (for the draft board / pick + trade entry) ----
+# The pseudo-position a goalie team occupies in the draft-search UI. Not a value
+# `players.position` ever holds — clubs are not players — but the search, the filter
+# dropdown and the result rows all key off one string, and this is it.
+GOALIE_TEAM_POSITION = "TEAM"
+
+
+def _goalie_team_rows(
+    db: Session,
+    league: League,
+    *,
+    q: str | None,
+    available_year: int | None,
+    draft_type: str,
+    include_taken: bool,
+    for_manager_id=None,
+    stats: dict | None = None,
+) -> list[dict]:
+    """Draftable goalie teams, in the same row shape `search_players` returns.
+
+    `points` is what the club's CURRENT keepers scored in the season stats_season()
+    resolves to — the aggregate, because that is what the manager is buying. Clubs
+    carry no price: you don't pay for a club.
+
+    A club is unavailable if someone has drafted it, or if `for_manager_id` already
+    holds one. That second case mirrors `_team_unavailable_reason` on purpose: the
+    board must never offer a pick that record_pick would then refuse.
+    """
+    teams = db.query(PlTeam).filter_by(is_current_pl=True).order_by(PlTeam.name).all()
+    if q:
+        needle = q.lower()
+        teams = [t for t in teams
+                 if needle in t.name.lower() or needle in t.short_name.lower()]
+    if not teams:
+        return []
+
+    keepers = goalie_team_keepers(db, teams)
+    stats = stats if stats is not None else season_identity(db, stats_season(db, league))
+
+    taken: dict = {}
+    owner_has_team = False
+    if available_year is not None:
+        names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+        for tid, mid in (
+            db.query(DraftPick.team_id, DraftPick.manager_id)
+            .filter_by(league_id=league.id, season_year=available_year,
+                       draft_type=draft_type)
+            .filter(DraftPick.team_id.isnot(None))
+        ):
+            taken[tid] = f"drafted: {names.get(mid, '?')}"
+            if for_manager_id is not None and mid == for_manager_id:
+                owner_has_team = True
+
+    out = []
+    for t in teams:
+        gks = keepers.get(t.id, [])
+        pts = [stats[p.id].total_points for p in gks
+               if p.id in stats and stats[p.id].total_points is not None]
+        reason = taken.get(t.id)
+        if reason is None and owner_has_team:
+            reason = "you already have a goalie team"
+        if reason and not include_taken:
+            continue
+        out.append({
+            "fpl_id": None,
+            "team_code": t.code,
+            "kind": "team",
+            "name": t.name,
+            "position": GOALIE_TEAM_POSITION,
+            "team": t.short_name,
+            "price": None,
+            "points": sum(pts) if pts else None,
+            "keepers": [p.name for p in gks],
+            "taken": bool(reason),
+            "taken_by": reason,
+            "ineligible": False,
+        })
+    return out
+
+
 def search_players(
     db: Session,
     league: League,
@@ -3975,6 +4296,8 @@ def search_players(
     draft_type: str = "main",
     kept_for: set | None = None,
     kept_all: bool = False,
+    for_manager_id=None,
+    include_teams: bool | None = None,
     limit: int = 50,
 ) -> list[dict]:
     """Search the player pool. A name query searches ALL players (position is
@@ -3987,19 +4310,51 @@ def search_players(
     `kept_for` / `kept_all` control whose keeper selections count as taken, since those
     are private until revealed (see rules.keepers_revealed). Default: nobody's — so a
     caller that forgets discloses nothing. `drafted:` labels are unaffected; draft
-    picks are public."""
+    picks are public.
+
+    Under the goalie-team rule the pool changes shape: goalkeepers stop being
+    individually draftable and twenty clubs take their place. `position='TEAM'`
+    returns those clubs, and a name query matches them too, so searching "Arsenal"
+    finds the club rather than nothing. `for_manager_id` marks every club taken for a
+    manager who already has one — the same rule record_pick enforces.
+
+    `include_teams=True` forces clubs into the results whatever the query is. A caller
+    using this as an availability ORACLE rather than as a search — approve_queued_pick
+    — must set it, or a queued club reads as unavailable simply because nobody asked
+    for clubs. Left unset it follows the query, so browsing 'All positions' stays a
+    list of players."""
     # Points come from the season stats_season() resolves to — last completed season
     # while drafting, the live one once it starts. NOT from a join: an inner join
     # would drop every player with no snapshot row (new to the PL, or never matched
     # to a code), and those are draftable. `limit` is applied in Python below, so the
     # points sort can be too, without truncating first.
     stats = season_identity(db, stats_season(db, league))
+    clubs_on = goalie_teams_on(league.goalie_team_mode)
+    want_teams = clubs_on and (
+        include_teams
+        if include_teams is not None
+        else (bool(q) or (position or "").upper() == GOALIE_TEAM_POSITION)
+    )
+    teams = (
+        _goalie_team_rows(
+            db, league, q=q, available_year=available_year, draft_type=draft_type,
+            include_taken=include_taken, for_manager_id=for_manager_id, stats=stats,
+        )
+        if want_teams else []
+    )
+    if clubs_on and (position or "").upper() == GOALIE_TEAM_POSITION:
+        return teams[:limit]
 
     query = db.query(Player)
     if q:
         query = query.filter(Player.name.ilike(f"%{q}%"))  # search all (ignore position)
     elif position:
         query = query.filter(Player.position == position.upper())
+    if clubs_on:
+        # Goalkeepers are owned through their club now, so they are not on the board
+        # at all. Excluded in the QUERY rather than filtered later, so a name search
+        # for a keeper comes back empty instead of offering an unpickable row.
+        query = query.filter(Player.position != "GKP")
 
     if sort == "price":
         query = query.order_by(Player.price.desc().nulls_last(), Player.name)
@@ -4053,8 +4408,12 @@ def search_players(
             "fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team,
             "price": (p.price / 10) if p.price is not None else None,
             "points": ps.total_points if ps else None,
+            "kind": "player", "team_code": None, "keepers": None,
             "taken": is_taken, "taken_by": taken_by, "ineligible": ineligible,
         })
+    # Clubs matched by name go in front: a search for "Arsenal" wants the club, not
+    # the twenty Arsenal players whose names happen to contain it.
+    out = teams + out
     if sort == "points":
         # Same shape as the SQL orderings above: nulls last, descending, name tie-break.
         # Must run on the whole list — `limit` is applied by the slice below.

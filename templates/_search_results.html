@@ -4,9 +4,17 @@
     <thead><tr><th>Player</th><th></th><th class="num">£m</th><th class="num">Pts</th><th></th></tr></thead>
     <tbody>
       {% for r in results %}
+      {# A goalie team is picked by club `code`, a player by `fpl_id` — one row shape,
+         two ids, and the hx-vals key is what says which. Key and value are
+         interpolated SEPARATELY: building the whole `"key": value` fragment in one
+         string gets its quotes autoescaped into &#34; entities. #}
+      {% set ref_key = "team_code" if r.kind == "team" else "player_fpl_id" %}
+      {% set ref_val = r.team_code if r.kind == "team" else r.fpl_id %}
       <tr {% if r.taken %}class="taken-row"{% endif %}>
-        <td>{{ r.name }}</td>
-        <td class="sub">{{ r.position }} · {{ r.team }}</td>
+        <td>{{ r.name }}
+          {% if r.kind == "team" %}<span class="sub">{{ r.keepers|join(", ") if r.keepers else "no keepers in the pool" }}</span>{% endif %}
+        </td>
+        <td class="sub">{% if r.kind == "team" %}goalie team{% else %}{{ r.position }}{% endif %} · {{ r.team }}</td>
         <td class="num">{{ "%.1f"|format(r.price) if r.price is not none else "—" }}</td>
         <td class="num">{{ r.points if r.points is not none else "—" }}</td>
         <td class="num">
@@ -14,12 +22,12 @@
           <span class="pill warn" title="{{ r.taken_by }}">{{ r.taken_by }}</span>
           {% else %}
           {% if can_pick %}
-          <button hx-post="/draft/{{ year }}/pick" hx-vals='{"player_fpl_id": {{ r.fpl_id }}}'
+          <button hx-post="/draft/{{ year }}/pick" hx-vals='{"{{ ref_key }}": {{ ref_val }}}'
                   hx-target="#board" hx-swap="outerHTML">Draft</button>
           {% endif %}
           {% if current_fpl %}
           <button class="mini" hx-post="/draft/{{ year }}/queue/add"
-                  hx-vals='{"player_fpl_id": {{ r.fpl_id }}, "draft_type": "main"}'
+                  hx-vals='{"{{ ref_key }}": {{ ref_val }}, "draft_type": "main"}'
                   hx-target="#queue" hx-swap="outerHTML" title="add to your queue">+Q</button>
           {% endif %}
           {% endif %}

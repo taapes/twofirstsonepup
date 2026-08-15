@@ -12,14 +12,14 @@
   {% if board %}
   <div class="card">
     <table>
-      <thead><tr><th class="rank">#</th><th class="num">R</th><th>Owner</th><th>Player</th></tr></thead>
+      <thead><tr><th class="rank">#</th><th class="num">R</th><th>Owner</th><th>Selection</th></tr></thead>
       <tbody>
         {% for b in board %}
         <tr class="{% if on_clock and b.pick == on_clock.pick %}on-clock{% endif %}">
           <td class="rank">{{ b.pick }}</td>
           <td class="num">{{ b.round }}</td>
           <td>{{ b.owner }}{% if b.traded %} <span class="pill">via {{ b.original_owner }}</span>{% endif %}</td>
-          <td>{% if b.player %}{{ b.player }}{% elif on_clock and b.pick == on_clock.pick %}<span class="sub">on the clock</span>{% else %}<span class="sub">—</span>{% endif %}</td>
+          <td>{% if b.player %}{{ b.player }}{% if b.is_goalie_team %} <span class="pill">goalie team</span>{% endif %}{% elif on_clock and b.pick == on_clock.pick %}<span class="sub">on the clock</span>{% else %}<span class="sub">—</span>{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>

@@ -7,11 +7,16 @@
     {% for p in queue %}
     <li data-fpl="{{ p.fpl_id }}">
       <span class="grip">{{ loop.index }}.</span>
-      <span class="oname">{{ p.name }} <span class="sub">{{ p.position }}</span></span>
+      <span class="oname">{{ p.name }}
+        <span class="sub">{{ "goalie team" if p.kind == "team" else p.position }}</span></span>
       <span class="movers">
         <form method="post" action="{{ base }}/queue/remove" hx-post="{{ base }}/queue/remove"
               hx-target="#queue" hx-swap="outerHTML" style="display:inline">
+          {% if p.kind == "team" %}
+          <input type="hidden" name="team_code" value="{{ p.team_code }}">
+          {% else %}
           <input type="hidden" name="player_fpl_id" value="{{ p.fpl_id }}">
+          {% endif %}
           {% if draft_type != "discovery" %}<input type="hidden" name="draft_type" value="{{ draft_type }}">{% endif %}
           <button type="submit" title="remove">✕</button>
         </form>

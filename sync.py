@@ -23,6 +23,7 @@ from models import (
     Match,
     Player,
     PlayerSeason,
+    PlTeam,
     Roster,
     Standing,
     SyncLog,
@@ -60,6 +61,59 @@ def _upsert(session: Session, model, match: dict, values: dict):
     row = model(**{**match, **values})
     session.add(row)
     return row
+
+
+def _upsert_pl_teams(session: Session, teams_payload: list) -> dict:
+    """Upsert the 20 Premier League clubs from a bootstrap `teams[]` array.
+
+    Matched on the PERMANENT `code`, never on `teams[].id` — that one is the
+    alphabetical index within a season and is reassigned every August (see PlTeam).
+    A club whose payload entry carries no `code` falls back to matching on
+    `short_name` and is never inserted, because a row without a stable identity is
+    worse than no row: the next sync would insert it again under a different id.
+
+    Membership is rewritten wholesale, but ONLY when the payload actually looks like
+    a Premier League (>=20 clubs). A short or partial payload must not silently
+    relegate the entire division. Rows are never deleted — a relegated club keeps its
+    history and comes back on promotion.
+
+    Returns {fpl teams[].id: PlTeam} so callers that already index by that id (every
+    element's `team` field) can resolve straight to a row.
+    """
+    teams_payload = [t for t in (teams_payload or []) if t.get("id") is not None]
+    if not teams_payload:
+        return {}
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    by_code = {t.code: t for t in session.query(PlTeam)}
+    by_short = {t.short_name: t for t in session.query(PlTeam)}
+
+    seen, out = [], {}
+    for t in teams_payload:
+        short = t.get("short_name") or t.get("name")
+        code = t.get("code")
+        row = by_code.get(code) if code is not None else by_short.get(short)
+        if row is None:
+            if code is None:
+                continue  # no stable identity; skip rather than create a duplicate
+            row = PlTeam(code=code)
+            session.add(row)
+            by_code[code] = row
+        row.fpl_id = t["id"]
+        row.short_name = short
+        row.name = t.get("name") or short
+        row.last_seen_at = now
+        seen.append(row)
+        out[t["id"]] = row
+
+    if len(seen) >= 20:
+        current = {id(r) for r in seen}
+        for row in session.query(PlTeam):
+            row.is_current_pl = id(row) in current
+        for row in seen:
+            row.is_current_pl = True  # covers rows still pending in this flush
+    session.flush()
+    return out
 
 
 def _resolve_league(session: Session, fpl_league_id, log: SyncLog) -> League | None:
@@ -153,13 +207,21 @@ async def sync_players():
             # Prices + rich stats aren't in the DRAFT API. Pull them from the
             # classic FPL bootstrap (same element ids), best-effort.
             classic_by_id: dict = {}
+            classic_teams: list = []
             try:
                 classic = await _get_json(
                     client, "https://fantasy.premierleague.com/api/bootstrap-static/"
                 )
                 classic_by_id = {e["id"]: e for e in classic.get("elements", [])}
+                classic_teams = classic.get("teams", [])
             except Exception:
                 pass
+
+        # The clubs, as rows. Prefer the classic payload: the DRAFT API's teams[] is
+        # not guaranteed to carry the permanent `code`, and a club without one can't
+        # be stored (see _upsert_pl_teams). Falls back to the draft payload so a
+        # classic-feed outage still refreshes short names.
+        _upsert_pl_teams(session, classic_teams or data.get("teams", []))
 
         # Build code -> name lookups from the same payload so stored rows are
         # human-readable rather than raw FPL integer codes.
@@ -354,6 +416,10 @@ async def sync_fixtures(fpl_league_id: str | None = None):
                 log.finished_at = datetime.datetime.now(datetime.timezone.utc)
                 session.commit()
                 return
+
+        # Same payload, second writer: keeps pl_teams fresh even in the stretch of
+        # the offseason when only fixtures are worth syncing.
+        _upsert_pl_teams(session, classic.get("teams", []))
 
         team_short = {
             t["id"]: t.get("short_name") or t.get("name")

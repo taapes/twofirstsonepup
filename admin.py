@@ -6,7 +6,7 @@ RuleViolation to HTTP 400.
 """
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy.orm import Session
 
 import services
@@ -78,9 +78,17 @@ class RecordPickRequest(BaseModel):
     season_year: int
     pick_number: int
     owner_fpl: str
-    player_fpl_id: int
+    # Exactly one of these — a slot holds a player or a goalie team, never both.
+    player_fpl_id: int | None = None
+    team_code: int | None = None
     draft_type: str = "main"
     round: int = 0
+
+    @model_validator(mode="after")
+    def _one_selection(self):
+        if (self.player_fpl_id is None) == (self.team_code is None):
+            raise ValueError("give exactly one of player_fpl_id or team_code")
+        return self
 
 
 @router.post("/leagues/{league_key}/injury-list")
@@ -221,7 +229,7 @@ def record_pick(league_key: str, body: RecordPickRequest, db: Session = Depends(
         return services.record_pick(
             db, league, season_year=body.season_year, pick_number=body.pick_number,
             owner_fpl=body.owner_fpl, player_fpl_id=body.player_fpl_id,
-            draft_type=body.draft_type, round=body.round,
+            team_code=body.team_code, draft_type=body.draft_type, round=body.round,
         )
     except RuleViolation as e:
         raise HTTPException(status_code=400, detail=str(e))

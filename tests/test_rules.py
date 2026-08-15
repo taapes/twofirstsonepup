@@ -350,7 +350,7 @@ def test_discovery_keeper_excluded_from_waiver_cap():
 def test_draft_slots_no_keepers_full_rounds():
     r1 = ["C", "A", "B"]  # commissioner order
     rev = ["B", "A", "C"]  # reverse standings
-    slots = generate_draft_slots(r1, rev, {}, roster_size=2)
+    slots = generate_draft_slots(r1, rev, {}, picks_per_manager=2)
     # round 1 in r1 order, round 2 in reverse order
     assert [(s["round"], s["manager"]) for s in slots] == [
         (1, "C"), (1, "A"), (1, "B"), (2, "B"), (2, "A"), (2, "C")
@@ -361,7 +361,7 @@ def test_draft_slots_keepers_reduce_late_rounds():
     r1 = ["A", "B"]
     rev = ["B", "A"]
     # A keeps 13 (2 picks -> rounds 1-2), B keeps 14 (1 pick -> round 1 only)
-    slots = generate_draft_slots(r1, rev, {"A": 13, "B": 14}, roster_size=15)
+    slots = generate_draft_slots(r1, rev, {"A": 13, "B": 14}, picks_per_manager=15)
     assert [(s["round"], s["manager"]) for s in slots] == [
         (1, "A"), (1, "B"), (2, "A")  # B has no round-2 slot
     ]
@@ -370,6 +370,6 @@ def test_draft_slots_keepers_reduce_late_rounds():
 def test_draft_slots_round1_uses_commissioner_order():
     r1 = ["B", "A"]
     rev = ["A", "B"]
-    slots = generate_draft_slots(r1, rev, {"A": 14, "B": 14}, roster_size=15)
+    slots = generate_draft_slots(r1, rev, {"A": 14, "B": 14}, picks_per_manager=15)
     # one pick each, round 1 only, in commissioner order
     assert [s["manager"] for s in slots] == ["B", "A"]

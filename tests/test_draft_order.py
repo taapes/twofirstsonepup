@@ -39,7 +39,7 @@ def _rounds(slots):
 
 
 def test_round_one_uses_the_lottery_and_later_rounds_the_standings():
-    slots = generate_draft_slots(["a", "b", "c"], ["c", "b", "a"], {}, roster_size=2)
+    slots = generate_draft_slots(["a", "b", "c"], ["c", "b", "a"], {}, picks_per_manager=2)
     r = _rounds(slots)
     assert r[1] == ["a", "b", "c"]
     assert r[2] == ["c", "b", "a"]
@@ -47,7 +47,7 @@ def test_round_one_uses_the_lottery_and_later_rounds_the_standings():
 
 def test_base_override_drives_every_round_after_the_first():
     slots = generate_draft_slots(
-        ["a", "b", "c"], ["c", "b", "a"], {}, roster_size=3,
+        ["a", "b", "c"], ["c", "b", "a"], {}, picks_per_manager=3,
         overrides={None: ["b", "a", "c"]},
     )
     r = _rounds(slots)
@@ -57,7 +57,7 @@ def test_base_override_drives_every_round_after_the_first():
 
 def test_a_round_override_beats_the_base():
     slots = generate_draft_slots(
-        ["a", "b", "c"], ["c", "b", "a"], {}, roster_size=3,
+        ["a", "b", "c"], ["c", "b", "a"], {}, picks_per_manager=3,
         overrides={None: ["b", "a", "c"], 3: ["c", "a", "b"]},
     )
     r = _rounds(slots)
@@ -68,7 +68,7 @@ def test_a_round_override_beats_the_base():
 def test_keeper_filter_still_drops_managers_from_late_rounds():
     """Overrides must not defeat the rule that a full roster stops picking."""
     slots = generate_draft_slots(
-        ["a", "b"], ["b", "a"], {"a": 1}, roster_size=2,
+        ["a", "b"], ["b", "a"], {"a": 1}, picks_per_manager=2,
         overrides={None: ["a", "b"]},
     )
     r = _rounds(slots)
@@ -80,7 +80,7 @@ def test_an_override_may_deliberately_give_someone_two_slots():
     """Reassigning a slot is allowed to produce a double pick — the commissioner
     asked for that. It must be applied, not silently normalised away."""
     slots = generate_draft_slots(
-        ["a", "b", "c"], ["c", "b", "a"], {}, roster_size=2,
+        ["a", "b", "c"], ["c", "b", "a"], {}, picks_per_manager=2,
         overrides={2: ["c", "c", "a"]},
     )
     assert _rounds(slots)[2] == ["c", "c", "a"]

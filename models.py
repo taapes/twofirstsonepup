@@ -16,6 +16,7 @@ import uuid
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
@@ -89,6 +90,13 @@ class League(Base):
     # no env redeploy is needed; resolve_league falls back to the env when unset.
     is_current: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
+    )
+    # Goalie-team rule (see rules.GOALIE_TEAM_MODES): off | redraft | keeper.
+    # 'off' is every pre-2026 row and the historical archive — squad shape and the
+    # draft are exactly as they were. It is per-season BECAUSE `leagues` is per-season:
+    # changing the rule at a rollover must not rewrite an archived season's board.
+    goalie_team_mode: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="off"
     )
 
 
@@ -166,6 +174,45 @@ class Player(Base):
     ict_index: Mapped[str | None] = mapped_column(String, nullable=True)
     selected_by_percent: Mapped[str | None] = mapped_column(String, nullable=True)
     news: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PlTeam(Base):
+    """A Premier League club — FPL-canonical, global, written only by sync.
+
+    Clubs used to exist here only as a free-text short name on `players.current_team`,
+    because nothing owned a club. The goalie-team rule makes a club an ownable asset,
+    so it needs a row and a stable id.
+
+    Identity is `code`, FPL's PERMANENT team code — never `fpl_id`. `teams[].id` in
+    bootstrap-static is the alphabetical 1-20 index WITHIN a season and is reassigned
+    every August as clubs go up and down, exactly like `players.fpl_id`; keying on it
+    would re-point every historical goalie-team pick at a different club. Same lesson,
+    second table.
+
+    `short_name` ('MCI') is the join key to `players.current_team` and
+    `fixtures.home_team`/`away_team`, which are written from this same payload in the
+    same sync, so the two are consistent by construction.
+
+    Rows are never deleted. A relegated club keeps its row and loses `is_current_pl`;
+    its `code` comes back on promotion and reuses the row. `last_seen_at` is what makes
+    a stale pool diagnosable — after a June rollover bootstrap still lists LAST
+    season's twenty clubs for weeks.
+    """
+
+    __tablename__ = "pl_teams"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    code: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    # This season's teams[].id (1-20). Informational only — never an identity.
+    fpl_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    short_name: Mapped[str] = mapped_column(String, index=True)
+    name: Mapped[str] = mapped_column(String)
+    is_current_pl: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    last_seen_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class Gameweek(Base):
@@ -429,13 +476,40 @@ class KeeperSelection(Base):
 class DraftPick(Base):
     """An actual selection made during a draft. The board (slot order/ownership)
     is computed on read from the draft order + keepers + pick trades; this table
-    records picks as they're made live. manager_id = the picking (owning) manager."""
+    records picks as they're made live. manager_id = the picking (owning) manager.
+
+    A pick names exactly one thing, and which column is set says what kind it is:
+    `player_id` a player, `player_label` a free-text discovery pick (someone not yet
+    in the Premier League), `team_id` a goalie team. The CHECK is deliberately narrow
+    — "a team pick carries nothing else" — rather than the num_nonnulls(...) = 1 that
+    would be the honest invariant, because existing discovery rows are not provably
+    one-of and the migration has to apply to live data.
+    """
 
     __tablename__ = "draft_picks"
     __table_args__ = (
         UniqueConstraint(
             "league_id", "season_year", "draft_type", "pick_number",
             name="uq_draftpick_slot",
+        ),
+        CheckConstraint(
+            "team_id IS NULL OR (player_id IS NULL AND player_label IS NULL)",
+            name="ck_draftpick_team_or_player",
+        ),
+        # One goalie team per manager per draft, and a club goes exactly once. Both
+        # are PARTIAL: a plain UNIQUE is useless here because Postgres treats NULLs
+        # as distinct, so every ordinary player pick would count as its own "club".
+        Index(
+            "uq_draftpick_one_team_per_manager",
+            "league_id", "season_year", "draft_type", "manager_id",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_draftpick_team_once",
+            "league_id", "season_year", "draft_type", "team_id",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL"),
         ),
     )
 
@@ -453,6 +527,11 @@ class DraftPick(Base):
     # Discovery-draft picks are players NOT yet in the league (future PL arrivals), so
     # they're recorded as a free-text name rather than a players FK.
     player_label: Mapped[str | None] = mapped_column(String, nullable=True)
+    # A goalie team: the manager drafted this Premier League club and owns every
+    # keeper at it. Mutually exclusive with player_id/player_label (see the CHECK).
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pl_teams.id"), nullable=True
+    )
     league_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
     )
@@ -869,13 +948,31 @@ class TankingFlagClear(Base):
 class DraftQueue(Base):
     """A manager's ranked autodraft queue for a draft (main or discovery). If they're
     absent on the clock, the admin approves the queue → the top still-available player
-    is picked. One row per queued player; `rank` is the order (lower = higher priority)."""
+    is picked. One row per queued player; `rank` is the order (lower = higher priority).
+
+    A goalie team is queued in the SAME list (`team_id` instead of `player_id`), not a
+    table of its own: `rank` is one ordering across everything a manager wants, and a
+    manager whose last slot must be a club needs that club rankable among the players.
+    """
 
     __tablename__ = "draft_queue"
     __table_args__ = (
+        # Kept as-is for players. Postgres treats NULLs as distinct, so this no longer
+        # constrains anything once player_id is nullable — hence the partial index
+        # below for clubs, which is the half a plain UNIQUE cannot express.
         UniqueConstraint(
             "league_id", "season_year", "draft_type", "manager_id", "player_id",
             name="uq_draftqueue_entry",
+        ),
+        Index(
+            "uq_draftqueue_team_entry",
+            "league_id", "season_year", "draft_type", "manager_id", "team_id",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL"),
+        ),
+        CheckConstraint(
+            "num_nonnulls(player_id, team_id) = 1",
+            name="ck_draftqueue_player_or_team",
         ),
     )
 
@@ -888,8 +985,11 @@ class DraftQueue(Base):
     manager_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("managers.id"), index=True
     )
-    player_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("players.id")
+    player_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
+    )
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pl_teams.id"), nullable=True
     )
     rank: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 

@@ -18,7 +18,12 @@
           hx-target="#search-results" hx-include="[name='sort']"
           onchange="this.closest('.card').querySelector('[name=q]').value=''">
           <option value="">All positions</option>
-          <option>GKP</option><option>DEF</option><option>MID</option><option>FWD</option>
+          {% if goalie_teams_on %}
+          {# Goalkeepers aren't draftable individually — you draft a club and own all
+             of its keepers — so GKP is replaced, not joined, by Goalie teams. #}
+          <option value="TEAM">Goalie teams</option>
+          {% else %}<option>GKP</option>{% endif %}
+          <option>DEF</option><option>MID</option><option>FWD</option>
         </select>
         <select name="sort" hx-get="/draft/{{ year }}/search" hx-trigger="change"
           hx-target="#search-results" hx-include="[name='q'],[name='position']">
