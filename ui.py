@@ -124,9 +124,15 @@ def _safe_int(value, lo: int, hi: int, *, field: str = "value") -> int:
     return n
 
 
-def _board_response(request, db, league, year, draft_type="main"):
-    """Render the board partial + tell HTMX the draft changed (so search refreshes)."""
-    resp = templates.TemplateResponse("_board.html", _board_ctx(request, db, league, year, draft_type))
+def _board_response(request, db, league, year, draft_type="main", *, error: str | None = None):
+    """Render the board partial + tell HTMX the draft changed (so search refreshes).
+    A refused pick (kept player, slot already made, ...) still renders this partial
+    with `error` set, so the manager SEES why nothing changed instead of the board
+    silently staying the same — htmx doesn't swap non-2xx responses, so a raised
+    RuleViolation must reach the picker through a 200 like this one."""
+    ctx = _board_ctx(request, db, league, year, draft_type)
+    ctx["pick_error"] = error
+    resp = templates.TemplateResponse("_board.html", ctx)
     resp.headers["HX-Trigger"] = "draftChanged"
     return resp
 
@@ -1526,6 +1532,7 @@ def draft_pick(
         if pick_number is None
         else next((b for b in board if b["pick"] == pick_number), None)
     )
+    error = None
     if slot and slot.get("owner_fpl"):
         if not can_act_as(request, slot["owner_fpl"]):
             return _forbidden(request, "It's not your pick to make.")
@@ -1538,9 +1545,9 @@ def draft_pick(
                 # by a double-click or a stale board.
                 overwrite=is_admin(request),
             )
-        except RuleViolation:
-            pass
-    return _board_response(request, db, league, year)
+        except RuleViolation as e:
+            error = str(e)
+    return _board_response(request, db, league, year, error=error)
 
 
 @router.post("/draft/{year}/trade-pick", response_class=HTMLResponse)

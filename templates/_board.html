@@ -1,4 +1,7 @@
 <div id="board" hx-get="/draft/{{ year }}/board" hx-trigger="every 7s" hx-swap="outerHTML">
+  {% if pick_error %}
+  <div class="card empty">⚠ {{ pick_error }}</div>
+  {% endif %}
   {% if on_clock %}
   <div class="card on-clock-banner">On the clock — pick {{ on_clock.pick }} (R{{ on_clock.round }}): <strong>{{ on_clock.owner }}</strong></div>
   {% elif board %}

@@ -29,6 +29,10 @@
     .pill { display:inline-block; padding:1px 7px; border-radius:999px; font-size:.75rem; background:rgba(55,214,122,.13); color:var(--accent); }
     .pill.warn { background:rgba(255,107,107,.15); color:var(--warn); }
     .empty { padding:14px; color:var(--muted); }
+    #htmx-error-banner { position:fixed; left:50%; bottom:18px; transform:translateX(-50%);
+      max-width:min(90vw,600px); background:var(--card); border:1px solid var(--warn);
+      color:var(--warn); padding:10px 16px; border-radius:8px; font-size:.9rem;
+      box-shadow:0 4px 16px rgba(0,0,0,.4); z-index:1000; display:none; }
     .grid2 { display:grid; grid-template-columns:1.3fr 1fr; gap:18px; align-items:start; }
     @media (max-width:760px){
       .grid2 { grid-template-columns:1fr; }
@@ -77,6 +81,7 @@
   {% block head %}{% endblock %}
 </head>
 <body>
+  <div id="htmx-error-banner"></div>
   <div class="wrap">
     {% if app_env and app_env != "prod" %}
     <div style="background:#7a3b00;color:#ffd9a8;padding:6px 12px;border-radius:6px;margin-bottom:10px;font-weight:600">
@@ -116,6 +121,19 @@
     {% block content %}{% endblock %}
   </div>
   <script>
+    // A refused write (403/423/400 — wrong turn, locked, RuleViolation) never gets
+    // swapped by htmx, so without this the page just does nothing and the manager
+    // can't tell their pick didn't happen. The board's own pick_error banner (200,
+    // swapped normally) covers the draft-pick case specifically; this is the
+    // catch-all for every other write route.
+    document.body.addEventListener('htmx:responseError', function(evt){
+      var el = document.getElementById('htmx-error-banner');
+      if (!el) return;
+      el.textContent = evt.detail.xhr.responseText || 'Something went wrong.';
+      el.style.display = 'block';
+      clearTimeout(el._hideTimer);
+      el._hideTimer = setTimeout(function(){ el.style.display = 'none'; }, 6000);
+    });
     (function(){
       var btn = document.querySelector('.nav-toggle');
       if (btn) btn.addEventListener('click', function(){
