@@ -1045,8 +1045,8 @@ def admin_players(request: Request, db: Session = Depends(get_db)):
     })
 
 
-@router.get("/admin/draft-prep", response_class=HTMLResponse)
-def admin_draft_prep(request: Request, db: Session = Depends(get_db)):
+@router.get("/draft-prep", response_class=HTMLResponse)
+def draft_prep(request: Request, db: Session = Depends(get_db)):
     """Owner-only draft preparation: predicted keepers, who that leaves available,
     and roughly when they go. Same gate as /admin/players.
 
@@ -1056,7 +1056,7 @@ def admin_draft_prep(request: Request, db: Session = Depends(get_db)):
     if not is_owner(request):
         if current_manager_id(request):
             return _forbidden(request, "This page is restricted to the league owner.")
-        return RedirectResponse("/login?next=/admin/draft-prep", status_code=303)
+        return RedirectResponse("/login?next=/draft-prep", status_code=303)
     league = _league_or_404(db)
     year = (league.season_year or 0) + 1
     prep = services.draft_preparation(db, league, year)
