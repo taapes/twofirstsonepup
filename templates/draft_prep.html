@@ -86,7 +86,7 @@
         <td class="num {{ 'pos' if m.net > 0 else ('neg' if m.net < 0 else '') }}">{{ "%+d"|format(m.net) if m.net else "0" }}</td>
         <td class="num">{{ m.used }}</td>
         <td class="num {{ 'neg' if m.lapsed }}">{{ m.lapsed or "—" }}</td>
-        <td class="num {{ 'neg' if m.squad != 15 }}">{{ m.squad }}</td>
+        <td class="num {{ 'neg' if m.squad != squad_target }}">{{ m.squad }}</td>
         {% if not live_mode %}<td class="num {{ 'thin' if m.margin is not none and m.margin < 2 }}">{{ "%.1f"|format(m.margin) if m.margin is not none else "—" }}</td>{% endif %}
         <td class="sub">{{ m.players | map(attribute='name') | join(', ') }}</td>
       </tr>
@@ -95,12 +95,41 @@
   </table>
 </div>
 
+<!-- 2b. goalie teams ------------------------------------------------------->
+{% if prep.goalie_teams %}
+<h2>Goalie teams</h2>
+<div class="card" style="padding:12px">
+  <p class="sub">You draft a <em>club</em>, not a keeper, and you get its whole keeper
+    room — so the projection below is the sum of every goalkeeper at that club. Value is
+    over the best club still available once all {{ ledger|length }} managers have one
+    (replacement {{ prep.goalie_teams.replacement }}). Deliberately not simulated into a
+    "gone by" pick: twenty clubs for ten managers is no scarcity, and a pick number here
+    would be noise dressed up as a prediction.</p>
+  <table class="dp">
+    <thead><tr><th>Club</th><th class="num">Proj</th><th class="num">Value</th>
+      <th>Keepers</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for c in prep.goalie_teams.clubs %}
+      <tr>
+        <td>{{ c.name }} <span class="sub">{{ c.short_name }}</span></td>
+        <td class="num">{{ "%.1f"|format(c.points) }}</td>
+        <td class="num">{{ "%+.1f"|format(c.value) }}</td>
+        <td class="sub">{% for k in c.keepers %}{{ k.name }}{% if k.points is not none %} ({{ k.points }}){% endif %}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}</td>
+        <td>{% if c.owner %}<span class="pill warn">{{ c.owner }}</span>{% else %}<span class="sub">available</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 <!-- 3. the big board ------------------------------------------------------->
 <h2>Big board</h2>
 <div class="card" style="padding:10px;display:flex;gap:8px;align-items:end;flex-wrap:wrap">
   <label>Search<br><input id="f-q" type="search" placeholder="name" style="width:170px"></label>
   <label>Position<br><select id="f-pos"><option value="">All</option>
-    <option>GKP</option><option>DEF</option><option>MID</option><option>FWD</option></select></label>
+    {% if not prep.goalie_teams %}<option>GKP</option>{% endif %}
+    <option>DEF</option><option>MID</option><option>FWD</option></select></label>
   <label>Gone by pick<br><input id="f-gone" type="number" min="1" style="width:90px"
     placeholder="e.g. 40"></label>
   <span class="sub" id="bcount"></span>
@@ -134,9 +163,12 @@
 <h2>Assumptions</h2>
 <div class="card" style="padding:12px">
   <p class="sub">Replacement level is the best <em>freely available</em> player at each
-    position — pegged to how many actually START, not how many sit on a roster. A second
-    goalkeeper never plays, so pegging it to roster depth values backups like starters and
-    has the league keeping a dozen of them.</p>
+    position — pegged to how many actually START, not how many sit on a roster. Pegging it
+    to roster depth values a bench player like a starter, which is how a naive model ends
+    up hoarding them.
+    {% if prep.goalie_teams %}Goalkeepers aren't here at all: you draft a
+    <em>club</em> and own its whole keeper room, so clubs are ranked on their own board
+    above and the squad this models is the thirteen outfielders.{% endif %}</p>
   <table class="dp">
     <thead><tr><th>Position</th><th class="num">Replacement</th><th class="sub">from</th></tr></thead>
     <tbody>
@@ -151,6 +183,11 @@
     player than shown here.</p>
   <p class="sub"><strong>Excluded ({{ prep.excluded|length }})</strong> — in the pool but
     with no projection, so unrankable: {{ prep.excluded | join(', ') }}</p>
+  {% if prep.off_board_keepers %}
+  <p class="sub"><strong>Goalkeepers</strong> — rostered last season but no longer kept or
+    drafted individually; their club is the asset now:
+    {% for mgr, players in prep.off_board_keepers.items() %}{{ mgr }} ({{ players|join(', ') }}){% if not loop.last %}; {% endif %}{% endfor %}</p>
+  {% endif %}
   {% if prep.departed %}
   <p class="sub"><strong>Left the Premier League</strong> — rostered last season, can't be
     kept or drafted:
@@ -172,9 +209,10 @@
         <tr {% if me and prep.names[r.manager] == me %}class="you"{% endif %}>
           <td>{{ r.pick }}</td><td class="sub">{{ r.round }}</td>
           <td>{{ prep.names[r.manager] }}</td>
-          <td>{% if r.get("actual") %}<span class="pill ok">{{ r.player.name if r.player else "—" }}</span>
+          <td>{% if r.get("actual") %}<span class="pill ok">{{ r.player.name if r.player else (r.get("goalie_team") or "—") }}</span>
+            {% elif r.reason == "goalie team" %}<span class="sub">goalie team</span>
             {% else %}{{ r.player.name if r.player else ("— lapsed" if r.reason == "forfeited" else "—") }}{% endif %}</td>
-          <td class="sub">{{ r.player.position if r.player else "" }}</td>
+          <td class="sub">{% if r.player %}{{ r.player.position }}{% elif r.reason == "goalie team" or r.get("goalie_team") %}TEAM{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>

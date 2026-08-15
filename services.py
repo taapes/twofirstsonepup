@@ -3842,6 +3842,48 @@ def _effective_roster_pids(
     return (base - set(moved)) | {pid for pid, mid in moved.items() if mid == manager_id}
 
 
+def _off_board_positions(shape) -> set:
+    """Positions that are not draftable as individuals under this shape.
+
+    Under the goalie-team rule that's GKP — owned through a club, so a keeper is not
+    a player the prep model failed to price, and listing them as "excluded" would bury
+    the handful of genuine gaps under eighty goalkeepers.
+    """
+    return {p for p in draftprep.FPL_SHAPE.positions if p not in shape.positions}
+
+
+def _goalie_team_board(db: Session, league: League, proj: dict, shape, *, teams: int) -> dict | None:
+    """The club big board: every current PL club, its keepers, and its value.
+
+    A club's points are its keepers' AGGREGATE projection, because the whole keeper
+    room is what a manager gets. Ranked by value over the best club still available
+    once everyone has one — the same value-over-replacement idea as players, computed
+    by `draftprep.goalie_team_values`.
+    """
+    if not shape.reserved_slots:
+        return None
+    clubs = db.query(PlTeam).filter_by(is_current_pl=True).order_by(PlTeam.name).all()
+    keepers = goalie_team_keepers(db, clubs)
+    recs, detail = [], {}
+    for t in clubs:
+        gks = keepers.get(t.id, [])
+        pts = sum(proj[p.id].points for p in gks if p.id in proj)
+        recs.append(draftprep.Rec(t.id, t.name, GOALIE_TEAM_POSITION, pts))
+        detail[t.id] = {
+            "id": t.id, "team_code": t.code, "name": t.name, "short_name": t.short_name,
+            "points": round(pts, 1),
+            "keepers": [
+                {"name": p.name,
+                 "points": round(proj[p.id].points, 1) if p.id in proj else None}
+                for p in gks
+            ],
+        }
+    values, rep = draftprep.goalie_team_values(recs, teams=teams)
+    out = [{**detail[k], "value": round(v, 1)} for k, v in values.items()]
+    out.sort(key=lambda r: (-r["value"], r["name"]))
+    return {"clubs": out, "replacement": round(rep, 1)}
+
+
 def draft_preparation(db: Session, league: League, season_year: int) -> dict:
     """Predict every manager's keepers, then who's left and roughly when they go.
 
@@ -3868,18 +3910,27 @@ def draft_preparation(db: Session, league: League, season_year: int) -> dict:
     # denominator: still in the Premier League, and covered by the projections. Keyed
     # on having a projection rather than on Player.status — those two sets coincide
     # today by coincidence, and `status` is FPL-canonical and changes every sync.
+    shape = draftprep.shape_for(league.goalie_team_mode)
     live = db.query(Player).filter(Player.fpl_id.isnot(None)).all()
     pool = [
         draftprep.Rec(p.id, p.name, p.position, proj[p.id].points)
-        for p in live if p.id in proj and p.position in draftprep.POSITIONS
+        for p in live if p.id in proj and p.position in shape.positions
     ]
+    # Goalkeepers are not "excluded players" under the goalie-team rule — they are a
+    # different asset class, listed on their own board below. Filtered out BEFORE
+    # `excluded` is computed, or the page reports ~80 keepers as missing projections.
+    off_board = _off_board_positions(shape)
     excluded = sorted(
-        (p.name for p in live if p.id not in proj or p.position not in draftprep.POSITIONS)
+        p.name for p in live
+        if p.position not in off_board
+        and (p.id not in proj or p.position not in shape.positions)
     )
     pool_by_id = {r.player_id: r for r in pool}
+    n_teams = db.query(Manager).filter_by(league_id=league.id).count() or 10
     replacement, rep_diag = draftprep.replacement_levels(
-        pool, teams=db.query(Manager).filter_by(league_id=league.id).count() or 10
+        pool, teams=n_teams, shape=shape
     )
+    goalie_teams = _goalie_team_board(db, league, proj, shape, teams=n_teams)
 
     managers = db.query(Manager).filter_by(league_id=league.id).all()
     names = {m.id: m.display for m in managers}
@@ -3888,14 +3939,26 @@ def draft_preparation(db: Session, league: League, season_year: int) -> dict:
     # tool must not consult them at all.
     status = _derive_keeper_status(db, league)
 
+    # A goalkeeper on last season's roster is not "departed" — he is no longer a
+    # keepable ASSET, which is a different thing and would read as a data error.
+    # Taken from Player.position (this season's), like the pool itself, not from the
+    # derived status, whose position is last season's.
+    off_board_ids = (
+        {p.id for p in live if p.position in off_board} if off_board else set()
+    )
+
     predictions, keeper_counts, rosters = {}, {}, {}
     departed: dict = {}
+    off_board_keepers: dict = {}
     for m in managers:
         rows = status.get(m.id, {})
         cands = []
         for pid, v in rows.items():
             rec = pool_by_id.get(pid)
             if rec is None:
+                if pid in off_board_ids:
+                    off_board_keepers.setdefault(names[m.id], []).append(v["player"])
+                    continue
                 # left the PL, or no projection — can't be kept and can't be drafted
                 departed.setdefault(names[m.id], []).append(v["player"])
                 continue
@@ -3906,7 +3969,7 @@ def draft_preparation(db: Session, league: League, season_year: int) -> dict:
                 # season's and would corrupt next season's quota accounting.
                 rec.position, rec.points, v["acquisition"], v["eligible"],
             ))
-        out = draftprep.predict_keepers(cands, replacement)
+        out = draftprep.predict_keepers(cands, replacement, shape=shape)
         predictions[m.id] = out
         keeper_counts[m.id] = len(out["keepers"])
         rosters[m.id] = out["keepers"]
@@ -3930,7 +3993,8 @@ def draft_preparation(db: Session, league: League, season_year: int) -> dict:
 
     kept_ids = {r.player_id for v in rosters.values() for r in v}
     available = [r for r in pool if r.player_id not in kept_ids]
-    sim = draftprep.simulate_draft(ordered, available, rosters, replacement)
+    sim = draftprep.simulate_draft(ordered, available, rosters, replacement,
+                                   shape=shape)
 
     gone_by = {}
     for row in sim["picks"]:
@@ -3954,6 +4018,8 @@ def draft_preparation(db: Session, league: League, season_year: int) -> dict:
         "pool": pool,
         "excluded": excluded,
         "departed": departed,
+        "goalie_teams": goalie_teams,
+        "off_board_keepers": off_board_keepers,
     }
 
 
@@ -3970,14 +4036,17 @@ def draft_preparation_live(db: Session, league: League, season_year: int) -> dic
         return {"available": False, "reason": "no projections imported"}
     proj = projection_index(db, proj_year)
 
+    shape = draftprep.shape_for(league.goalie_team_mode)
     live_players = db.query(Player).filter(Player.fpl_id.isnot(None)).all()
     pool = [
         draftprep.Rec(p.id, p.name, p.position, proj[p.id].points)
-        for p in live_players if p.id in proj and p.position in draftprep.POSITIONS
+        for p in live_players if p.id in proj and p.position in shape.positions
     ]
+    off_board = _off_board_positions(shape)
     excluded = sorted(
         p.name for p in live_players
-        if p.id not in proj or p.position not in draftprep.POSITIONS
+        if p.position not in off_board
+        and (p.id not in proj or p.position not in shape.positions)
     )
     pool_by_id = {r.player_id: r for r in pool}
 
@@ -3985,9 +4054,11 @@ def draft_preparation_live(db: Session, league: League, season_year: int) -> dic
     names = {m.id: m.display for m in managers}
     id_by_person = {m.display: m.id for m in managers}
 
+    n_teams = len(managers) or 10
     replacement, rep_diag = draftprep.replacement_levels(
-        pool, teams=len(managers) or 10
+        pool, teams=n_teams, shape=shape
     )
+    goalie_teams = _goalie_team_board(db, league, proj, shape, teams=n_teams)
 
     # Actual keeper selections — only ones the manager still holds
     ks_rows = effective_keeper_selections(db, league, season_year)
@@ -4006,6 +4077,10 @@ def draft_preparation_live(db: Session, league: League, season_year: int) -> dic
     )
     picks_by_number = {dp.pick_number: dp for dp in draft_picks}
     taken_ids = {dp.player_id for dp in draft_picks if dp.player_id}
+    # Clubs already off the board, and who no longer owes a reserved slot.
+    club_names = {t.id: t.name for t in db.query(PlTeam)}
+    club_owner = {dp.team_id: dp.manager_id for dp in draft_picks if dp.team_id}
+    reserved_spent = set(club_owner.values())
 
     # Slots — same computation as draft_preparation
     r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
@@ -4039,7 +4114,8 @@ def draft_preparation_live(db: Session, league: League, season_year: int) -> dic
     # Simulate only remaining (not yet recorded) slots
     remaining_slots = [s for s in ordered if s["pick"] not in picks_by_number]
     sim_remaining = draftprep.simulate_draft(
-        remaining_slots, available, current_rosters, replacement
+        remaining_slots, available, current_rosters, replacement, shape=shape,
+        reserved_spent=reserved_spent,
     )
     sim_by_pick = {r["pick"]: r for r in sim_remaining["picks"]}
 
@@ -4051,6 +4127,9 @@ def draft_preparation_live(db: Session, league: League, season_year: int) -> dic
             all_picks.append({
                 "pick": s["pick"], "round": s["round"], "manager": s["manager"],
                 "player": pool_by_id.get(dp.player_id),
+                # A club isn't in the player pool, so it needs its own label or the
+                # row renders empty and reads as a slot nobody has used yet.
+                "goalie_team": club_names.get(dp.team_id) if dp.team_id else None,
                 "reason": None, "alternatives": [], "actual": True,
             })
         elif s["pick"] in sim_by_pick:
@@ -4066,11 +4145,17 @@ def draft_preparation_live(db: Session, league: League, season_year: int) -> dic
 
     # departed: rostered but no projection / not in PL — same logic as draft_preparation
     status = _derive_keeper_status(db, league)
+    off_board_ids = (
+        {p.id for p in live_players if p.position in off_board} if off_board else set()
+    )
     departed: dict = {}
+    off_board_keepers: dict = {}
     for m in managers:
         for pid, v in status.get(m.id, {}).items():
-            if pool_by_id.get(pid) is None:
-                departed.setdefault(names[m.id], []).append(v["player"])
+            if pool_by_id.get(pid) is not None:
+                continue
+            bucket = off_board_keepers if pid in off_board_ids else departed
+            bucket.setdefault(names[m.id], []).append(v["player"])
 
     predictions = {
         m.id: {"keepers": actual_keepers[m.id], "margin": None, "binding": []}
@@ -4096,7 +4181,19 @@ def draft_preparation_live(db: Session, league: League, season_year: int) -> dic
         "pool": pool,
         "excluded": excluded,
         "departed": departed,
+        "goalie_teams": _mark_taken_clubs(goalie_teams, club_owner, names),
+        "off_board_keepers": off_board_keepers,
     }
+
+
+def _mark_taken_clubs(board, club_owner: dict, names: dict):
+    """Annotate the club big board with who has already drafted each one (live mode)."""
+    if not board:
+        return board
+    owner_by_id = {tid: names.get(mid) for tid, mid in club_owner.items()}
+    for row in board["clubs"]:
+        row["owner"] = owner_by_id.get(row.get("id"))
+    return board
 
 
 def get_draft_board(

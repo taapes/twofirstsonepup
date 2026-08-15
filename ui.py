@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
+import draftprep
 import services
 from auth import (
     can_act_as,
@@ -1109,6 +1110,10 @@ def draft_prep(request: Request, db: Session = Depends(get_db)):
         "is_owner": True, "prep": prep, "year": year, "mine": mine,
         "ledger": ledger, "me": me.display if me else None,
         "live_mode": live_mode,
+        # What a finished simulated squad should come to. The simulation only ever
+        # holds the players it drafts, so under the goalie-team rule that's the
+        # thirteen outfielders — the club is a slot, not a squad member.
+        "squad_target": draftprep.shape_for(league.goalie_team_mode).squad_size,
     })
 
 
