@@ -3705,6 +3705,147 @@ def draft_preparation(db: Session, league: League, season_year: int) -> dict:
     }
 
 
+def draft_preparation_live(db: Session, league: League, season_year: int) -> dict:
+    """Live draft assistant: actual submitted keepers + recorded picks, simulation
+    only for remaining slots.
+
+    Called once keepers_revealed(league) is True (phase="draft" or keepers_locked).
+    Returns the same outer shape as draft_preparation so the template and route
+    assembly code work unchanged. Extra keys: "live": True, "picks_made": int.
+    """
+    proj_year = projection_season_year(db)
+    if proj_year is None:
+        return {"available": False, "reason": "no projections imported"}
+    proj = projection_index(db, proj_year)
+
+    live_players = db.query(Player).filter(Player.fpl_id.isnot(None)).all()
+    pool = [
+        draftprep.Rec(p.id, p.name, p.position, proj[p.id].points)
+        for p in live_players if p.id in proj and p.position in draftprep.POSITIONS
+    ]
+    excluded = sorted(
+        p.name for p in live_players
+        if p.id not in proj or p.position not in draftprep.POSITIONS
+    )
+    pool_by_id = {r.player_id: r for r in pool}
+
+    managers = db.query(Manager).filter_by(league_id=league.id).all()
+    names = {m.id: m.display for m in managers}
+    id_by_person = {m.display: m.id for m in managers}
+
+    replacement, rep_diag = draftprep.replacement_levels(
+        pool, teams=len(managers) or 10
+    )
+
+    # Actual keeper selections — only ones the manager still holds
+    ks_rows = effective_keeper_selections(db, league, season_year)
+    actual_keepers: dict = {m.id: [] for m in managers}
+    for ks in ks_rows:
+        rec = pool_by_id.get(ks.player_id)
+        if rec:
+            actual_keepers[ks.manager_id].append(rec)
+    keeper_counts = {mid: len(recs) for mid, recs in actual_keepers.items()}
+
+    # Actual draft picks recorded so far
+    draft_picks = (
+        db.query(DraftPick)
+        .filter_by(league_id=league.id, season_year=season_year, draft_type="main")
+        .all()
+    )
+    picks_by_number = {dp.pick_number: dp for dp in draft_picks}
+    taken_ids = {dp.player_id for dp in draft_picks if dp.player_id}
+
+    # Slots — same computation as draft_preparation
+    r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
+    rev = _reverse_standings_managers(db, league)
+    slots = generate_draft_slots(
+        [m.id for m in r1], [m.id for m in rev], keeper_counts, ROSTER_SIZE,
+        overrides=_order_overrides(db, league, season_year, "main"),
+    )
+    own = pick_ownership(db, league, season_year, "main")
+    ordered = []
+    for i, s in enumerate(slots, start=1):
+        orig = names.get(s["manager"])
+        cur = own.get((s["round"], orig), orig)
+        ordered.append({"pick": i, "round": s["round"],
+                        "manager": id_by_person.get(cur, s["manager"]),
+                        "original": s["manager"]})
+
+    # Pool for simulation: minus kept AND minus already drafted
+    kept_ids = {r.player_id for recs in actual_keepers.values() for r in recs}
+    available = [r for r in pool
+                 if r.player_id not in kept_ids and r.player_id not in taken_ids]
+
+    # Seed each manager's roster with actual keepers + actual picks so far
+    current_rosters: dict = {m.id: list(actual_keepers[m.id]) for m in managers}
+    for dp in draft_picks:
+        rec = pool_by_id.get(dp.player_id)
+        if rec and dp.manager_id:
+            current_rosters[dp.manager_id].append(rec)
+
+    # Simulate only remaining (not yet recorded) slots
+    remaining_slots = [s for s in ordered if s["pick"] not in picks_by_number]
+    sim_remaining = draftprep.simulate_draft(
+        remaining_slots, available, current_rosters, replacement
+    )
+    sim_by_pick = {r["pick"]: r for r in sim_remaining["picks"]}
+
+    # Combined picks list: actual first, then simulated future picks
+    all_picks = []
+    for s in ordered:
+        dp = picks_by_number.get(s["pick"])
+        if dp:
+            all_picks.append({
+                "pick": s["pick"], "round": s["round"], "manager": s["manager"],
+                "player": pool_by_id.get(dp.player_id),
+                "reason": None, "alternatives": [], "actual": True,
+            })
+        elif s["pick"] in sim_by_pick:
+            all_picks.append({**sim_by_pick[s["pick"]], "actual": False})
+
+    # gone_by: real pick number for taken players, sim pick for projected
+    gone_by = {dp.player_id: dp.pick_number for dp in draft_picks if dp.player_id}
+    for row in sim_remaining["picks"]:
+        if row["player"] and row["player"].player_id not in gone_by:
+            gone_by[row["player"].player_id] = row["pick"]
+
+    values = draftprep.player_values(pool, replacement)
+
+    # departed: rostered but no projection / not in PL — same logic as draft_preparation
+    status = _derive_keeper_status(db, league)
+    departed: dict = {}
+    for m in managers:
+        for pid, v in status.get(m.id, {}).items():
+            if pool_by_id.get(pid) is None:
+                departed.setdefault(names[m.id], []).append(v["player"])
+
+    predictions = {
+        m.id: {"keepers": actual_keepers[m.id], "margin": None, "binding": []}
+        for m in managers
+    }
+
+    return {
+        "available": True,
+        "live": True,
+        "picks_made": len(draft_picks),
+        "season_year": season_year,
+        "projection_year": proj_year,
+        "rounds": max((s["round"] for s in slots), default=0),
+        "replacement": replacement,
+        "replacement_diag": rep_diag,
+        "names": names,
+        "predictions": predictions,
+        "slots": ordered,
+        "sim": {"picks": all_picks, "squads": sim_remaining["squads"],
+                "undrafted": sim_remaining["undrafted"]},
+        "gone_by": gone_by,
+        "vor": values,
+        "pool": pool,
+        "excluded": excluded,
+        "departed": departed,
+    }
+
+
 def get_draft_board(
     db: Session, league: League, season_year: int, draft_type: str = "main"
 ) -> list[dict]:
@@ -4277,9 +4418,16 @@ def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
     players = []
     gw = latest_gameweek(db, league)
     if gw is not None:
-        for p in (
-            db.query(PlayerSeason)
+        # fpl_id comes from the global `players` row (Player.fpl_id), NOT
+        # PlayerSeason.fpl_id — every other write surface (search_players,
+        # keeper_overrides_context) round-trips through _resolve_player, which
+        # resolves against the global column. PlayerSeason's frozen id is a
+        # DIFFERENT season's element id once this league is sync_locked, so using
+        # it here submitted the right-looking checkbox with the wrong id underneath.
+        for ps, p in (
+            db.query(PlayerSeason, Player)
             .join(Roster, Roster.player_id == PlayerSeason.player_id)
+            .join(Player, Player.id == PlayerSeason.player_id)
             .filter(
                 Roster.manager_id == m.id,
                 Roster.gameweek_id == gw.id,
@@ -4287,7 +4435,7 @@ def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
             )
             .order_by(PlayerSeason.position, PlayerSeason.name)
         ):
-            players.append({"fpl_id": p.fpl_id, "name": p.name, "position": p.position})
+            players.append({"fpl_id": p.fpl_id, "name": ps.name, "position": ps.position})
 
     upcoming = (league.season_year or 0) + 1
     picks = []

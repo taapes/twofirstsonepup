@@ -1059,7 +1059,11 @@ def draft_prep(request: Request, db: Session = Depends(get_db)):
         return RedirectResponse("/login?next=/draft-prep", status_code=303)
     league = _league_or_404(db)
     year = (league.season_year or 0) + 1
-    prep = services.draft_preparation(db, league, year)
+    live_mode = services.keepers_revealed(league)
+    if live_mode:
+        prep = services.draft_preparation_live(db, league, year)
+    else:
+        prep = services.draft_preparation(db, league, year)
 
     me = _current_manager(request, db, league)
     mine, ledger = [], []
@@ -1097,6 +1101,7 @@ def draft_prep(request: Request, db: Session = Depends(get_db)):
         "request": request, "league": league, "is_admin": is_admin(request),
         "is_owner": True, "prep": prep, "year": year, "mine": mine,
         "ledger": ledger, "me": me.display if me else None,
+        "live_mode": live_mode,
     })
 
 

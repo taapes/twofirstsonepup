@@ -317,9 +317,9 @@ def test_the_page_is_owner_only(test_session):
     test_session.commit()
 
     client = TestClient(app, follow_redirects=False)
-    assert client.get("/admin/draft-prep").status_code in (303, 307)   # anonymous
+    assert client.get("/draft-prep").status_code in (303, 307)   # anonymous
     client.post("/login", data={"manager_id": "1", "password": "pw"})
-    assert client.get("/admin/draft-prep").status_code == 403
+    assert client.get("/draft-prep").status_code == 403
 
 
 def test_the_page_renders_without_projections(test_session):
@@ -340,6 +340,152 @@ def test_the_page_renders_without_projections(test_session):
     test_session.commit()
     client = TestClient(app, follow_redirects=False)
     client.post("/login", data={"manager_id": auth.owner_entry_id(), "password": "pw"})
-    r = client.get("/admin/draft-prep")
+    r = client.get("/draft-prep")
     assert r.status_code == 200
     assert b"No projections imported" in r.content
+
+
+# ---- live mode ------------------------------------------------------------
+# draft_preparation_live uses actual keeper_selections and DraftPick rows
+# instead of predicting. These tests confirm the wiring, not the sim model.
+
+def _seed_live(session):
+    """League in draft phase (keepers revealed), with projections."""
+    from models import DraftLottery, Gameweek, Standing
+    lg = League(fpl_league_id="99", name="Live", season_year=2025, is_current=True,
+                sync_locked=False, phase="draft", keepers_locked=True)
+    session.add(lg)
+    session.flush()
+    for n in range(1, 39):
+        session.add(Gameweek(number=n, league_id=lg.id))
+    session.flush()
+    mgrs = {}
+    for i, name in enumerate(("X", "Y"), start=1):
+        m = Manager(league_id=lg.id, fpl_manager_id=str(100 + i),
+                    name=name, display_name=name)
+        session.add(m)
+        session.flush()
+        session.add_all([
+            Standing(league_id=lg.id, manager_id=m.id, rank=i,
+                     total=50 - i, points_for=500 - i),
+            DraftLottery(league_id=lg.id, manager_id=m.id, pick_result=i),
+        ])
+        mgrs[name] = m
+    session.commit()
+    return lg, mgrs
+
+
+def _proj_player(session, lg, name, pos, points):
+    from models import PlayerProjection, PlayerSeason
+    _FPL[0] += 1
+    fid = _FPL[0]
+    p = Player(name=name, code=fid * 13, fpl_id=fid, position=pos,
+               current_team="CHE", price=50, status="a")
+    session.add(p)
+    session.flush()
+    session.add_all([
+        PlayerSeason(league_id=lg.id, player_id=p.id, fpl_id=fid,
+                     name=name, position=pos, current_team="CHE"),
+        PlayerProjection(season_year=YEAR, player_id=p.id, raw_name=name,
+                         raw_team="CHE", raw_position=pos, price=5.0, points=points),
+    ])
+    session.commit()
+    return p
+
+
+def test_live_uses_actual_keeper_selections(test_session):
+    """Actual submitted keepers appear in predictions, not the model's guess."""
+    lg, mgrs = _seed_live(test_session)
+    players = [_proj_player(test_session, lg, f"P{i}", pos, 200 - i * 10)
+               for i, pos in enumerate(["GKP", "DEF", "DEF", "MID", "MID",
+                                        "MID", "FWD", "FWD", "GKP", "DEF",
+                                        "DEF", "MID", "MID", "FWD", "FWD"])]
+    # Roster all for X so they're keeper-eligible
+    for p in players:
+        for n in range(1, 39):
+            gw = test_session.query(Gameweek).filter_by(
+                league_id=lg.id, number=n).first()
+            test_session.add(Roster(manager_id=mgrs["X"].id,
+                                    gameweek_id=gw.id, player_id=p.id))
+    test_session.commit()
+
+    # Select two specific players as X's keepers
+    kept = players[:2]
+    for p in kept:
+        test_session.add(KeeperSelection(league_id=lg.id, manager_id=mgrs["X"].id,
+                                         player_id=p.id, season_year=YEAR))
+    test_session.commit()
+
+    out = services.draft_preparation_live(test_session, lg, YEAR)
+    assert out["available"]
+    assert out["live"] is True
+    actual = {r.player_id for r in out["predictions"][mgrs["X"].id]["keepers"]}
+    assert actual == {p.id for p in kept}
+
+
+def test_live_actual_picks_appear_and_are_excluded_from_pool(test_session):
+    """DraftPick rows show up as 'actual=True' and remove the player from available."""
+    from models import DraftPick as DP
+    lg, mgrs = _seed_live(test_session)
+    players = [_proj_player(test_session, lg, f"Q{i}", pos, 150 - i * 8)
+               for i, pos in enumerate(["GKP", "DEF", "DEF", "MID", "MID",
+                                        "MID", "FWD", "FWD", "GKP", "DEF",
+                                        "DEF", "MID", "MID", "FWD", "FWD"])]
+
+    drafted_player = players[3]   # some MID
+    test_session.add(DP(league_id=lg.id, season_year=YEAR, draft_type="main",
+                        round=1, pick_number=1, manager_id=mgrs["X"].id,
+                        player_id=drafted_player.id))
+    test_session.commit()
+
+    out = services.draft_preparation_live(test_session, lg, YEAR)
+    assert out["picks_made"] == 1
+
+    # The drafted player must not be in the remaining available pool for the sim
+    pool_ids = {r.player_id for r in out["pool"]}
+    assert drafted_player.id in pool_ids, "player should be in the overall pool"
+    # But the pick-1 row should be actual=True and not in the sim's available
+    pick1 = next(r for r in out["sim"]["picks"] if r["pick"] == 1)
+    assert pick1["actual"] is True
+    assert pick1["player"] is not None
+    assert pick1["player"].player_id == drafted_player.id
+
+
+def test_live_gone_by_uses_real_pick_number(test_session):
+    """gone_by for a drafted player is the actual pick number, not the sim's guess."""
+    from models import DraftPick as DP
+    lg, mgrs = _seed_live(test_session)
+    players = [_proj_player(test_session, lg, f"R{i}", pos, 180 - i * 9)
+               for i, pos in enumerate(["GKP", "DEF", "DEF", "MID", "MID",
+                                        "MID", "FWD", "FWD", "GKP", "DEF",
+                                        "DEF", "MID", "MID", "FWD", "FWD"])]
+
+    target = players[5]   # any player
+    test_session.add(DP(league_id=lg.id, season_year=YEAR, draft_type="main",
+                        round=1, pick_number=3, manager_id=mgrs["Y"].id,
+                        player_id=target.id))
+    test_session.commit()
+
+    out = services.draft_preparation_live(test_session, lg, YEAR)
+    assert out["gone_by"].get(target.id) == 3
+
+
+def test_live_simulation_seeded_from_actual_picks(test_session):
+    """A player already drafted is not re-drafted in the simulation."""
+    from models import DraftPick as DP
+    lg, mgrs = _seed_live(test_session)
+    players = [_proj_player(test_session, lg, f"S{i}", pos, 160 - i * 7)
+               for i, pos in enumerate(["GKP", "DEF", "DEF", "MID", "MID",
+                                        "MID", "FWD", "FWD", "GKP", "DEF",
+                                        "DEF", "MID", "MID", "FWD", "FWD"])]
+
+    taken = players[2]   # any DEF
+    test_session.add(DP(league_id=lg.id, season_year=YEAR, draft_type="main",
+                        round=1, pick_number=2, manager_id=mgrs["X"].id,
+                        player_id=taken.id))
+    test_session.commit()
+
+    out = services.draft_preparation_live(test_session, lg, YEAR)
+    sim_player_ids = {r["player"].player_id for r in out["sim"]["picks"]
+                      if r["player"] and not r.get("actual")}
+    assert taken.id not in sim_player_ids, "already-drafted player re-appeared in sim"
