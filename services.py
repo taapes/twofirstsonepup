@@ -356,7 +356,7 @@ def set_lineup(
     if not allow_locked and lineup_locked(db, league, gw):
         raise RuleViolation(f"GW{gw_number} lineup is locked (deadline passed).")
 
-    squad = _squad_players(db, league, manager.id, gw.id)
+    squad = _current_squad_players(db, league, manager, gw.id)
     if len(squad) != ROSTER_SIZE:
         raise RuleViolation(
             f"Your GW{gw_number} squad has {len(squad)} players, expected "
@@ -413,7 +413,7 @@ def get_lineup_editor(
                 "gameweek": gw_number, "locked": True, "has_lineup": False,
                 "players": []}
 
-    squad = _squad_players(db, league, manager.id, gw.id)
+    squad = _current_squad_players(db, league, manager, gw.id)
     existing = get_lineup(db, league, fpl_manager_id, gw_number)
     role: dict = {}
     if existing:
@@ -755,30 +755,10 @@ def free_agent_move(db: Session, league: League, fpl_manager_id: str,
     db.commit()
 
 
-def v2_execute_trade(db: Session, league: League, a_fpl: str, a_player_fpl: int,
-                     b_fpl: str, b_player_fpl: int, gw_number: int) -> None:
-    """Execute a player-for-player trade against the ledger: each side must own the
-    player they're sending. Appends the four moves (drop+add per player) and audits."""
-    a = _resolve_manager(db, league, a_fpl)
-    b = _resolve_manager(db, league, b_fpl)
-    pa = _resolve_player(db, a_player_fpl)
-    pb = _resolve_player(db, b_player_fpl)
-    squad_a = fold_moves(_v2_moves(db, league, a.id))
-    squad_b = fold_moves(_v2_moves(db, league, b.id))
-    if pa.id not in squad_a:
-        raise RuleViolation(f"{a.display} doesn't own {pa.name}.")
-    if pb.id not in squad_b:
-        raise RuleViolation(f"{b.display} doesn't own {pb.name}.")
-    _append_move(db, league, a.id, pa.id, gw_number, "drop", "trade")
-    _append_move(db, league, b.id, pa.id, gw_number, "add", "trade")
-    _append_move(db, league, b.id, pb.id, gw_number, "drop", "trade")
-    _append_move(db, league, a.id, pb.id, gw_number, "add", "trade")
-    record_audit(db, league, action="v2_trade",
-                 summary=f"Trade: {a.display} {pa.name} ↔ {b.display} {pb.name} (GW{gw_number})",
-                 manager_ids=[a.fpl_manager_id, b.fpl_manager_id],
-                 details={"a": a.display, "a_player": pa.name,
-                          "b": b.display, "b_player": pb.name, "gw": gw_number})
-    db.commit()
+# A `v2_execute_trade` used to live here: a strict 1-for-1 ledger swap that no route
+# ever called. `record_trade` now moves player assets through the ledger itself, for
+# any balanced combination of players and picks, so this was deleted rather than kept
+# as a second trade writer that could drift from the first.
 
 
 def get_waivers_view(db: Session, league: League, fpl_manager_id: str) -> dict | None:
@@ -1809,6 +1789,32 @@ def _squad_players(db: Session, league: League, manager_id, gw_id) -> list[Playe
     )
 
 
+def _current_squad_players(
+    db: Session, league: League, manager: Manager, gw_id=None
+) -> list[PlayerSeason]:
+    """PlayerSeason rows for a manager's CURRENT squad: ledger-derived when the v2
+    engine is on, else the FPL-synced roster snapshot for `gw_id`.
+
+    One seam, so the callers that need "who is on this squad right now" (the lineup
+    editor, the lineup size gate, the trade asset picker) can't drift on which of the
+    two sources they read — a trade that moves a player in the ledger while the picker
+    still lists the FPL snapshot is exactly the split this closes."""
+    if app_engine_on():
+        squad_ids = get_v2_squad(db, league, manager.fpl_manager_id)
+        if not squad_ids:
+            return []
+        return (
+            db.query(PlayerSeason)
+            .filter(
+                PlayerSeason.league_id == league.id,
+                PlayerSeason.player_id.in_(squad_ids),
+            )
+            .order_by(PlayerSeason.position, PlayerSeason.name)
+            .all()
+        )
+    return _squad_players(db, league, manager.id, gw_id)
+
+
 def _player_stat_dict(p: "Player | PlayerSeason") -> dict:
     """Duck-typed over both — PlayerSeason mirrors every attribute read here,
     including `news`."""
@@ -1838,24 +1844,9 @@ def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None
     if not manager:
         return None
     gw = latest_gameweek(db, league)
-    if app_engine_on():
-        # Squad from the app-owned ledger (fold) rather than the FPL roster snapshot.
-        # Yields PlayerSeason like the other branch: the shared code below reads
-        # .player_id, which a Player row doesn't have.
-        squad_ids = get_v2_squad(db, league, fpl_manager_id)
-        players = (
-            db.query(PlayerSeason)
-            .filter(
-                PlayerSeason.league_id == league.id,
-                PlayerSeason.player_id.in_(squad_ids),
-            )
-            .order_by(PlayerSeason.position, PlayerSeason.name)
-            .all()
-            if squad_ids
-            else []
-        )
-    else:
-        players = _squad_players(db, league, manager.id, gw.id if gw else None)
+    # PlayerSeason either way (ledger fold or FPL snapshot): the shared code below
+    # reads .player_id, which a Player row doesn't have.
+    players = _current_squad_players(db, league, manager, gw.id if gw else None)
 
     # recent points trend per player (last 5 synced GWs, oldest->newest)
     recent = (
@@ -2001,13 +1992,14 @@ def get_upcoming_matchups(
         )
     }
     fixtures = fixtures_for_gws(db, league, gw_numbers)
-    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    fpls = {m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)}
+    mgrs = {m.id: m for m in db.query(Manager).filter_by(league_id=league.id)}
+    names = {mid: m.display for mid, m in mgrs.items()}
+    fpls = {mid: m.fpl_manager_id for mid, m in mgrs.items()}
     latest = latest_gameweek(db, league)
     latest_id = latest.id if latest else None
 
     def squad_with_fixtures(manager_id, gw_num):
-        rows = _squad_players(db, league, manager_id, latest_id)
+        rows = _current_squad_players(db, league, mgrs[manager_id], latest_id)
         gw_fix = fixtures.get(gw_num, {})
         out = []
         for p in rows:
@@ -4121,20 +4113,11 @@ def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
     person = m.display
     persons = [mm.display for mm in db.query(Manager).filter_by(league_id=league.id)]
 
-    players = []
     gw = latest_gameweek(db, league)
-    if gw is not None:
-        for p in (
-            db.query(PlayerSeason)
-            .join(Roster, Roster.player_id == PlayerSeason.player_id)
-            .filter(
-                Roster.manager_id == m.id,
-                Roster.gameweek_id == gw.id,
-                PlayerSeason.league_id == league.id,
-            )
-            .order_by(PlayerSeason.position, PlayerSeason.name)
-        ):
-            players.append({"fpl_id": p.fpl_id, "name": p.name, "position": p.position})
+    players = [
+        {"fpl_id": p.fpl_id, "name": p.name, "position": p.position}
+        for p in _current_squad_players(db, league, m, gw.id if gw else None)
+    ]
 
     upcoming = (league.season_year or 0) + 1
     picks = []
@@ -4156,18 +4139,60 @@ def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
 def record_trade(
     db: Session, league: League, *, a_fpl: str, b_fpl: str,
     a_players: list, a_picks: list, b_players: list, b_picks: list,
+    gw_number: int | None = None,
 ) -> dict:
     """Record a trade between two managers: any players + picks each way, no cap.
     Each asset becomes a Trade row; pick assets reassign ownership via the shared
-    pick_ownership computation. Not admin-gated."""
+    pick_ownership computation. Not admin-gated.
+
+    With the v2 engine on, player assets ALSO move through the app-owned ledger
+    (`V2RosterMove`) in this same transaction — the ledger is the squad of record
+    there, so a Trade row alone would leave the trade log saying one thing and every
+    squad view saying another. One function, one commit: a rule violation partway
+    through rolls the whole trade back rather than half-applying it.
+
+    A trade must exchange an EQUAL NUMBER OF PLAYERS each way (picks don't count),
+    so a squad's headcount never moves and `set_lineup`'s 15-man gate is never
+    challenged by a trade. A pure player-for-pick deal is therefore rejected; balance
+    it with a player the other way."""
     A = _resolve_manager(db, league, a_fpl)
     B = _resolve_manager(db, league, b_fpl)
     if A.id == B.id:
         raise RuleViolation("pick two different managers")
+    a_ids = [int(x) for x in a_players]
+    b_ids = [int(x) for x in b_players]
+    if set(a_ids) & set(b_ids):
+        raise RuleViolation("a player can't be on both sides of a trade")
+    if len(a_ids) != len(b_ids):
+        raise RuleViolation(
+            "A trade must exchange an equal number of players each way "
+            "(picks don't count)."
+        )
     by_person = {m.display: m for m in db.query(Manager).filter_by(league_id=league.id)}
+
+    # Engine off = the FPL roster snapshot is still the squad of record (and this
+    # league's ledger may never have been seeded), so don't touch it.
+    ledger = app_engine_on()
+    if ledger:
+        gw_number = gw_number or current_gameweek(db, league) or 1
+        squads = {
+            A.id: fold_moves(_v2_moves(db, league, A.id)),
+            B.id: fold_moves(_v2_moves(db, league, B.id)),
+        }
 
     def add_player(frm, to, fpl):
         p = _resolve_player(db, int(fpl))
+        if ledger:
+            # Local squad views are kept current as we go, so a multi-player trade
+            # validates against the state the earlier legs already produced.
+            if p.id not in squads[frm.id]:
+                raise RuleViolation(f"{frm.display} doesn't own {p.name}.")
+            if p.id in squads[to.id]:
+                raise RuleViolation(f"{to.display} already owns {p.name}.")
+            _append_move(db, league, frm.id, p.id, gw_number, "drop", "trade")
+            _append_move(db, league, to.id, p.id, gw_number, "add", "trade")
+            squads[frm.id].discard(p.id)
+            squads[to.id].add(p.id)
         db.add(Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id, player_id=p.id))
 
     def add_pick(frm, to, spec):
@@ -4181,16 +4206,25 @@ def record_trade(
             pick_original_manager=owner.id, draft_pick=f"{y} {dt} R{rnd} (orig {orig})",
         ))
 
-    for fpl in a_players:
+    for fpl in a_ids:
         add_player(A, B, fpl)
-    for fpl in b_players:
+    for fpl in b_ids:
         add_player(B, A, fpl)
     for spec in a_picks:
         add_pick(A, B, spec)
     for spec in b_picks:
         add_pick(B, A, spec)
+    moved = len(a_ids) + len(b_ids) + len(a_picks) + len(b_picks)
+    record_audit(
+        db, league, action="trade.record",
+        summary=f"Trade: {A.display} ↔ {B.display} ({moved} assets)",
+        manager_ids=[A.fpl_manager_id, B.fpl_manager_id],
+        details={"a": A.display, "b": B.display,
+                 "a_players": a_ids, "b_players": b_ids,
+                 "a_picks": list(a_picks), "b_picks": list(b_picks),
+                 "gw": gw_number if ledger else None},
+    )
     db.commit()
-    moved = len(a_players) + len(b_players) + len(a_picks) + len(b_picks)
     return {"a": A.display, "b": B.display, "assets_moved": moved}
 
 

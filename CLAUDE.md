@@ -108,6 +108,24 @@ for-byte current behavior.** Flipping it is a deliberate, reversible operational
 fresh-season cutover still needs the draft→ledger bridge (seed initial squads from
 an in-app draft rather than from FPL roster history).
 
+**Trades write the ledger, and one seam reads it.** With the engine on the ledger IS
+the squad, so `services.record_trade` (the only trade writer — `/trade`, players and
+picks, any combination) appends the drop/add moves itself, in the same transaction as
+the `Trade` rows: two writers for one trade is how the trade log and the squad end up
+disagreeing. It validates ownership against the fold as it goes, so a multi-player
+trade sees the state its earlier legs produced. A trade must exchange an **equal
+number of players each way** (picks don't count) — headcount never moves, so
+`set_lineup`'s 15-man gate is never challenged; a clean player-for-pick deal is
+rejected rather than allowed to leave a 14- or 16-man squad. Engine **off** takes none
+of this path: the FPL snapshot is still the squad and the ledger may not even be
+seeded, so validating against it would reject every trade.
+Reads go through **`services._current_squad_players`** — ledger fold when the engine
+is on, `_squad_players` (the FPL snapshot) when it's off. `get_my_team`, `set_lineup`,
+`get_lineup_editor`, `get_upcoming_matchups` and `manager_assets` all call it; adding
+a sixth caller means calling it, not re-branching on `app_engine_on()`. The trade
+picker reading the snapshot while the ledger had already moved the player was the
+original bug. `v2_execute_trade` (a dead 1-for-1 ledger swap) is deleted.
+
 ## FPL Draft API endpoints in use
 
 `/bootstrap-static`, `/league/{league_id}/details`, `/event/{gw}/live`,
