@@ -22,7 +22,7 @@
     <p class="sub">Each round spans two gameweeks; totals decide the winner.
       Round 1 = QFs/play-in, 2 = SFs, 3 = Final + 3rd-place / Pup final.</p>
     <form method="post" action="/admin/cups/score-round">
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
         <label>Round<br><input name="round" type="number" min="1" max="3" style="width:70px" required></label>
         <label>GW 1<br><input name="gw1" type="number" min="1" max="38" style="width:80px" required></label>
         <label>GW 2<br><input name="gw2" type="number" min="1" max="38" style="width:80px" required></label>

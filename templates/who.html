@@ -30,6 +30,7 @@
 </div>
 <style>
   .who-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:8px; }
+  @media (max-width:400px) { .who-grid { grid-template-columns:1fr; } }
   .who-btn { display:block; text-align:center; padding:12px; border:1px solid var(--line);
              border-radius:8px; background:#0f1117; color:var(--txt); text-decoration:none; font-weight:600; }
   .who-btn:hover { border-color:var(--accent); color:var(--accent); }

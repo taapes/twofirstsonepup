@@ -12,7 +12,7 @@
         {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}
       </select>
     </label>
-    <div style="display:flex;gap:8px;margin-top:8px">
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
       <label>H2H change (±)<br><input name="total_delta" type="number" style="width:110px" placeholder="-3"></label>
       <label>Total change (±)<br><input name="points_for_delta" type="number" style="width:110px" placeholder="-10"></label>
       <label>From GW<br><input name="gameweek" type="number" min="1" max="38" style="width:80px"></label>
@@ -70,7 +70,7 @@
         {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}
       </select>
     </label>
-    <div style="display:flex;gap:8px;margin-top:8px">
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
       <label>Amount ($)<br><input name="amount" type="number" min="1" style="width:110px" required></label>
       <label>GW (opt)<br><input name="gameweek" type="number" min="1" max="38" style="width:80px"></label>
     </div>
