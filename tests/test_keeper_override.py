@@ -1,10 +1,11 @@
 """Commissioner override of derived keeper facts.
 
 Keeper eligibility is derived, never entered, and two rules turn on it: the =<2
-waiver-acquired keeper cap and the 4-year clock. `rules.keeper_status` treats ANY
-unexplained gap in a manager's tenure as a drop, which relabels the player 'waiver'
-AND caps their clock — and 25/26 has no injury-list records at all, so a legitimate
-absence is enough to trigger it. The override is how that gets corrected.
+waiver-acquired keeper cap and the clock (4 years for draft/trade, 3 for waiver).
+`rules.keeper_status` treats ANY unexplained gap in a manager's tenure as a drop,
+which relabels the player 'waiver' AND caps their clock at the (lower) waiver
+value — and 25/26 has no injury-list records at all, so a legitimate absence is
+enough to trigger it. The override is how that gets corrected.
 
 The pure-rule cases need no database; the rest use TEST_DATABASE_URL (see conftest).
 """
@@ -13,14 +14,19 @@ import pytest
 
 import services
 from models import Gameweek, KeeperSeed, League, Manager, Player, Roster
-from rules import KEEPER_FRESH_REMAINING, keeper_status, validate_keeper_selection
+from rules import (
+    KEEPER_FRESH_DRAFT,
+    KEEPER_FRESH_WAIVER,
+    keeper_status,
+    validate_keeper_selection,
+)
 
 
 # ---- pure rule ------------------------------------------------------------
 def test_derivation_is_unchanged_when_no_override_is_given():
     """Guard against the override parameter quietly altering normal behaviour."""
-    assert keeper_status(True, False, False, None) == ("draft", KEEPER_FRESH_REMAINING)
-    assert keeper_status(False, True, False, None) == ("trade", KEEPER_FRESH_REMAINING)
+    assert keeper_status(True, False, False, None) == ("draft", KEEPER_FRESH_DRAFT)
+    assert keeper_status(False, True, False, None) == ("trade", KEEPER_FRESH_DRAFT)
     assert keeper_status(False, False, False, None)[0] == "waiver"
     assert keeper_status(True, False, True, None)[0] == "waiver", "a drop wins"
 
@@ -35,7 +41,7 @@ def test_a_non_waiver_override_lifts_the_waiver_clock_cap():
     """The label and the clock are damaged by the same missing evidence, so
     correcting only the label would leave the player short a keeper year."""
     capped = keeper_status(True, False, True, 4)          # dropped -> waiver
-    assert capped == ("waiver", min(4, KEEPER_FRESH_REMAINING))
+    assert capped == ("waiver", min(4, KEEPER_FRESH_WAIVER))
 
     fixed = keeper_status(True, False, True, 4, acquisition="draft")
     assert fixed == ("draft", 4), "the clock stayed capped after correction"
@@ -43,7 +49,7 @@ def test_a_non_waiver_override_lifts_the_waiver_clock_cap():
 
 def test_a_waiver_override_still_caps_the_clock():
     acq, remaining = keeper_status(True, False, False, 4, acquisition="waiver")
-    assert (acq, remaining) == ("waiver", min(4, KEEPER_FRESH_REMAINING))
+    assert (acq, remaining) == ("waiver", min(4, KEEPER_FRESH_WAIVER))
 
 
 # ---- the point of the whole feature ---------------------------------------

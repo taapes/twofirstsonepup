@@ -29,7 +29,8 @@ Sync league standings, waiver priority, and player availability
 Up to 5 keepers per season (6 if discovery keeper applies)
 
 
-Max 4 years of keeper eligibility
+Max 4 years of keeper eligibility for a draft- or trade-acquired player; a
+waiver/FA-acquired player (including one dropped and re-acquired) gets only 3
 
 
 Waiver keepers limited to 2 (from 2025 onward)

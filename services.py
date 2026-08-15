@@ -42,7 +42,7 @@ from rules import (
     CUP_START_GW,
     DISCOVERY_OPEN_DAY,
     DISCOVERY_OPEN_MONTH,
-    KEEPER_FRESH_REMAINING,
+    KEEPER_FRESH_DRAFT,
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
     PHASE_IN_SEASON,
@@ -2919,9 +2919,11 @@ def submit_keepers(
             # The discovery (bonus 6th) keeper comes from the discovery draft and
             # may be ANY available player, not just the manager's final roster.
             if is_discovery:
+                # A discovery pick is a special draft-day acquisition (the September
+                # discovery draft), not a waiver pickup — the 4-year draft clock.
                 st = {"player": player.name, "eligible": True,
                       "acquisition": "discovery",
-                      "years_remaining": KEEPER_FRESH_REMAINING}
+                      "years_remaining": KEEPER_FRESH_DRAFT}
             else:
                 raise RuleViolation(
                     f"{player.name} is not one of {manager.display}'s keeper "

@@ -386,8 +386,10 @@ PAYOUT_STRUCTURE = {
 # ---- Keepers ----
 # Keeper state is tracked as YEARS REMAINING (imported from the league sheet):
 # 0 = maxed out, can't be kept; >0 = can be kept that many more seasons.
-# A waiver/FA pickup starts fresh with this many years remaining.
-KEEPER_FRESH_REMAINING = 2
+# A draft- or trade-acquired player starts fresh with this many years remaining.
+KEEPER_FRESH_DRAFT = 4
+# A waiver/FA pickup starts fresh with FEWER years — one less than a draft pick.
+KEEPER_FRESH_WAIVER = 3
 # Of a manager's keepers, at most this many may be waiver-acquired (from 2025).
 KEEPER_MAX_WAIVER = 2
 
@@ -397,7 +399,8 @@ KEEPER_ACQUISITIONS = ("draft", "waiver", "trade")
 
 def keeper_status(
     started_with_manager: bool, traded_in: bool, dropped: bool, seed_remaining,
-    fresh: int = KEEPER_FRESH_REMAINING,
+    fresh_draft: int = KEEPER_FRESH_DRAFT,
+    fresh_waiver: int = KEEPER_FRESH_WAIVER,
     acquisition: str | None = None,
     traded_from: str | None = None,
 ) -> tuple:
@@ -411,9 +414,12 @@ def keeper_status(
 
     A player **dropped and re-acquired** — or any FA/waiver pickup — is flagged
     'waiver' with remaining capped at the LOWER of the prior remaining and the
-    fresh cap (so a dropped drafted player can't keep his full clock). A player
-    held from the draft ('draft') or acquired by trade ('trade') carries the
-    imported remaining (fresh if none).
+    waiver fresh cap (so a dropped drafted player can't keep his full clock, and
+    can't keep more than a genuine waiver pickup would get). A player held from
+    the draft ('draft') or acquired by trade ('trade') carries the imported
+    remaining (the draft fresh cap if none) — a full year MORE than a waiver
+    pickup starts with, since a draft/trade acquisition was never on the open
+    wire.
 
     `acquisition` is the commissioner asserting how the player was really acquired,
     overriding all of the above. It has to lift the waiver clock cap too, not just
@@ -425,21 +431,23 @@ def keeper_status(
     owns a player and nothing else — the clock transfers unchanged (the caller passes
     the sender's remaining as `seed_remaining`) and so does the label, so a waiver
     pickup still eats one of the receiver's two waiver keeper slots. Without it a
-    trade silently re-labelled the player 'trade' and reset the clock to `fresh`,
-    which both GAVE years to a player with fewer left and TOOK them from a seeded one.
+    trade silently re-labelled the player 'trade' and reset the clock to the draft
+    fresh cap, which both GAVE years to a player with fewer left and TOOK them from
+    a seeded one.
     """
     if acquisition:
+        fresh = fresh_waiver if acquisition == "waiver" else fresh_draft
         remaining = seed_remaining if seed_remaining is not None else fresh
         if acquisition == "waiver":
-            remaining = min(remaining, fresh)
+            remaining = min(remaining, fresh_waiver)
         return (acquisition, remaining)
     if dropped or (not started_with_manager and not traded_in):
-        prev = seed_remaining if seed_remaining is not None else fresh
-        return ("waiver", min(prev, fresh))
+        prev = seed_remaining if seed_remaining is not None else fresh_waiver
+        return ("waiver", min(prev, fresh_waiver))
     if started_with_manager:
-        return ("draft", seed_remaining if seed_remaining is not None else fresh)
+        return ("draft", seed_remaining if seed_remaining is not None else fresh_draft)
     return (traded_from or "trade",
-            seed_remaining if seed_remaining is not None else fresh)
+            seed_remaining if seed_remaining is not None else fresh_draft)
 
 
 def keeper_eligible(years_remaining: int) -> bool:

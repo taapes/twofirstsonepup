@@ -129,9 +129,12 @@ The rules engine — not the infrastructure — is where the difficulty lives.
 Write tests for these. They are custom and non-obvious:
 
 - **Keepers:** 15-man rosters; up to 5 keepers/season (6 if a discovery keeper
-  applies). Max 4 years of keeper eligibility — track the clock per player.
-  Waiver keepers capped at 2 (from 2025 on). Traded players KEEP keeper history;
-  dropped players LOSE keeper eligibility.
+  applies). Max 4 years of keeper eligibility for a draft- or trade-acquired
+  player (`rules.KEEPER_FRESH_DRAFT`); a waiver/FA-acquired player — including one
+  dropped and re-acquired, which always relabels "waiver" regardless of original
+  acquisition — gets only 3 (`rules.KEEPER_FRESH_WAIVER`) — track the clock per
+  player. Waiver keepers capped at 2 (from 2025 on). Traded players KEEP keeper
+  history; dropped players LOSE keeper eligibility.
   *Phase 1 (done):* eligibility is **derived**, not manually entered — roster
   continuity across GW snapshots determines drops (a gap not covered by the IL
   or a trade = dropped → clock resets); acquisition (draft/trade/waiver) and

@@ -3,7 +3,8 @@
 from rules import (
     ANTI_TANKING_MIN_WEEKS,
     ANTI_TANKING_MIN_ZERO_PLAYERS,
-    KEEPER_FRESH_REMAINING,
+    KEEPER_FRESH_DRAFT,
+    KEEPER_FRESH_WAIVER,
     KEEPER_MAX_WAIVER,
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
@@ -262,25 +263,45 @@ def test_keeper_traded_in_carries_remaining():
 
 
 def test_keeper_clean_fa_pickup_capped_at_fresh():
-    # not started/traded, was a prior keeper (seed 3) picked off FA -> min(3,2)=2
-    assert keeper_status(False, False, False, 3) == ("waiver", 2)
-    # never a keeper -> fresh
-    assert keeper_status(False, False, False, None) == ("waiver", KEEPER_FRESH_REMAINING)
+    # not started/traded, was a prior keeper (seed 4, a draft-level clock) picked
+    # off FA -> capped down to the waiver fresh, min(4,3)=3 — a full year less than
+    # the seed carried, because they were on the open wire at some point
+    assert keeper_status(False, False, False, 4) == ("waiver", 3)
+    # a seed already at or below the waiver cap isn't capped further
+    assert keeper_status(False, False, False, 2) == ("waiver", 2)
+    # never a keeper -> waiver fresh
+    assert keeper_status(False, False, False, None) == ("waiver", KEEPER_FRESH_WAIVER)
 
 
 def test_keeper_dropped_then_reacquired_is_waiver_capped():
-    # started (drafted) but DROPPED and re-acquired -> waiver, min(prior, 2)
-    assert keeper_status(True, False, True, 3) == ("waiver", 2)   # 3 -> capped at 2
-    assert keeper_status(True, False, True, 1) == ("waiver", 1)   # lower of 1 and 2
-    assert keeper_status(True, False, True, None) == ("waiver", KEEPER_FRESH_REMAINING)
+    # started (drafted) but DROPPED and re-acquired -> waiver, min(prior, 3) — this
+    # is the "loses drafted status" rule: a full draft-level clock (4) is capped
+    # down to the waiver max the instant a drop is detected
+    assert keeper_status(True, False, True, 4) == ("waiver", 3)   # 4 -> capped at 3
+    assert keeper_status(True, False, True, 1) == ("waiver", 1)   # lower of 1 and 3
+    assert keeper_status(True, False, True, None) == ("waiver", KEEPER_FRESH_WAIVER)
 
 
 def test_keeper_started_without_seed_is_fresh():
-    assert keeper_status(True, False, False, None) == ("draft", KEEPER_FRESH_REMAINING)
+    # a first-time draft keeper with no seed gets the FULL draft clock — one more
+    # year than a first-time waiver pickup gets (test_keeper_clean_fa_pickup...
+    # above, which gets KEEPER_FRESH_WAIVER for the same "never a keeper" case)
+    assert keeper_status(True, False, False, None) == ("draft", KEEPER_FRESH_DRAFT)
+    assert keeper_status(True, False, False, None) == ("draft", 4)
+
+
+def test_keeper_waiver_fresh_is_one_less_than_draft_fresh():
+    """The actual user-facing rule, pinned as a direct number rather than only via
+    the constants' own definitions: a waiver pickup gets exactly one fewer fresh
+    year than a draft/trade acquisition."""
+    assert keeper_status(False, False, False, None) == ("waiver", 3)
+    assert keeper_status(True, False, False, None) == ("draft", 4)
+    assert KEEPER_FRESH_DRAFT - KEEPER_FRESH_WAIVER == 1
 
 
 def test_keeper_constants():
-    assert KEEPER_FRESH_REMAINING == 2
+    assert KEEPER_FRESH_DRAFT == 4
+    assert KEEPER_FRESH_WAIVER == 3
     assert KEEPER_MAX_WAIVER == 2
 
 

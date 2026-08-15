@@ -38,7 +38,7 @@ from models import (
     Standing,
     Trade,
 )
-from rules import KEEPER_FRESH_REMAINING
+from rules import KEEPER_FRESH_WAIVER
 
 LAST_GW = 38
 UPCOMING = 2026
@@ -251,7 +251,7 @@ def test_a_maxed_clock_carries_as_maxed(test_session):
 
 
 def test_a_trade_cannot_launder_away_a_drop(test_session):
-    """Seed 4 + a drop caps the sender at KEEPER_FRESH_REMAINING. Handing the buyer
+    """Seed 4 + a drop caps the sender at KEEPER_FRESH_WAIVER. Handing the buyer
     the RAW seed instead of the sender's derived clock would restore the years the
     drop cost — trade him out and back and the penalty vanishes."""
     lg, m, gws = _seed(test_session)
@@ -263,7 +263,7 @@ def test_a_trade_cannot_launder_away_a_drop(test_session):
     _trade(test_session, lg, m["A"], m["B"], p)
 
     assert _status(test_session, lg)[m["B"].id][p.id]["years_remaining"] == \
-        KEEPER_FRESH_REMAINING
+        KEEPER_FRESH_WAIVER
 
 
 def test_an_injury_list_gap_still_protects_the_clock_after_a_trade(test_session):
@@ -417,9 +417,9 @@ def test_the_rollover_carries_the_real_clock_for_the_buyer(test_session):
     seed = test_session.query(KeeperSeed).filter_by(league_id=nxt.id).one()
     assert seed.player_id == p.id
     # 1 carried across the trade, minus one for the season ticking over. A fresh
-    # fallback would give KEEPER_FRESH_REMAINING - 1 instead.
+    # fallback would give KEEPER_FRESH_WAIVER - 1 instead.
     assert seed.years_remaining == 0
-    assert seed.years_remaining != KEEPER_FRESH_REMAINING - 1
+    assert seed.years_remaining != KEEPER_FRESH_WAIVER - 1
 
 
 # ---- deliberate non-changes -----------------------------------------------
@@ -565,4 +565,4 @@ def test_a_drop_after_the_trade_still_caps_the_clock(test_session):
     _trade(test_session, lg, m["A"], m["B"], p, fpl_trade_id="1", event_gw=15)
 
     row = _status(test_session, lg)[m["B"].id][p.id]
-    assert (row["acquisition"], row["years_remaining"]) == ("waiver", KEEPER_FRESH_REMAINING)
+    assert (row["acquisition"], row["years_remaining"]) == ("waiver", KEEPER_FRESH_WAIVER)
