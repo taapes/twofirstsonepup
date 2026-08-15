@@ -1305,6 +1305,13 @@ def _resolve_manager(db: Session, league: League, fpl_manager_id: str) -> Manage
 
 
 def _resolve_player(db: Session, fpl_id: int) -> Player:
+    # fpl_id is nullable (a departed player releases their slot), and `filter_by`
+    # turns None into `fpl_id IS NULL` — matching every departed row at once, so
+    # `.one_or_none()` raises MultipleResultsFound (an unhandled 500) instead of a
+    # clean refusal. search_players already excludes these from "available", but
+    # fail safe here too rather than depend on every caller pre-filtering.
+    if fpl_id is None:
+        raise RuleViolation("no player specified")
     p = db.query(Player).filter_by(fpl_id=fpl_id).one_or_none()
     if not p:
         raise RuleViolation(f"player {fpl_id} not found")
@@ -4010,11 +4017,23 @@ def search_players(
 
     out = []
     for p in players:
+        # A player who has left the Premier League (this transfer window's departures)
+        # keeps their row for history but loses their fpl_id — the same gap
+        # keeper_candidates already guards against. Every write this feeds (record_pick,
+        # queue/add, approve_queued_pick's availability check) resolves by fpl_id, and
+        # None is not one — record_pick 500s (Player.fpl_id == None matches every
+        # departed row, not zero or one) rather than raising a clean RuleViolation.
+        # Treat it as its own unavailability reason, same shape as `ineligible`.
+        not_in_pool = p.fpl_id is None
         ineligible = p.fpl_id in inelig
-        is_taken = (p.id in taken) or ineligible
+        is_taken = (p.id in taken) or ineligible or not_in_pool
         if is_taken and not include_taken:
             continue
-        taken_by = "ineligible (post-draft)" if ineligible else taken.get(p.id)
+        taken_by = (
+            "ineligible (post-draft)" if ineligible
+            else "no longer in the Premier League" if not_in_pool
+            else taken.get(p.id)
+        )
         ps = stats.get(p.id)  # None for players absent that season — still draftable
         out.append({
             "fpl_id": p.fpl_id, "name": p.name, "position": p.position, "team": p.current_team,
