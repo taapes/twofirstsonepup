@@ -11,6 +11,34 @@
   clock. A missing injury-list record is enough to trigger that — which is exactly why
   these two live together.</p>
 
+<h2>Backfill a historical injury-list placement</h2>
+<p class="sub">For a past season with no IL records at all — a player swapped for a
+  same-position replacement and never returned won't show as a keeper candidate until
+  this exists. Unlike the manager self-service IL form, this takes any gameweek and
+  works outside the in-season phase.</p>
+<div class="card" style="padding:10px">
+  <form method="post" action="/admin/keepers/il-backfill">
+    <label>Manager
+      <select name="fpl_manager_id" required style="width:100%">
+        <option value="">— select —</option>
+        {% for m in managers %}
+        <option value="{{ m.fpl }}">{{ m.manager }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Injured player's FPL id
+      <input name="injured_fpl_id" required inputmode="numeric" style="width:100%">
+    </label>
+    <label>Replacement player's FPL id (same position)
+      <input name="replacement_fpl_id" required inputmode="numeric" style="width:100%">
+    </label>
+    <label>Start gameweek
+      <input name="start_gw" required inputmode="numeric" style="width:100%">
+    </label>
+    <p><button type="submit">Backfill IL placement</button></p>
+  </form>
+</div>
+
 {% for m in managers %}
 <h2>{{ m.manager }}
   <span class="sub">— {{ m.waiver_eligible }} waiver-eligible

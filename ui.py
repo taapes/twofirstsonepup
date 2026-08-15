@@ -1265,6 +1265,33 @@ def admin_keeper_override_clear(
     return RedirectResponse("/admin/keepers", status_code=303)
 
 
+@router.post("/admin/keepers/il-backfill")
+def admin_il_backfill(
+    request: Request, db: Session = Depends(get_db), fpl_manager_id: str = Form(...),
+    injured_fpl_id: str = Form(...), replacement_fpl_id: str = Form(...),
+    start_gw: str = Form(...),
+):
+    """Commissioner-only: enter a HISTORICAL injury-list placement (e.g. for a
+    prior season with no IL records at all, per CLAUDE.md's documented caveat).
+    Unlike the manager self-service /il/place, this takes an explicit start_gw
+    and isn't gated on the in-season phase — a past season's fact doesn't wait
+    for gw_logic_active. Reuses services.place_on_il unchanged; it already
+    accepts an arbitrary start_gw."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/keepers", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.place_on_il(
+            db, league, fpl_manager_id=fpl_manager_id,
+            injured_fpl_id=_safe_int(injured_fpl_id, 1, 10_000_000, field="injured player"),
+            replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
+            start_gw=_safe_int(start_gw, 1, SEASON_LAST_GW, field="start GW"),
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/keepers", status_code=303)
+
+
 @router.get("/admin/audit", response_class=HTMLResponse)
 def admin_audit(request: Request, db: Session = Depends(get_db)):
     """Commissioner audit log: every team-affecting action (who/what/when),

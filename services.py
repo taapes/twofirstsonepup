@@ -2721,7 +2721,13 @@ def _derive_keeper_status(
             range(e.start_gw, (e.end_gw or last_n) + 1)
         )
 
-    final_candidates = [k for k, gws in presence.items() if last_n in gws]
+    # A candidate is either on the active roster at the final GW, OR still covered
+    # by an open-ended IL/international entry through the final GW — a player
+    # swapped out for an IL replacement and never returned is genuinely still
+    # theirs for keeper purposes, even though the FPL-synced roster shows the
+    # replacement in that slot at the final GW, not him.
+    final_candidates = {k for k, gws in presence.items() if last_n in gws}
+    final_candidates |= {k for k, covered in il.items() if last_n in covered}
     traded_in = {
         (t.to_manager, t.player_id)
         for t in db.query(Trade).filter_by(league_id=league.id)
@@ -2754,9 +2760,15 @@ def _derive_keeper_status(
             kept = {k: v for k, v in kept.items() if k[0] in kept_for}
 
     def _dropped(mid, pid, upto=None) -> bool:
-        gws = presence[(mid, pid)]
+        # A candidate reached purely through IL coverage (see final_candidates
+        # above) may have no recorded roster presence at all — .get, not [], and
+        # `first` must come from whichever of the two actually has data, or an
+        # IL-only candidate with empty `gws` would crash min() below.
+        gws = presence.get((mid, pid), set())
         il_gws = il.get((mid, pid), set())
-        first = min(gws)
+        if not gws and not il_gws:
+            return False
+        first = min(gws | il_gws)
         # a gap between first appearance and the final GW, not covered by the IL,
         # means the player was dropped (to FA) and later re-acquired.
         # `upto` is the last GW this manager could have held him: for a manager who
@@ -2802,7 +2814,7 @@ def _derive_keeper_status(
             if carried is None:
                 carried = s_years
         memo[key] = keeper_status(
-            1 in presence[(mid, pid)],   # started_with_manager (on GW1 roster)
+            1 in presence.get((mid, pid), set()),   # started_with_manager (on GW1 roster)
             (mid, pid) in traded_in,
             _dropped(mid, pid, upto),
             carried,
