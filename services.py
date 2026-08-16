@@ -4951,7 +4951,13 @@ def search_players(
 
     query = db.query(Player)
     if q:
-        query = query.filter(Player.name.ilike(f"%{q}%"))  # search all (ignore position)
+        # unaccent BOTH sides: 'Sesko' must find 'Šeško' during a live draft, and a
+        # manager who does type 'Šeško' must still find him. One condition covers
+        # every combination. Plain ILIKE misses these outright, and "no results"
+        # is indistinguishable from "not in the pool" — see the unaccent migration.
+        query = query.filter(  # search all (ignore position)
+            func.unaccent(Player.name).ilike(func.unaccent(f"%{q}%"))
+        )
     elif position:
         query = query.filter(Player.position == position.upper())
     if clubs_on:

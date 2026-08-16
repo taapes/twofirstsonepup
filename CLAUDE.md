@@ -6,7 +6,8 @@ waivers, trades, drafts, injury list, cups, anti-tanking). The system runs
 year-round and must be able to reconstruct league state for any gameweek.
 
 Full feature spec and database schema live in `docs/requirements.md` — read it
-before any non-trivial work.
+before any non-trivial work. Known-but-unscheduled bugs and features live in
+`docs/BACKLOG.md`; add to it rather than losing an item between sessions.
 
 ## Stack
 
