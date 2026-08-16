@@ -4324,10 +4324,23 @@ def effective_keeper_selections(
         for s in db.query(KeeperSelection).filter_by(
             league_id=league.id, season_year=season_year
         )
-        # A goalie team has no `rosters` row, so the player-keyed ownership map has no
-        # opinion about it and would drop every club selection on the floor — costing
-        # the manager the draft slot the keeper was supposed to save.
-        if s.team_id is not None or owner.get(s.player_id) == s.manager_id
+        # Two kinds of selection the roster-ownership map has no opinion about, and
+        # would therefore drop on the floor — costing the manager the draft slot the
+        # keeper was supposed to save:
+        #
+        #   - a goalie team, which has no `rosters` row at all;
+        #   - the discovery (bonus 6th) keeper, which submit_keepers deliberately
+        #     allows to be ANY player rather than one off the final roster — that is
+        #     the whole point of the discovery draft, so being off-roster is the
+        #     normal case for it, not evidence the manager lost him.
+        #
+        # Without the second clause the manager keeps the player (availability is
+        # derived separately and still reads "kept: X", so nobody else can draft him)
+        # while not being CHARGED a slot for him — an extra pick, and every later
+        # pick number shifts with it.
+        if s.team_id is not None
+        or s.is_discovery
+        or owner.get(s.player_id) == s.manager_id
     ]
 
 
