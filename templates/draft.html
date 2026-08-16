@@ -54,6 +54,7 @@
 
     <h2>Draft controls</h2>
     <div class="card" style="padding:12px">
+      {% if is_admin %}
       <details>
         <summary>Set round-1 order</summary>
         <p class="sub">Drag with the ↑/↓ buttons to set the pick order, then save.</p>
@@ -117,6 +118,7 @@
           <br>Reassigning a slot can legitimately give someone an extra pick — this is
           shown so that happens visibly rather than by surprise.</p>
       </details>
+      {% endif %}
       <details>
         <summary>Trade a pick</summary>
         <form hx-post="/draft/{{ year }}/trade-pick" hx-target="#board" hx-swap="outerHTML">
