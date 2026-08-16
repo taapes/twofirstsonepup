@@ -17,7 +17,8 @@ from html.parser import HTMLParser
 import pytest
 
 import services
-from models import League, Player, PlayerProjection, PlayerSeason
+from auth import hash_password
+from models import DraftPick, League, Manager, Player, PlayerProjection, PlayerSeason
 from templating import templates
 
 
@@ -55,7 +56,7 @@ def test_portal_exposes_every_projected_stat(test_session):
     _proj(test_session, p)
     test_session.commit()
 
-    (row,) = services.player_portal(test_session, lg)
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=True)
     assert row["proj_price"] == 15.5
     assert row["proj_points"] == 231.0
     assert row["proj_minutes"] == 3120.0
@@ -75,7 +76,7 @@ def test_projected_price_is_not_divided_like_the_live_one(test_session):
     _proj(test_session, p, price=15.5)
     test_session.commit()
 
-    (row,) = services.player_portal(test_session, lg)
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=True)
     assert row["price"] == 5.0, "live price is tenths and must still be divided"
     assert row["proj_price"] == 15.5
 
@@ -86,7 +87,7 @@ def test_value_is_points_over_price(test_session):
     _proj(test_session, p, points=231.0, price=15.5)
     test_session.commit()
 
-    (row,) = services.player_portal(test_session, lg)
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=True)
     assert row["proj_value"] == pytest.approx(14.903, abs=1e-3)
 
 
@@ -97,11 +98,11 @@ def test_value_is_computed_on_read_not_stored(test_session):
     p = _player(test_session, "Haaland", 111, 5)
     _proj(test_session, p, points=100.0, price=10.0)
     test_session.commit()
-    assert services.player_portal(test_session, lg)[0]["proj_value"] == 10.0
+    assert services.player_portal(test_session, lg, viewer_is_owner=True)[0]["proj_value"] == 10.0
 
     test_session.query(PlayerProjection).one().points = 50.0
     test_session.commit()
-    assert services.player_portal(test_session, lg)[0]["proj_value"] == 5.0
+    assert services.player_portal(test_session, lg, viewer_is_owner=True)[0]["proj_value"] == 5.0
 
 
 @pytest.mark.parametrize("price", [0.0, None])
@@ -111,7 +112,7 @@ def test_value_is_blank_rather_than_a_crash_when_price_is_missing(test_session, 
     _proj(test_session, p, price=price)
     test_session.commit()
 
-    (row,) = services.player_portal(test_session, lg)
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=True)
     assert row["proj_value"] is None
     assert row["proj_points"] == 231.0, "the projection itself is still real"
 
@@ -125,7 +126,7 @@ def test_a_zero_projection_is_not_the_same_as_no_projection(test_session):
     _proj(test_session, zero, points=0.0)
     test_session.commit()
 
-    rows = {r["name"]: r for r in services.player_portal(test_session, lg)}
+    rows = {r["name"]: r for r in services.player_portal(test_session, lg, viewer_is_owner=True)}
     assert rows["Benched"]["proj_points"] == 0.0
     assert rows["Uncovered"]["proj_points"] is None
 
@@ -137,7 +138,7 @@ def test_a_player_without_a_projection_is_still_listed(test_session):
     _player(test_session, "Departed", None, None, team="WOL")
     test_session.commit()
 
-    (row,) = services.player_portal(test_session, lg)
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=True)
     assert row["name"] == "Departed"
     assert all(row[k] is None for k in row if k.startswith("proj_"))
 
@@ -149,7 +150,7 @@ def test_portal_ignores_another_seasons_projection(test_session):
     _proj(test_session, p, year=2026, points=231.0)
     test_session.commit()
 
-    (row,) = services.player_portal(test_session, lg)
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=True)
     assert row["proj_points"] == 231.0
 
 
@@ -167,7 +168,7 @@ def test_actual_and_projected_stats_do_not_cross(test_session):
           clean_sheets=1.5, minutes=3120.0)
     test_session.commit()
 
-    (row,) = services.player_portal(test_session, lg)
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=True)
     assert (row["total_points"], row["goals_scored"], row["minutes"]) == (209, 3, 2750)
     assert (row["proj_points"], row["proj_goals"], row["proj_minutes"]) == \
         (231.0, 27.5, 3120.0)
@@ -183,6 +184,125 @@ def test_the_draft_board_search_never_exposes_projections(test_session):
 
     (row,) = services.search_players(test_session, lg)
     assert not [k for k in row if k.startswith("proj")], row
+
+
+# ---- viewer_is_owner: the Players tab, opened up, still keeps projections owner-only
+def test_a_non_owner_viewer_gets_no_projections_even_when_they_exist(test_session):
+    lg = _league(test_session, "1", 2025, locked=True)
+    p = _player(test_session, "Haaland", 111, 5)
+    _proj(test_session, p)
+    test_session.commit()
+
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=False)
+    assert all(row[k] is None for k in row if k.startswith("proj_"))
+
+
+def test_the_default_is_no_projections_so_a_forgetful_caller_leaks_nothing(test_session):
+    lg = _league(test_session, "1", 2025, locked=True)
+    p = _player(test_session, "Haaland", 111, 5)
+    _proj(test_session, p)
+    test_session.commit()
+
+    (row,) = services.player_portal(test_session, lg)  # no viewer_is_owner at all
+    assert all(row[k] is None for k in row if k.startswith("proj_"))
+
+
+# ---- the owner column reflects the live draft, not just last season's roster
+def test_a_player_drafted_this_season_shows_the_new_owner(test_session):
+    """player_portal used to read ownership only from last season's synced Roster —
+    a player taken in round 3 tonight would still show whoever had him last year.
+    The Players tab is open to everyone now, including during a live draft, so this
+    has to be live."""
+    lg = _league(test_session, "1", 2025, locked=True)
+    p = _player(test_session, "Haaland", 111, 5)
+    m = Manager(league_id=lg.id, fpl_manager_id="1", name="A", display_name="A")
+    test_session.add(m)
+    test_session.flush()
+    test_session.add(DraftPick(
+        league_id=lg.id, season_year=2026, draft_type="main",
+        round=1, pick_number=1, manager_id=m.id, player_id=p.id,
+    ))
+    test_session.commit()
+
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=True)
+    assert row["owner"] == "A"
+    assert row["rostered"] is True
+
+
+def test_a_freshly_drafted_player_still_shows_blank_keeper_facts(test_session):
+    """Keeper eligibility is a question about a PAST tenure. A player drafted thirty
+    seconds ago has none yet under his new manager — showing acquisition/years/
+    eligible as None here is correct, not a regression, and this pins that the live
+    draft-pick overlay stays separate from the keeper-status lookup rather than
+    collapsing the two back into one owner variable."""
+    lg = _league(test_session, "1", 2025, locked=True)
+    p = _player(test_session, "Haaland", 111, 5)
+    m = Manager(league_id=lg.id, fpl_manager_id="1", name="A", display_name="A")
+    test_session.add(m)
+    test_session.flush()
+    test_session.add(DraftPick(
+        league_id=lg.id, season_year=2026, draft_type="main",
+        round=1, pick_number=1, manager_id=m.id, player_id=p.id,
+    ))
+    test_session.commit()
+
+    (row,) = services.player_portal(test_session, lg, viewer_is_owner=True)
+    assert row["owner"] == "A"  # the live part did update
+    assert row["acquisition"] is None
+    assert row["keeper_years"] is None
+    assert row["keeper_eligible"] is None
+
+
+# ---- the route: open to everyone, projections owner-only -------------------
+@pytest.fixture
+def client(test_session):
+    from fastapi.testclient import TestClient
+
+    from main import app
+
+    return TestClient(app, follow_redirects=False)
+
+
+def _login(client, session, manager, password="pw"):
+    manager.password_hash = hash_password(password)
+    session.commit()
+    r = client.post("/login", data={"manager_id": manager.fpl_manager_id,
+                                    "password": password})
+    assert r.status_code == 303, r.text
+    return client
+
+
+def test_a_non_owner_manager_can_reach_players_but_not_projections(
+    client, test_session, monkeypatch
+):
+    monkeypatch.setenv("OWNER_ENTRY_ID", "999")  # not this manager
+    lg = _league(test_session, "1", 2025, locked=True)
+    p = _player(test_session, "Haaland", 111, 5)
+    _proj(test_session, p)
+    m = Manager(league_id=lg.id, fpl_manager_id="1", name="A", display_name="A")
+    test_session.add(m)
+    test_session.commit()
+    _login(client, test_session, m)
+
+    r = client.get("/players")
+    assert r.status_code == 200, r.text
+    assert "PROJECTED" not in r.text
+    assert "Haaland" in r.text
+
+
+def test_the_owner_sees_projections_on_the_same_page(client, test_session, monkeypatch):
+    lg = _league(test_session, "1", 2025, locked=True)
+    p = _player(test_session, "Haaland", 111, 5)
+    _proj(test_session, p)
+    m = Manager(league_id=lg.id, fpl_manager_id="1", name="A", display_name="A")
+    test_session.add(m)
+    test_session.commit()
+    monkeypatch.setenv("OWNER_ENTRY_ID", "1")  # this manager IS the owner
+    _login(client, test_session, m)
+
+    r = client.get("/players")
+    assert r.status_code == 200, r.text
+    assert "PROJECTED" in r.text
 
 
 # ---- the rendered table ---------------------------------------------------

@@ -1829,13 +1829,21 @@ def player_pool_freshness(db: Session) -> dict:
     }
 
 
-def player_portal(db: Session, league: League) -> list[dict]:
+def player_portal(
+    db: Session, league: League, *, viewer_is_owner: bool = False
+) -> list[dict]:
     """Every player with league context (owner, on-IL, ineligible, keeper
-    acquisition/years/eligibility) for the admin data portal, plus that player's
+    acquisition/years/eligibility) for the data portal, plus that player's
     statistics from the most recent COMPLETED season (see stats_season) and, in the
     `proj_*` keys, an imported outside forecast for the projected season (see
     projection_season_year). One row per player; stat and projection fields are None
-    for anyone the respective season didn't cover."""
+    for anyone the respective season didn't cover.
+
+    Projections are the owner's alone to see (CLAUDE.md) — `viewer_is_owner` defaults
+    to False, the same "disclose nothing unless told to" default
+    `_derive_keeper_status`'s `kept_for`/`kept_all` already use, so a caller that
+    forgets to pass it leaks nothing.
+    """
     gw = latest_gameweek(db, league)
     owner_by_pid: dict = {}
     if gw:
@@ -1845,6 +1853,20 @@ def player_portal(db: Session, league: League) -> list[dict]:
         # owner and the keeper facts side by side, so overlaying only one of them
         # shows the new owner with a blank keeper column.
         owner_by_pid.update(player_ownership(db, league))
+    # A SEPARATE overlay, deliberately not folded into owner_by_pid above: keeper
+    # facts are a question about last season's tenure, and a player drafted thirty
+    # seconds ago has none yet under his new manager — showing blank there is
+    # correct, not a bug. This one only feeds the displayed `owner`/`rostered`
+    # fields, so the live draft shows up immediately without corrupting keeper
+    # status. Same DraftPick shape search_players already uses for "taken".
+    upcoming = (league.season_year or 0) + 1
+    display_owner_by_pid = dict(owner_by_pid)
+    for pid, mid in (
+        db.query(DraftPick.player_id, DraftPick.manager_id)
+        .filter(DraftPick.league_id == league.id, DraftPick.season_year == upcoming,
+                DraftPick.player_id.isnot(None))
+    ):
+        display_owner_by_pid[pid] = mid
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
     il_pids = {
         e.player_id for e in
@@ -1878,12 +1900,16 @@ def player_portal(db: Session, league: League) -> list[dict]:
     # players.id like the stats above. Left-join semantics matter: the historical
     # players in this list will never have one, and a few live ones are missing from
     # the file. They stay in the list, blank.
-    proj_year = projection_season_year(db)
+    # Don't even ASK when the viewer can't see it: same "no viewer, no query" shape
+    # _derive_keeper_status uses for its own kept lookup — the redaction is then a
+    # fact about the SQL, not a promise that might drift from what's rendered.
+    proj_year = projection_season_year(db) if viewer_is_owner else None
     proj = projection_index(db, proj_year) if proj_year else {}
 
     rows = []
     for p in db.query(Player).order_by(Player.name):
         owner_mid = owner_by_pid.get(p.id)
+        display_owner_mid = display_owner_by_pid.get(p.id)
         ks = kstatus.get(owner_mid, {}).get(p.id) if owner_mid else None
         s = stats.get(p.id)  # None for players absent that season
         pr = proj.get(p.id)  # None for anyone the projection file didn't cover
@@ -1912,7 +1938,7 @@ def player_portal(db: Session, league: League) -> list[dict]:
             "proj_bonus": pr.bonus if pr else None,
             "proj_defensive_contributions": pr.defensive_contributions if pr else None,
             "proj_yellow_cards": pr.yellow_cards if pr else None,
-            "owner": names.get(owner_mid), "rostered": owner_mid is not None,
+            "owner": names.get(display_owner_mid), "rostered": display_owner_mid is not None,
             "on_il": p.id in il_pids, "ineligible": p.fpl_id in inelig,
             "acquisition": ks["acquisition"] if ks else None,
             "keeper_years": ks["years_remaining"] if ks else None,

@@ -1057,26 +1057,28 @@ def admin_cups_override(
     return RedirectResponse("/admin/cups", status_code=303)
 
 
-@router.get("/admin/players", response_class=HTMLResponse)
-def admin_players(request: Request, db: Session = Depends(get_db)):
-    """Owner-only data portal (Tucker): every player + stat, sortable/filterable
-    client-side. Gated on the owner's per-manager identity, not the shared admin
-    password — a co-commissioner with the admin login cannot see it."""
-    if not is_owner(request):
-        if current_manager_id(request):
-            return _forbidden(request, "This page is restricted to the league owner.")
-        return RedirectResponse("/login?next=/admin/players", status_code=303)
+@router.get("/players", response_class=HTMLResponse)
+def players_page(request: Request, db: Session = Depends(get_db)):
+    """Every player + stat, sortable/filterable client-side, open to any logged-in
+    manager or admin session. Projections are the one column group still owner-only
+    (Tucker's per-manager identity, not the shared admin password — a co-commissioner
+    with just the admin login still won't see them): player_portal's own
+    viewer_is_owner default keeps that redaction in the service layer, not here."""
+    if not current_manager_id(request) and not is_admin(request):
+        return RedirectResponse("/login?next=/players", status_code=303)
     league = _league_or_404(db)
-    players = services.player_portal(db, league)
-    proj_year = services.projection_season_year(db)
+    owner = is_owner(request)
+    players = services.player_portal(db, league, viewer_is_owner=owner)
+    proj_year = services.projection_season_year(db) if owner else None
     return templates.TemplateResponse("admin_players.html", {
         "request": request, "league": league, "is_admin": is_admin(request),
-        "is_owner": True,
+        "is_owner": owner,
         "players": players,
         # name the season the stats belong to, so it's never ambiguous on screen
         "stats_season_label": services.season_label(services.stats_season(db, league)),
-        # None until the first projection import; the template hides the whole group
-        # on this one flag rather than rendering ten em-dash columns for every player
+        # None until the first projection import (or for a non-owner viewer); the
+        # template hides the whole group on this one flag rather than rendering ten
+        # em-dash columns for every player
         "projection_season_label": services.year_label(proj_year) if proj_year else None,
         "projection_count": sum(1 for p in players if p["proj_points"] is not None),
         "pool": services.player_pool_freshness(db),
@@ -1086,7 +1088,7 @@ def admin_players(request: Request, db: Session = Depends(get_db)):
 @router.get("/draft-prep", response_class=HTMLResponse)
 def draft_prep(request: Request, db: Session = Depends(get_db)):
     """Owner-only draft preparation: predicted keepers, who that leaves available,
-    and roughly when they go. Same gate as /admin/players.
+    and roughly when they go. Unlike /players, this stays owner-only end to end.
 
     Predictions are BLIND — nobody's submitted keepers are read, including the
     owner's. See services.draft_preparation.

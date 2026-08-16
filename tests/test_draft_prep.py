@@ -306,7 +306,8 @@ def test_a_predicted_keeper_is_not_also_draftable(test_session):
 
 # ---- the page -------------------------------------------------------------
 def test_the_page_is_owner_only(test_session):
-    """Same gate as /admin/players: a logged-in non-owner gets 403, not a redirect."""
+    """Unlike /players (open to everyone now), draft-prep stays owner-only: a
+    logged-in non-owner gets 403, not a redirect."""
     from fastapi.testclient import TestClient
 
     from auth import hash_password
