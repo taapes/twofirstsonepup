@@ -1406,6 +1406,8 @@ def trade_submit(
     b_players: list[str] = Form(default=[]),
     a_picks: list[str] = Form(default=[]),
     b_picks: list[str] = Form(default=[]),
+    a_clubs: list[str] = Form(default=[]),
+    b_clubs: list[str] = Form(default=[]),
 ):
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "trades_allowed"):
@@ -1416,6 +1418,7 @@ def trade_submit(
         services.record_trade(
             db, league, a_fpl=a_manager, b_fpl=b_manager,
             a_players=a_players, a_picks=a_picks, b_players=b_players, b_picks=b_picks,
+            a_clubs=a_clubs, b_clubs=b_clubs,
         )
     except RuleViolation as e:
         return _err(e)

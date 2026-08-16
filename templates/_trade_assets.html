@@ -7,6 +7,18 @@
     <label style="display:block"><input type="checkbox" name="{{ side }}_players" value="{{ p.fpl_id }}"> {{ p.name }} <span class="tag">{{ p.position }}</span></label>
     {% else %}<span class="sub">No roster players.</span>{% endfor %}
   </div>
+  {% if assets.club %}
+  <strong class="tag">Goalie team</strong>
+  <div style="border:1px solid var(--line);border-radius:6px;padding:6px;margin:4px 0 10px">
+    <label style="display:block">
+      <input type="checkbox" name="{{ side }}_clubs" value="{{ assets.club.team_code }}">
+      {{ assets.club.name }} <span class="tag">{{ assets.club.short_name }}</span>
+      <span class="sub">{{ assets.club.keepers|join(", ") }}</span>
+    </label>
+    <p class="sub" style="margin:4px 0 0">A goalie team trades only for a goalie team —
+      tick one on each side, or neither.</p>
+  </div>
+  {% endif %}
   <strong class="tag">Picks (ctrl/cmd-click for multiple)</strong>
   <select name="{{ side }}_picks" multiple size="8" style="width:100%;margin-top:4px">
     {% for pk in assets.picks %}<option value="{{ pk.value }}">{{ pk.label }}</option>{% endfor %}

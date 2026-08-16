@@ -317,6 +317,13 @@ class Trade(Base):
     player_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
     )
+    # A traded goalie team. One row moves the CLUB, never one row per goalkeeper:
+    # expanding it would give the receiver three independently-labelled keepers with
+    # three separate clocks, and the roster-seeded ownership overlay would refuse all
+    # of them anyway (a club has no `rosters` row to seed from).
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pl_teams.id"), nullable=True
+    )
     # Gameweek (FPL event) the trade processed in — aligns trades with roster
     # diffs so a traded-away player isn't mistaken for a drop.
     event_gw: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -371,10 +378,16 @@ class InjuryList(Base):
 
 class InternationalList(Base):
     """A player away at a national-team cup (AFCON / Asia Cup), temporarily replaced.
-    Mirrors the InjuryList but: no minimum stay (return when the nation is eliminated)
-    and no same-position requirement. Preserves keeper eligibility while out (covered
-    like the IL in the keeper-drop derivation). One active entry per manager; one
-    replacement for the whole absence."""
+    Mirrors the InjuryList but with no minimum stay — return when the nation is
+    eliminated. The same-position requirement DOES apply, same as the IL: this
+    docstring used to claim otherwise while services.place_on_intl enforced it, and
+    the code (and CLAUDE.md) were the ones telling the truth. Preserves keeper
+    eligibility while out (covered like the IL in the keeper-drop derivation). One
+    active entry per manager; one replacement for the whole absence.
+
+    Goalkeepers are out of scope entirely once the goalie-team rule is on — you own
+    every keeper at your club, so the only legal same-position replacement is one you
+    already have."""
 
     __tablename__ = "international_list"
 

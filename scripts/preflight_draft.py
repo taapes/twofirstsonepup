@@ -16,15 +16,17 @@ import services
 from db import SessionLocal
 from models import (
     DraftLottery,
+    DraftPick,
     FuturePick,
     KeeperSelection,
     League,
     Manager,
+    Player,
     PlayerProjection,
+    PlTeam,
     Standing,
 )
-
-UPCOMING_SEASON = 2026
+from rules import draft_picks_per_manager, goalie_teams_on
 
 failures = 0
 
@@ -55,6 +57,12 @@ def main() -> None:
             f"phase={league.phase}",
         )
 
+        # Derived, not a module constant — the pinned 2026 went stale the moment the
+        # season it named arrived, and every check below silently looked at the wrong
+        # year.
+        upcoming_season = (league.season_year or 0) + 1
+        print(f"       (checking the {upcoming_season} draft)")
+
         managers = db.query(Manager).filter_by(league_id=league.id).all()
         n_mgrs = len(managers)
         check("10 managers", n_mgrs == 10, f"{n_mgrs} found")
@@ -79,20 +87,21 @@ def main() -> None:
         by_person = {m.display: m for m in managers}
         selections = (
             db.query(KeeperSelection)
-            .filter_by(league_id=league.id, season_year=UPCOMING_SEASON)
+            .filter_by(league_id=league.id, season_year=upcoming_season)
             .all()
         )
         submitted_mgr_ids = {s.manager_id for s in selections}
         submitters = sorted(m.display for m in managers if m.id in submitted_mgr_ids)
         non_submitters = sorted(m.display for m in managers if m.id not in submitted_mgr_ids)
         check(
-            f"keeper selections submitted for {UPCOMING_SEASON}",
+            f"keeper selections submitted for {upcoming_season}",
             not non_submitters,
             f"submitted: {submitters or '(none)'} | NOT submitted: "
-            f"{non_submitters or '(none)'} — a non-submitter gets a 15-round board",
+            f"{non_submitters or '(none)'} — a non-submitter gets a full "
+            f"{draft_picks_per_manager(league.goalie_team_mode)}-round board",
         )
 
-        effective = services.effective_keeper_selections(db, league, UPCOMING_SEASON)
+        effective = services.effective_keeper_selections(db, league, upcoming_season)
         effective_ids = {s.id for s in effective}
         mgr_display = {m.id: m.display for m in managers}
         stale = [s for s in selections if s.id not in effective_ids]
@@ -107,7 +116,7 @@ def main() -> None:
         future_picks = (
             db.query(FuturePick)
             .filter(FuturePick.league_id == league.id,
-                    FuturePick.season_year == UPCOMING_SEASON)
+                    FuturePick.season_year == upcoming_season)
             .all()
         )
         display_names = set(by_person)
@@ -123,13 +132,48 @@ def main() -> None:
             f"original owner" if mismatched else f"{len(future_picks)} reassignments",
         )
 
+        if goalie_teams_on(league.goalie_team_mode):
+            clubs = db.query(PlTeam).filter_by(is_current_pl=True).count()
+            check(
+                "pl_teams has a current Premier League",
+                clubs >= 20,
+                f"{clubs} clubs flagged is_current_pl — run a players sync; the "
+                f"goalie-team picker is empty without them",
+            )
+            keeperless = sorted(
+                t.short_name for t in db.query(PlTeam).filter_by(is_current_pl=True)
+                if not db.query(Player).filter(
+                    Player.position == "GKP", Player.fpl_id.isnot(None),
+                    Player.current_team == t.short_name).count()
+            )
+            check(
+                "every club has at least one goalkeeper in the pool",
+                not keeperless,
+                f"{keeperless} — a club with no keepers is a draftable asset worth "
+                f"zero points, and the join is on short_name" if keeperless else "",
+            )
+            drafted = (
+                db.query(DraftPick)
+                .filter(DraftPick.league_id == league.id,
+                        DraftPick.season_year == upcoming_season,
+                        DraftPick.draft_type == "main",
+                        DraftPick.team_id.isnot(None))
+                .count()
+            )
+            check(
+                "goalie teams not yet drafted",
+                drafted == 0,
+                f"{drafted} already recorded for {upcoming_season} — expected 0 "
+                f"before the draft" if drafted else "none, as expected",
+            )
+
         proj_count = (
             db.query(PlayerProjection)
-            .filter_by(season_year=UPCOMING_SEASON)
+            .filter_by(season_year=upcoming_season)
             .count()
         )
         check(
-            f"player_projection rows exist for {UPCOMING_SEASON}",
+            f"player_projection rows exist for {upcoming_season}",
             proj_count > 0,
             f"{proj_count} rows — 0 means /draft-prep shows 'no projections imported'"
             f" (board itself is unaffected)",

@@ -101,7 +101,7 @@ own tables alongside, not by mutating FPL-sourced rows.
 ## Schema
 
 Full schema in `docs/requirements.md`. Core tables: `leagues`, `managers`,
-`players`, `gameweeks`, `rosters`, `transactions`, `trades`, `injury_list`,
+`players`, `pl_teams`, `gameweeks`, `rosters`, `transactions`, `trades`, `injury_list`,
 `keeper_exceptions`, `draft_picks`, `draft_lottery`, `gameweek_points`,
 `tournaments`, `tournament_matches`, `commissioner_alerts`.
 
@@ -128,6 +128,43 @@ Build the data layer before logic, and logic before polish:
 The rules engine — not the infrastructure — is where the difficulty lives.
 Write tests for these. They are custom and non-obvious:
 
+- **Goalie teams (from 2026):** goalkeepers are NOT drafted or kept individually.
+  A manager drafts ONE Premier League club and owns every keeper at it, so a squad is
+  **13 outfielders + 1 goalie team = 14 picks**, not 15. Governed by
+  `leagues.goalie_team_mode` (`off | redraft | keeper`, default `off`) — per-season on
+  purpose: `get_draft_board` regenerates its slots on EVERY read with no season
+  parameter, so a global 15→14 would retroactively truncate every archived board.
+  `rules.ROSTER_SIZE` stays 15; use `rules.draft_picks_per_manager(mode)` and
+  `generate_draft_slots(..., picks_per_manager=...)`.
+  **A club is `pl_teams`, keyed on FPL's PERMANENT team `code`** — `teams[].id` in
+  bootstrap is the alphabetical 1-20 index WITHIN a season and is reassigned every
+  August, the same trap as `players.fpl_id` one table over. Rows are never deleted; a
+  relegated club keeps its row and loses `is_current_pl`. Populated by
+  `sync._upsert_pl_teams` from the payload sync already fetched and used to discard.
+  **Who owns a club is derived, never stored as a keeper list** (`goalie_team_keepers`,
+  `goalie_team_owner`): you own whoever keeps for that club TODAY, so a January signing
+  joins and a sale leaves with nothing to reconcile.
+  Two rules live in `record_pick` (which still enforces no squad quotas — a sixth
+  defender is legal, and a test pins that): a manager gets ONE club
+  (`_team_unavailable_reason`), and a manager down to their last slot with no club must
+  spend it on one (`_goalie_team_required_reason` — deliberately separate, because
+  `_unavailable_reason` doubles as search's taken-oracle and a striker is not "taken"
+  because you're out of slots). The second also guards `trade_pick`.
+  Wire format is `team_code` (the permanent club code) alongside `player_fpl_id`,
+  exactly one required. **Availability is keyed on `(kind, id)`, never `fpl_id` alone**
+  — every club row carries `fpl_id: None`, which every DEPARTED player also matches.
+  `search_players` needs `include_teams=True` when used as an availability ORACLE
+  (`approve_queued_pick`) rather than as a search. And `get_draft_board` MUST render a
+  label for a club pick: `next_open_pick` treats a falsy `player` as "on the clock", so
+  a club that renders blank freezes the draft forever.
+  Under `keeper` mode a club is one of the ≤5 keepers, on its own clock
+  (`_derive_gk_team_keeper_status`) — a club has no `rosters` rows, so ownership is a
+  discrete per-season fact and the history is keyed on the **FPL entry id**, not
+  `managers.id` (one manager row per season). A trade transfers the clock and the label
+  unchanged; relegation voids the keeper and returns the slot to the draft.
+  `draftprep.Shape` carries the squad shape (`FPL_SHAPE` / `GOALIE_TEAM_SHAPE`,
+  `shape_for(mode)`) so both eras stay simulable; clubs are RANKED
+  (`goalie_team_values`) and never simulated — 20 clubs for 10 managers is no scarcity.
 - **Keepers:** 15-man rosters; up to 5 keepers/season (6 if a discovery keeper
   applies). Max 4 years of keeper eligibility for a draft- or trade-acquired
   player (`rules.KEEPER_FRESH_DRAFT`); a waiver/FA-acquired player — including one
@@ -288,7 +325,10 @@ Write tests for these. They are custom and non-obvious:
   replacement per absence; re-add when the nation is eliminated) both preserve keeper
   eligibility — their gameweeks are folded into the "covered" set in
   `_derive_keeper_status` so an absence never counts as a drop. Manager self-service on
-  My Team (`/il/*`, `/intl/*`).
+  My Team (`/il/*`, `/intl/*`). **Goalkeepers are out of scope on both lists once goalie
+  teams are on** (`_refuse_goalkeeper_list_move`): the same-position rule is
+  unsatisfiable, since the only keepers you own are your own club's — and an injured club
+  keeper needs no action anyway, because his backup plays and scores in the same slot.
 - **Draft (live ops):** boards auto-refresh on all devices (7s poll on `_board.html` /
   `_discovery_board.html`); a unique slot constraint + `record_pick` guard block
   concurrent overwrites. Managers keep an **autodraft queue** (`draft_queue`, `+Q` in

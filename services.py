@@ -443,7 +443,13 @@ def flag_ineligible(db: Session, league: League) -> int:
     for p in db.query(Player).filter(Player.fpl_id.isnot(None)):
         if p.fpl_id in snapshot or p.fpl_id in already:
             continue
-        if (p.position or "").upper() == "DEF":  # defenders added later stay eligible
+        pos = (p.position or "").upper()
+        if pos == "DEF":  # defenders added later stay eligible
+            continue
+        # A goalkeeper signed in January is owned the moment he signs — whoever holds
+        # his club gets him, with no transaction. Flagging him "added after the draft"
+        # would put a player somebody demonstrably owns on the ineligible report.
+        if pos == "GKP" and goalie_teams_on(league.goalie_team_mode):
             continue
         db.add(PlayerIneligibility(
             league_id=league.id, fpl_id=p.fpl_id,
@@ -1501,6 +1507,24 @@ def _il_to_dict(entry: InjuryList, injured: Player, replacement: Player | None) 
     }
 
 
+def _refuse_goalkeeper_list_move(league: League, *players, what: str) -> None:
+    """Goalkeepers are out of scope for the injury and international lists.
+
+    Under the goalie-team rule the rule is unsatisfiable anyway: both lists demand a
+    same-position replacement, and the only goalkeepers a manager owns are the ones at
+    their own club — so the only legal replacement is somebody they already have.
+    Worse, it would burn the one-active-entry-per-manager slot on a no-op. An injured
+    club keeper needs no action: his club's backup plays and scores in the same slot.
+    """
+    if not goalie_teams_on(league.goalie_team_mode):
+        return
+    if any((p.position or "").upper() == "GKP" for p in players):
+        raise RuleViolation(
+            f"goalkeepers aren't on the {what} — your club's other keeper covers the "
+            "absence automatically"
+        )
+
+
 def place_on_il(
     db: Session,
     league: League,
@@ -1525,6 +1549,7 @@ def place_on_il(
     )
     if existing:
         raise RuleViolation("manager already has an active injury-list player")
+    _refuse_goalkeeper_list_move(league, injured, replacement, what="injury list")
     if not il_same_position(injured.position, replacement.position):
         raise RuleViolation(
             f"replacement is {replacement.position}, must match injured "
@@ -1603,6 +1628,7 @@ def place_on_intl(
     replacement = _resolve_player(db, replacement_fpl_id)
     if away.id == replacement.id:
         raise RuleViolation("replacement must be a different player")
+    _refuse_goalkeeper_list_move(league, away, replacement, what="international list")
     if not il_same_position(away.position, replacement.position):
         raise RuleViolation(
             f"replacement is {replacement.position}, must match the away "
@@ -2975,6 +3001,82 @@ def _goalie_team_history(db: Session) -> dict:
     return out
 
 
+def goalie_team_owner(db: Session, league: League) -> dict:
+    """{team_id: fpl_manager_id} — who holds each goalie team right now.
+
+    Base is the season's draft pick or keeper selection; commissioner-entered club
+    trades are then applied in `created_at` order, the same overlay-on-read shape
+    `player_ownership` uses and for the same reason — the draft pick is a record of
+    what happened and must not be rewritten by a later trade.
+
+    Applied only when `from_manager` currently holds the club, so a typo'd direction
+    moves nobody instead of teleporting a club (`/admin/health` surfaces the ones that
+    didn't apply). `created_at` is the only reliable ordering: `date` is NULL on
+    commissioner rows and the PK is a random uuid4.
+    """
+    cur = league.season_year or 0
+    owner = {
+        tid: fpl for (sy, tid), (fpl, _how) in _goalie_team_history(db).items()
+        if sy == cur
+    }
+    fpl_by_mid = {
+        m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)
+    }
+    for t in (
+        db.query(Trade)
+        .filter(Trade.league_id == league.id, Trade.team_id.isnot(None))
+        .order_by(Trade.created_at, Trade.id)
+    ):
+        if owner.get(t.team_id) == fpl_by_mid.get(t.from_manager):
+            owner[t.team_id] = fpl_by_mid.get(t.to_manager)
+    return owner
+
+
+def _add_club_trade(db: Session, league: League, frm, to, team, owner: dict) -> None:
+    """One direction of a goalie-team move. Mutates `owner` so a caller doing a swap
+    validates both legs against a single, consistent picture. Adds the row; does NOT
+    commit — the caller owns the transaction."""
+    if owner.get(team.id) != frm.fpl_manager_id:
+        raise RuleViolation(f"{frm.display} doesn't hold {team.name}")
+    db.add(Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id,
+                 team_id=team.id))
+    owner[team.id] = to.fpl_manager_id
+
+
+def trade_goalie_team(
+    db: Session, league: League, *, from_fpl: str, to_fpl: str, team_code: int
+) -> dict:
+    """Record a ONE-WAY goalie-team trade (commissioner-entered).
+
+    The receiver must not already have a club. Two managers swapping clubs is a
+    different shape — both legs have to be judged against the state BEFORE either
+    happens, or the first leg leaves the receiver holding two and the second refuses.
+    That path is `record_trade`.
+    """
+    frm = _resolve_manager(db, league, from_fpl)
+    to = _resolve_manager(db, league, to_fpl)
+    if frm.id == to.id:
+        raise RuleViolation("pick two different managers")
+    team = _resolve_team(db, team_code)
+    owner = goalie_team_owner(db, league)
+    # Ownership first. It is the more specific fact, and checking capacity first means
+    # a trade entered backwards reports "the RECEIVER already has a club" — true, but
+    # it sends you looking at the wrong manager.
+    if owner.get(team.id) != frm.fpl_manager_id:
+        raise RuleViolation(f"{frm.display} doesn't hold {team.name}")
+    if any(fpl == to.fpl_manager_id for fpl in owner.values()):
+        raise RuleViolation(
+            f"{to.display} already has a goalie team — trade it away in the same deal"
+        )
+    _add_club_trade(db, league, frm, to, team, owner)
+    record_audit(db, league, action="trade.goalie_team",
+                 summary=f"Goalie team: {team.name} from {frm.display} → {to.display}",
+                 manager_ids=[frm.id, to.id],
+                 details={"team_code": team_code})
+    db.commit()
+    return {"from": frm.display, "to": to.display, "team": team.name}
+
+
 def _derive_gk_team_keeper_status(
     db: Session,
     league: League,
@@ -3022,20 +3124,27 @@ def _derive_gk_team_keeper_status(
         )
     }
 
+    owner = goalie_team_owner(db, league)
     out: dict = {}
     for m in managers:
-        held = [tid for (sy, tid), (fpl, _how) in history.items()
-                if sy == cur and fpl == m.fpl_manager_id]
+        held = [tid for tid, fpl in owner.items() if fpl == m.fpl_manager_id]
         if not held:
             continue
         tid = held[0]
-        # Walk back while the SAME manager still held the SAME club. A gap means they
+        # The clock is computed from whoever the RECORD says held the club — the
+        # sender, if it was traded — and handed to the current owner unchanged. A
+        # trade changes ownership and nothing else: the years don't reset and the
+        # label doesn't become 'trade', exactly as rules.keeper_status(traded_from=)
+        # does for a player. Otherwise trading a club out and back would launder a
+        # spent clock clean.
+        holder = history.get((cur, tid), (None, None))[0]
+        # Walk back while the SAME holder still held the SAME club. A gap means they
         # lost it and got it again, which restarts the clock exactly as a drop does
         # for a player.
         acquired = cur
-        while history.get((acquired - 1, tid), (None, None))[0] == m.fpl_manager_id:
+        while history.get((acquired - 1, tid), (None, None))[0] == holder:
             acquired -= 1
-        acquisition = history[(acquired, tid)][1]
+        acquisition = history.get((acquired, tid), (None, "draft"))[1]
         acquisition = "draft" if acquisition == "draft" else "waiver"
         seed = seeds.get(tid)
         remaining = (
@@ -3151,6 +3260,13 @@ def submit_keepers(
                 st = {"player": player.name, "eligible": True,
                       "acquisition": "discovery",
                       "years_remaining": KEEPER_FRESH_DRAFT}
+                if (goalie_teams_on(league.goalie_team_mode)
+                        and (player.position or "").upper() == "GKP"):
+                    # The one door left open into individual goalkeeper ownership: the
+                    # discovery keeper may be ANY player, so it bypasses the roster
+                    # candidate list where the rule is otherwise enforced.
+                    st = {**st, "eligible": False,
+                          "reason": "goalkeepers are kept as a club"}
             else:
                 raise RuleViolation(
                     f"{player.name} is not one of {manager.display}'s keeper "
@@ -5100,7 +5216,8 @@ def corrections_data(db: Session, league: League) -> dict:
 # ---- general trade entry (manager-usable, players + picks, no cap) ----
 def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
     """A manager's tradeable assets: current-roster players + future picks they
-    own (their own un-traded picks + picks acquired), across the next few years."""
+    own (their own un-traded picks + picks acquired), across the next few years —
+    plus their goalie team, which trades only for another goalie team."""
     m = _resolve_manager(db, league, fpl_manager_id)
     person = m.display
     persons = [mm.display for mm in db.query(Manager).filter_by(league_id=league.id)]
@@ -5141,16 +5258,34 @@ def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
                             "label": f"{y} {dt} R{rnd}{suffix}",
                             "value": f"{y}:{dt}:{rnd}:{orig}",
                         })
-    return {"manager": person, "fpl": m.fpl_manager_id, "players": players, "picks": picks}
+    club = None
+    if goalie_teams_on(league.goalie_team_mode):
+        owner = goalie_team_owner(db, league)
+        tid = next((t for t, fpl in owner.items() if fpl == m.fpl_manager_id), None)
+        team = db.get(PlTeam, tid) if tid else None
+        if team is not None:
+            keepers = goalie_team_keepers(db, [team])[team.id]
+            club = {"team_code": team.code, "name": team.name,
+                    "short_name": team.short_name,
+                    "keepers": [k.name for k in keepers]}
+    return {"manager": person, "fpl": m.fpl_manager_id, "players": players,
+            "picks": picks, "club": club}
 
 
 def record_trade(
     db: Session, league: League, *, a_fpl: str, b_fpl: str,
     a_players: list, a_picks: list, b_players: list, b_picks: list,
+    a_clubs: list | None = None, b_clubs: list | None = None,
 ) -> dict:
     """Record a trade between two managers: any players + picks each way, no cap.
     Each asset becomes a Trade row; pick assets reassign ownership via the shared
-    pick_ownership computation. Not admin-gated."""
+    pick_ownership computation. Not admin-gated.
+
+    Goalie teams are the one asset with a cap, because the rule has one: a manager
+    holds exactly one, so a club must be met by a club going the other way. A
+    club-for-player trade would leave one manager with two and the other with none,
+    and neither is a legal squad.
+    """
     A = _resolve_manager(db, league, a_fpl)
     B = _resolve_manager(db, league, b_fpl)
     if A.id == B.id:
@@ -5180,7 +5315,23 @@ def record_trade(
         add_pick(A, B, spec)
     for spec in b_picks:
         add_pick(B, A, spec)
-    moved = len(a_players) + len(b_players) + len(a_picks) + len(b_picks)
+
+    a_clubs, b_clubs = list(a_clubs or []), list(b_clubs or [])
+    if len(a_clubs) > 1 or len(b_clubs) > 1:
+        raise RuleViolation("a manager has only one goalie team to trade")
+    if len(a_clubs) != len(b_clubs):
+        raise RuleViolation(
+            "a goalie team has to be traded for a goalie team — one each way, or "
+            "neither"
+        )
+    if a_clubs:
+        # Both legs judged against the state before EITHER happens. Sequencing them
+        # would have the first leg leave B holding two clubs, and the second refuse.
+        owner = goalie_team_owner(db, league)
+        _add_club_trade(db, league, A, B, _resolve_team(db, int(a_clubs[0])), owner)
+        _add_club_trade(db, league, B, A, _resolve_team(db, int(b_clubs[0])), owner)
+    moved = (len(a_players) + len(b_players) + len(a_picks) + len(b_picks)
+             + len(a_clubs) + len(b_clubs))
     # This was the one write path in the app that never wrote an audit entry, which
     # left the everyday trade form invisible in the log it exists to complete.
     record_audit(
