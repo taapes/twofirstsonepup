@@ -207,14 +207,43 @@ def decide_sync(*, full_today: bool, live_fixture: bool, gw_starts_today: bool) 
 ANTI_TANKING_MIN_ZERO_PLAYERS = 3
 ANTI_TANKING_MIN_WEEKS = 3
 
+# A squad must carry two goalkeepers and only one of them can be his club's starter,
+# so ONE keeper at 0 minutes is roster construction, not neglect, and is forgiven.
+# Every club fields a keeper every week, so TWO at zero means neither is starting
+# anywhere — that is exactly what the rule is looking for, and then both count.
+ANTI_TANKING_FREE_ZERO_GKS = 1
 
-def zero_minute_count(player_points: list[dict]) -> int:
+
+def zero_minute_count(
+    player_points: list[dict],
+    *,
+    excused: frozenset[int] | set[int] = frozenset(),
+    goalkeeper_ids: frozenset[int] | set[int] = frozenset(),
+    free_zero_gks: int = ANTI_TANKING_FREE_ZERO_GKS,
+) -> int:
     """Number of rostered players (whole squad) who played 0 minutes in a GW.
 
     `player_points` is the JSONB list stored on gameweek_points: dicts with a
     `minutes` (int) key. A missing/None minutes is treated as 0.
+
+    `excused` holds FPL element ids that cannot be held against the manager this GW —
+    a club with no fixture, and players covered by the injury or international list.
+    They are removed BEFORE the goalkeeper allowance, so a backup keeper whose club is
+    blank is excused as a blank and the allowance still shields the other one.
+
+    `goalkeeper_ids` marks which element ids are keepers; up to `free_zero_gks` of them
+    at 0 minutes are forgiven, all-or-nothing (see ANTI_TANKING_FREE_ZERO_GKS).
+
+    Defaults excuse nothing, so a caller with no season context gets the raw count.
     """
-    return sum(1 for p in (player_points or []) if (p.get("minutes") or 0) == 0)
+    zeros = [
+        p for p in (player_points or [])
+        if (p.get("minutes") or 0) == 0 and p.get("fpl_id") not in excused
+    ]
+    gk_zeros = sum(1 for p in zeros if p.get("fpl_id") in goalkeeper_ids)
+    if 0 < gk_zeros <= free_zero_gks:
+        return len(zeros) - gk_zeros  # the lone non-starting keeper is forgiven
+    return len(zeros)  # no keepers at zero, or more than the allowance -> all count
 
 
 def tanking_windows(
@@ -660,11 +689,16 @@ def compute_payouts(
     items.append((recipients.get("pup_cup"), "Pup Cup winner", pup_amount))
 
     fines_pool = sum(fines.values())
-    collected = structure["last_place_fine"] + other_fines + fines_pool
+    # Both sides read the SAME figure: crediting the last-place fine to the winner while
+    # nobody is resolvable as last place would pay 1st $125 out of thin air.
+    last_place_owed = (
+        structure["last_place_fine"] if recipients.get("last_place") is not None else 0
+    )
+    collected = last_place_owed + other_fines + fines_pool
     if recipients.get("league_1") is not None and collected:
         items.append((recipients["league_1"], "Fines collected", round(collected, 2)))
     if recipients.get("last_place") is not None:
-        items.append((recipients["last_place"], "Last-place fine", -float(structure["last_place_fine"])))
+        items.append((recipients["last_place"], "Last-place fine", -float(last_place_owed)))
     for mgr_key, amount in fines.items():
         if amount:
             items.append((mgr_key, "Fine(s)", -float(amount)))

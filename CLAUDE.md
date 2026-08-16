@@ -216,6 +216,26 @@ Write tests for these. They are custom and non-obvious:
   are constants in `rules.py`. (Whole-squad scope was chosen deliberately even
   though it flags most of the league — see [[anti-tanking-whole-squad-choice]].)
   Show infractions on homepage and admin panel.
+  **The count is only the zeros the manager is answerable for**, or the rule fires on
+  the calendar rather than on neglect. `_tanking_counts_by_manager` strips three
+  structural causes before calling `rules.zero_minute_count`: a club with **no fixture**
+  that GW, a player covered by the **IL or international list** (`_absence_cover`, the
+  same set the keeper-drop derivation uses — the two must agree on "covered"), and the
+  spare **goalkeeper**. The GK allowance (`ANTI_TANKING_FREE_ZERO_GKS`) is
+  **all-or-nothing**: a squad must carry two keepers and only one can start, so one at 0
+  minutes is roster construction and is forgiven — but every club fields a keeper every
+  week, so TWO at zero means neither is starting anywhere and both count. Excuses apply
+  BEFORE the allowance, so a blank-club backup is excused as a blank and the allowance
+  still shields the other. A GW with **no fixture rows at all** excuses nobody — that's
+  missing data, not twenty blank clubs, and excusing there would switch the rule off for
+  every historical season. Position/club come from `PlayerSeason`, never the global pool
+  or the lineup slot (recycled element ids).
+  **A flag carries no money.** Fines are a separate MANUAL commissioner ledger (`fines`
+  table, `services.add_fine`, `/admin/standings`); nothing converts a flag into a fine or
+  a points deduction. The only automatic fine is last place (`PAYOUT_STRUCTURE`).
+  Dismissals (`TankingFlagClear`) are honoured by `_open_windows`, which `_manager_status`
+  and `flagged_actions` both read; only `get_flags` still returns cleared windows, because
+  admin needs to see and restore them.
 - **Trades:** Allowed only end of GW38 -> Jan 31. Player-for-player,
   pick-for-player, or pick-for-pick. Conditions free-text initially. Trades
   update keeper clocks and the draft board.

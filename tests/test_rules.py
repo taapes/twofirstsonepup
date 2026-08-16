@@ -44,6 +44,47 @@ def test_zero_minute_count_empty():
     assert zero_minute_count(None) == 0
 
 
+# ---- zero_minute_count: the structural zeros a manager can't be blamed for ----
+def test_one_zero_minute_goalkeeper_is_forgiven():
+    """A squad must carry two keepers and only one can start, so the spare sitting at
+    0 minutes is roster construction, not tanking."""
+    squad = _squad([0, 90, 0, 0] + [90] * 11)  # ids 0,2,3 at zero; id 0 is the GK
+    assert zero_minute_count(squad, goalkeeper_ids={0}) == 2
+    assert zero_minute_count(squad) == 3, "the raw count should be unchanged"
+
+
+def test_two_zero_minute_goalkeepers_both_count():
+    """Every club fields a keeper every week, so two at zero means neither is starting
+    anywhere — the allowance is all-or-nothing and both count."""
+    squad = _squad([0, 0, 0, 90] + [90] * 11)  # ids 0,1 are the keepers
+    assert zero_minute_count(squad, goalkeeper_ids={0, 1}) == 3
+
+
+def test_a_lone_zero_minute_goalkeeper_keeps_a_squad_under_the_threshold():
+    squad = _squad([0, 0, 0] + [90] * 12)  # id 0 is the GK
+    counts = {5: zero_minute_count(squad, goalkeeper_ids={0})}
+    assert counts == {5: 2}
+    assert tanking_windows({5: counts[5], 6: counts[5], 7: counts[5]}) == []
+
+
+def test_excused_players_do_not_count():
+    """No fixture / injury list / international duty — none of it is the manager's doing."""
+    squad = _squad([0, 0, 0, 0] + [90] * 11)
+    assert zero_minute_count(squad, excused={1, 2}) == 2
+
+
+def test_excuses_apply_before_the_goalkeeper_allowance():
+    """A backup keeper whose club is blank is excused as a blank, and the allowance
+    then still shields the other keeper — otherwise the excuse would eat it."""
+    squad = _squad([0, 0, 0, 0] + [90] * 11)  # ids 0,1 keepers; id 1's club is blank
+    assert zero_minute_count(squad, excused={1}, goalkeeper_ids={0, 1}) == 2
+
+
+def test_zero_minute_count_defaults_excuse_nothing():
+    squad = _squad([0, 0, 0] + [90] * 12)
+    assert zero_minute_count(squad) == 3
+
+
 # ---- tanking_windows (>=3 zero players for >=3 consecutive GWs) ----
 def test_three_straight_weeks_flagged():
     counts = {10: 3, 11: 4, 12: 3}
@@ -213,7 +254,7 @@ def test_payout_amounts_match_stated_structure():
 
 def test_payout_stacks_when_one_manager_wins_multiple():
     # league winner also wins the Cup
-    r = {"league_1": "A", "cup_1": "A"}
+    r = {"league_1": "A", "cup_1": "A", "last_place": "B"}
     p = compute_payouts(r, num_managers=10)
     # 500 (40%) + 125 fine + 312.50 (cup) = 937.50
     assert p["A"]["total"] == 937.50
@@ -229,6 +270,14 @@ def test_payout_other_fines_go_to_league_winner():
 def test_payout_skips_missing_slots():
     p = compute_payouts({"league_1": "A"}, num_managers=10)
     assert set(p.keys()) == {"A"}
+
+
+def test_payout_collects_no_last_place_fine_when_nobody_is_last():
+    """The winner may not collect a fine nobody paid: the credit and the debit read
+    the same figure, so with no last-place manager there is no $125 on either side."""
+    p = compute_payouts({"league_1": "A"}, num_managers=10)
+    assert p["A"]["total"] == 500.0, "the winner was paid a fine nobody owed"
+    assert "Fines collected" not in [b["label"] for b in p["A"]["breakdown"]]
 
 
 def test_payout_per_manager_fines_and_net():

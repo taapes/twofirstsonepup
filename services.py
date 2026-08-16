@@ -1022,11 +1022,12 @@ def _manager_status(db: Session, league: League, manager: Manager) -> dict:
     """A manager's standing on the league's risk rules: anti-tanking (current
     0-minute streak vs. the threshold) and active injury-list players with how many
     gameweeks they've been on the IL."""
-    counts = (
-        _tanking_counts_by_manager(db, league).get(manager.id, {}).get("counts", {})
-    )
+    by_manager = _tanking_counts_by_manager(db, league)
+    counts = by_manager.get(manager.id, {}).get("counts", {})
     streak = current_tanking_streak(counts)
-    flagged = bool(tanking_windows(counts))
+    # A dismissed window is not a violation any more; the streak is separate and
+    # unaffected, so a manager whose only window was cleared falls through to it.
+    flagged = manager.id in _open_windows(db, league, by_manager)
     if flagged:
         tank_state = "flagged"
     elif streak >= ANTI_TANKING_MIN_WEEKS - 1 and streak > 0:
@@ -1185,8 +1186,41 @@ def _window_label(window: list[int]) -> str:
     return f"GW{window[0]}–{window[-1]}"
 
 
+def _gw_fixture_teams(db: Session, league: League) -> dict:
+    """gw_number -> the set of club short names with a real fixture that gameweek.
+
+    A club with no fixture (a blank GW) plays nobody, so its players' 0 minutes say
+    nothing about the manager. Short names join against `PlayerSeason.current_team`,
+    per the Fixture model's own docstring."""
+    teams: dict = {}
+    for event, home, away in (
+        db.query(Fixture.event, Fixture.home_team, Fixture.away_team)
+        .filter(Fixture.league_id == league.id, Fixture.event.isnot(None))
+        .all()
+    ):
+        slot = teams.setdefault(event, set())
+        slot.update(t for t in (home, away) if t)
+    return teams
+
+
+def _season_by_fpl_id(db: Session, league: League) -> dict:
+    """this season's element id -> PlayerSeason row. `player_points` embeds the
+    element ids of the season it was synced in, and FPL recycles those every year, so
+    position/club must be read off the season snapshot rather than the global pool."""
+    return {
+        ps.fpl_id: ps
+        for ps in db.query(PlayerSeason).filter_by(league_id=league.id)
+        if ps.fpl_id is not None
+    }
+
+
 def _tanking_counts_by_manager(db: Session, league: League) -> dict:
-    """manager_id -> {"manager": Manager, "counts": {gw_number: zero_minute_count}}."""
+    """manager_id -> {"manager": Manager, "counts": {gw_number: zero_minute_count}}.
+
+    The count is what the manager can be held responsible for, so three structural
+    zeroes are stripped out first: a club with no fixture that GW, a player covered by
+    the injury or international list, and the lone non-starting goalkeeper every squad
+    has to carry (see `rules.zero_minute_count`)."""
     rows = (
         db.query(GameweekPoints, Gameweek, Manager)
         .join(Gameweek, Gameweek.id == GameweekPoints.gameweek_id)
@@ -1194,11 +1228,67 @@ def _tanking_counts_by_manager(db: Session, league: League) -> dict:
         .filter(Manager.league_id == league.id)
         .all()
     )
+    if not rows:
+        return {}
+
+    season = _season_by_fpl_id(db, league)
+    goalkeeper_ids = frozenset(
+        fid for fid, ps in season.items() if (ps.position or "").upper().startswith("GK")
+    )
+    fixture_teams = _gw_fixture_teams(db, league)
+    cover = _absence_cover(db, league, max(gw.number for _gp, gw, _m in rows))
+
     per_manager: dict = {}
     for gp, gw, m in rows:
-        entry = per_manager.setdefault(m.id, {"manager": m, "counts": {}})
-        entry["counts"][gw.number] = zero_minute_count(gp.player_points or [])
+        playing = fixture_teams.get(gw.number) or set()
+        excused = set()
+        for entry in (gp.player_points or []):
+            fid = entry.get("fpl_id")
+            ps = season.get(fid)
+            if ps is None:
+                continue
+            # A GW with NO fixture rows at all is missing data, not 20 blank clubs —
+            # excusing everyone there would silently switch the rule off for good.
+            if playing and ps.current_team not in playing:
+                excused.add(fid)
+            elif gw.number in cover.get((m.id, ps.player_id), ()):
+                excused.add(fid)
+        entry_for = per_manager.setdefault(m.id, {"manager": m, "counts": {}})
+        entry_for["counts"][gw.number] = zero_minute_count(
+            gp.player_points or [],
+            excused=excused,
+            goalkeeper_ids=goalkeeper_ids,
+        )
     return per_manager
+
+
+def _cleared_windows(db: Session, league: League) -> set:
+    """{(manager_id, window_label)} the commissioner has dismissed."""
+    from models import TankingFlagClear
+
+    return {
+        (c.manager_id, c.window)
+        for c in db.query(TankingFlagClear).filter_by(league_id=league.id)
+    }
+
+
+def _open_windows(db: Session, league: League, counts_by_manager: dict = None) -> dict:
+    """manager_id -> the tanking windows still standing (dismissals removed).
+
+    `get_flags` deliberately keeps cleared windows so admin can see and restore them;
+    every OTHER reader wants only the open ones, or a dismissal would clear the flag
+    from the homepage list while leaving it on My Team and in Flagged Actions.
+
+    Pass `counts_by_manager` if you already have it — recomputing costs a scan of every
+    manager's every gameweek plus the fixture and absence lookups."""
+    cleared = _cleared_windows(db, league)
+    out: dict = {}
+    for mid, info in (counts_by_manager or _tanking_counts_by_manager(db, league)).items():
+        open_ = [w for w in tanking_windows(info["counts"])
+                 if (mid, _window_label(w)) not in cleared]
+        if open_:
+            out[mid] = open_
+    return out
 
 
 def get_flags(db: Session, league: League) -> list[dict]:
@@ -1206,12 +1296,7 @@ def get_flags(db: Session, league: League) -> list[dict]:
     manager when >=3 of their rostered players posted 0 minutes in each of >=3
     consecutive gameweeks. Each window carries `cleared` (commissioner-dismissed).
     """
-    from models import TankingFlagClear
-
-    cleared = {
-        (c.manager_id, c.window)
-        for c in db.query(TankingFlagClear).filter_by(league_id=league.id)
-    }
+    cleared = _cleared_windows(db, league)
     rule = (
         f"{ANTI_TANKING_MIN_ZERO_PLAYERS}+ rostered players with 0 minutes "
         f"for {ANTI_TANKING_MIN_WEEKS}+ straight GWs"
@@ -1914,10 +1999,13 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
             out.append({"category": "International", "manager": m.display,
                         "detail": f"Season over — return {p.name} from international duty"})
 
-    # Anti-tanking: flagged (in violation) or at risk (one GW short of the threshold)
-    for info in _tanking_counts_by_manager(db, league).values():
+    # Anti-tanking: flagged (in violation) or at risk (one GW short of the threshold).
+    # Dismissed windows drop out, so this table can't contradict the flag list below it.
+    by_manager = _tanking_counts_by_manager(db, league)
+    open_windows = _open_windows(db, league, by_manager)
+    for mid, info in by_manager.items():
         counts = info["counts"]
-        if tanking_windows(counts):
+        if mid in open_windows:
             out.append({"category": "Anti-tanking", "manager": info["manager"].display,
                         "detail": "flagged for an anti-tanking violation"})
         else:
@@ -2761,6 +2849,31 @@ def clear_keeper_override(
     db.commit()
 
 
+def _absence_cover(db: Session, league: League, last_n: int) -> dict:
+    """(manager_id, player_id) -> the set of GW numbers an injury-list or
+    international-list entry covers. An open-ended entry (no `end_gw`) folds through
+    `last_n`, the final gameweek in view.
+
+    Both lists preserve keeper eligibility, and neither absence is the manager's doing,
+    so this one definition serves every reader: the keeper-drop derivation (a covered
+    gap is not a drop) and the anti-tanking count (a covered player's 0 minutes are not
+    held against you). They must agree on what "covered" means."""
+    from models import InternationalList
+
+    cover: dict = {}
+    for model in (InjuryList, InternationalList):
+        for e in (
+            db.query(model)
+            .join(Manager, Manager.id == model.manager_id)
+            .filter(Manager.league_id == league.id)
+            .all()
+        ):
+            cover.setdefault((e.manager_id, e.player_id), set()).update(
+                range(e.start_gw, (e.end_gw or last_n) + 1)
+            )
+    return cover
+
+
 def _roster_presence_and_il_coverage(db: Session, league: League, last_n: int) -> tuple:
     """(presence, il): `presence` is (manager_id, player_id) -> the set of GW
     numbers that manager actively rostered them; `il` is the same key -> GW
@@ -2778,28 +2891,7 @@ def _roster_presence_and_il_coverage(db: Session, league: League, last_n: int) -
     ):
         presence.setdefault((mid, pid), set()).add(gnum)
 
-    from models import InternationalList
-
-    il: dict = {}
-    for e in (
-        db.query(InjuryList)
-        .join(Manager, Manager.id == InjuryList.manager_id)
-        .filter(Manager.league_id == league.id)
-        .all()
-    ):
-        il.setdefault((e.manager_id, e.player_id), set()).update(
-            range(e.start_gw, (e.end_gw or last_n) + 1)
-        )
-    for e in (
-        db.query(InternationalList)
-        .join(Manager, Manager.id == InternationalList.manager_id)
-        .filter(Manager.league_id == league.id)
-        .all()
-    ):
-        il.setdefault((e.manager_id, e.player_id), set()).update(
-            range(e.start_gw, (e.end_gw or last_n) + 1)
-        )
-    return presence, il
+    return presence, _absence_cover(db, league, last_n)
 
 
 def unexplained_roster_gaps(
