@@ -2761,6 +2761,108 @@ def clear_keeper_override(
     db.commit()
 
 
+def _roster_presence_and_il_coverage(db: Session, league: League, last_n: int) -> tuple:
+    """(presence, il): `presence` is (manager_id, player_id) -> the set of GW
+    numbers that manager actively rostered them; `il` is the same key -> GW
+    numbers covered by an IL or international-list entry (an open-ended entry
+    folds through `last_n`, the final GW). Shared by `_derive_keeper_status`
+    (explains a gap for a player already a candidate) and
+    `unexplained_roster_gaps` (finds a gap with no InjuryList/InternationalList
+    row at all) — one source of truth for both readers."""
+    presence: dict = {}
+    for mid, pid, gnum in (
+        db.query(Roster.manager_id, Roster.player_id, Gameweek.number)
+        .join(Gameweek, Gameweek.id == Roster.gameweek_id)
+        .filter(Gameweek.league_id == league.id)
+        .all()
+    ):
+        presence.setdefault((mid, pid), set()).add(gnum)
+
+    from models import InternationalList
+
+    il: dict = {}
+    for e in (
+        db.query(InjuryList)
+        .join(Manager, Manager.id == InjuryList.manager_id)
+        .filter(Manager.league_id == league.id)
+        .all()
+    ):
+        il.setdefault((e.manager_id, e.player_id), set()).update(
+            range(e.start_gw, (e.end_gw or last_n) + 1)
+        )
+    for e in (
+        db.query(InternationalList)
+        .join(Manager, Manager.id == InternationalList.manager_id)
+        .filter(Manager.league_id == league.id)
+        .all()
+    ):
+        il.setdefault((e.manager_id, e.player_id), set()).update(
+            range(e.start_gw, (e.end_gw or last_n) + 1)
+        )
+    return presence, il
+
+
+def unexplained_roster_gaps(
+    db: Session, league: League, *, window: int = None, min_tenure: int = None
+) -> list[dict]:
+    """Managers whose roster shows a player active recently (within `window`
+    gameweeks of the final GW), held down continuously for at least `min_tenure`
+    gameweeks right up to that point, but absent at the final GW with no
+    IL/international coverage explaining it — the shape of a legitimate
+    injury-list absence nobody recorded (see the Šeško case, commit 4cf5d40).
+    Read-only diagnostic: surfaces candidates for
+    POST /admin/keepers/il-backfill, doesn't fix anything itself.
+
+    An ordinary drop looks identical from here — that's inherent, not a bug —
+    so two filters narrow this to the cases actually worth a look: `window`
+    (recent enough) and `min_tenure` (a real, established run, not a one- or
+    two-week streamed pickup). Checked against real prod data: `window` alone
+    flagged 53 cases, nearly all ordinary short-term churn; requiring a
+    meaningful prior tenure cut that down to the ones that look like Šeško's.
+    Both default to their `rules.ROSTER_GAP_*` constants.
+    """
+    from rules import ROSTER_GAP_MIN_TENURE, ROSTER_GAP_REVIEW_WINDOW
+
+    if window is None:
+        window = ROSTER_GAP_REVIEW_WINDOW
+    if min_tenure is None:
+        min_tenure = ROSTER_GAP_MIN_TENURE
+    gw = latest_gameweek(db, league)
+    if gw is None:
+        return []
+    last_n = gw.number
+    presence, il = _roster_presence_and_il_coverage(db, league, last_n)
+    mgr_names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    mgr_fpl = {m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)}
+    pnames = player_names(db, league)
+    fpl_by_pid = {p.id: p.fpl_id for p in db.query(Player)}
+
+    out = []
+    for (mid, pid), gws in presence.items():
+        if last_n in gws:
+            continue                              # still on the roster — no gap
+        il_gws = il.get((mid, pid), set())
+        if last_n in il_gws:
+            continue                              # already explained
+        last_active = max(gws)
+        if last_active < last_n - window + 1:
+            continue                              # dropped long ago — ordinary churn
+        tenure = 0
+        gwn = last_active
+        while gwn in gws:
+            tenure += 1
+            gwn -= 1
+        if tenure < min_tenure:
+            continue                              # a brief streamed pickup, not an absence
+        out.append({
+            "manager": mgr_names.get(mid), "manager_fpl": mgr_fpl.get(mid),
+            "player": pnames.get(pid, "?"), "player_fpl_id": fpl_by_pid.get(pid),
+            "last_active_gw": last_active, "final_gw": last_n,
+        })
+    out.sort(key=lambda r: (r["manager"] or "", -r["last_active_gw"]))
+    return out
+
+
 def _derive_keeper_status(
     db: Session,
     league: League,
@@ -2795,40 +2897,7 @@ def _derive_keeper_status(
     # latest season, so names/positions off it are wrong for a past one.
     players = season_identity(db, league)
 
-    # Full per-GW roster presence so we can detect a DROP (a gap in a manager's
-    # tenure of a player) vs continuous keeping.
-    presence: dict = {}  # (manager_id, player_id) -> set of GW numbers rostered
-    for mid, pid, gnum in (
-        db.query(Roster.manager_id, Roster.player_id, Gameweek.number)
-        .join(Gameweek, Gameweek.id == Roster.gameweek_id)
-        .filter(Gameweek.league_id == league.id)
-        .all()
-    ):
-        presence.setdefault((mid, pid), set()).add(gnum)
-
-    from models import InternationalList
-
-    # GW numbers a player was OFF the roster but covered (not a drop): the IL and the
-    # international (AFCON / Asia Cup) list both preserve keeper eligibility.
-    il: dict = {}  # (manager_id, player_id) -> covered GW numbers
-    for e in (
-        db.query(InjuryList)
-        .join(Manager, Manager.id == InjuryList.manager_id)
-        .filter(Manager.league_id == league.id)
-        .all()
-    ):
-        il.setdefault((e.manager_id, e.player_id), set()).update(
-            range(e.start_gw, (e.end_gw or last_n) + 1)
-        )
-    for e in (
-        db.query(InternationalList)
-        .join(Manager, Manager.id == InternationalList.manager_id)
-        .filter(Manager.league_id == league.id)
-        .all()
-    ):
-        il.setdefault((e.manager_id, e.player_id), set()).update(
-            range(e.start_gw, (e.end_gw or last_n) + 1)
-        )
+    presence, il = _roster_presence_and_il_coverage(db, league, last_n)
 
     # A candidate is either on the active roster at the final GW, OR still covered
     # by an open-ended IL/international entry through the final GW — a player
@@ -5527,6 +5596,20 @@ def data_health(db: Session, league: League) -> list[dict]:
     )
     add("pick trades have an original owner", bad_picks == 0,
         f"{bad_picks} malformed" if bad_picks else "ok")
+
+    # A player who vanished from a roster near the end of the season with no IL
+    # record covering it — either an ordinary drop or an unrecorded IL absence
+    # (see the Šeško case). Only the commissioner can tell which; this just makes
+    # sure they get asked instead of never finding out. Full detail on /admin/keepers.
+    gaps = unexplained_roster_gaps(db, league)
+    add(
+        "no unexplained late-season roster gaps",
+        not gaps,
+        (f"{len(gaps)} — review at /admin/keepers: "
+         + "; ".join(f"{g['manager']}: {g['player']} (last active GW{g['last_active_gw']})"
+                     for g in gaps))
+        if gaps else "ok",
+    )
 
     return checks
 

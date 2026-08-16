@@ -11,6 +11,29 @@
   clock. A missing injury-list record is enough to trigger that — which is exactly why
   these two live together.</p>
 
+{% if roster_gaps %}
+<h2>Possible unrecorded IL/international absences <span class="pill warn">{{ roster_gaps|length }}</span></h2>
+<p class="sub">Each of these vanished from a manager's roster near the end of the
+  season with no IL or international-list record explaining it — could be an
+  ordinary drop, or an absence nobody recorded. If it's the latter, use the
+  fpl_id below to fill in the backfill form.</p>
+<div class="card" style="padding:10px;overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th>Manager</th><th>Player</th><th class="num">Last active GW</th><th class="num">Final GW</th></tr></thead>
+    <tbody>
+      {% for g in roster_gaps %}
+      <tr>
+        <td>{{ g.manager }}</td>
+        <td>{{ g.player }} <span class="sub">(fpl_id {{ g.player_fpl_id }})</span></td>
+        <td class="num">{{ g.last_active_gw }}</td>
+        <td class="num">{{ g.final_gw }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
 <h2>Backfill a historical injury-list placement</h2>
 <p class="sub">For a past season with no IL records at all — a player swapped for a
   same-position replacement and never returned won't show as a keeper candidate until

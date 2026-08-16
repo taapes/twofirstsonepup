@@ -1257,6 +1257,7 @@ def admin_keepers(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     return templates.TemplateResponse("admin_keepers.html", {
         "request": request, "league": league, "is_admin": True,
+        "roster_gaps": services.unexplained_roster_gaps(db, league),
         **services.keeper_overrides_context(db, league),
     })
 

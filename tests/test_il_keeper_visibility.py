@@ -18,6 +18,7 @@ import pytest
 
 import services
 from models import Gameweek, InjuryList, League, Manager, Player, PlayerSeason, Roster
+from rules import ROSTER_GAP_MIN_TENURE, ROSTER_GAP_REVIEW_WINDOW
 
 LAST_GW = 38
 ALL_GWS = range(1, LAST_GW + 1)
@@ -175,3 +176,89 @@ def test_a_returned_il_entry_does_not_grant_candidacy_on_its_own(test_session):
 
     status = services._derive_keeper_status(test_session, lg, kept_all=True)
     assert p.id not in status.get(mgr.id, {})
+
+
+# ---- unexplained_roster_gaps (the proactive health check) ------------------
+def test_flags_a_recent_gap_with_no_il_record(test_session):
+    """The exact shape the check exists for: active recently, gone by the final
+    GW, nothing explains it."""
+    lg, mgr, gws = _seed(test_session)
+    p = _player(test_session, lg, "Šeško", 439)
+    last_active = LAST_GW - ROSTER_GAP_REVIEW_WINDOW + 1
+    _hold(test_session, mgr, p, gws, range(1, last_active + 1))
+
+    gaps = services.unexplained_roster_gaps(test_session, lg)
+    assert len(gaps) == 1
+    g = gaps[0]
+    assert g["manager"] == "Scott" and g["player"] == "Šeško"
+    assert g["last_active_gw"] == last_active and g["final_gw"] == LAST_GW
+
+
+def test_does_not_flag_a_player_still_on_the_final_roster(test_session):
+    lg, mgr, gws = _seed(test_session)
+    p = _player(test_session, lg, "Onroster", 1)
+    _hold(test_session, mgr, p, gws, ALL_GWS)
+
+    assert services.unexplained_roster_gaps(test_session, lg) == []
+
+
+def test_does_not_flag_a_briefly_streamed_pickup(test_session):
+    """The real-data finding: a player picked up and dropped again within a
+    couple of weeks, near the end of the season, is completely ordinary
+    end-of-season streaming — not the 'established, then vanished' shape this
+    check is for. Recent (within window) but a short tenure must NOT flag."""
+    lg, mgr, gws = _seed(test_session)
+    p = _player(test_session, lg, "Streamed", 3)
+    last_active = LAST_GW - ROSTER_GAP_REVIEW_WINDOW + 1
+    short_tenure = min(2, ROSTER_GAP_MIN_TENURE - 1)
+    _hold(test_session, mgr, p, gws,
+          range(last_active - short_tenure + 1, last_active + 1))
+
+    assert services.unexplained_roster_gaps(test_session, lg) == []
+
+
+def test_does_not_flag_a_gap_already_covered_by_an_open_ended_il_entry(test_session):
+    """The Šeško-fixed shape: once the IL row exists, this stops flagging it —
+    it's now explained, not unexplained."""
+    lg, mgr, gws = _seed(test_session)
+    p = _player(test_session, lg, "Šeško", 439)
+    _hold(test_session, mgr, p, gws, range(1, 37))
+    test_session.add(InjuryList(
+        player_id=p.id, manager_id=mgr.id, start_gw=37, end_gw=None, status="active",
+    ))
+    test_session.commit()
+
+    assert services.unexplained_roster_gaps(test_session, lg) == []
+
+
+def test_does_not_flag_an_ordinary_drop_well_outside_the_window(test_session):
+    """A player dropped early/mid-season and never re-acquired is completely
+    ordinary — flagging every such case would bury the rare real one in noise."""
+    lg, mgr, gws = _seed(test_session)
+    p = _player(test_session, lg, "DroppedEarly", 2)
+    last_active = LAST_GW - ROSTER_GAP_REVIEW_WINDOW - 1  # just outside the window
+    _hold(test_session, mgr, p, gws, range(1, last_active + 1))
+
+    assert services.unexplained_roster_gaps(test_session, lg) == []
+
+
+def test_health_check_flags_the_same_gap(test_session):
+    lg, mgr, gws = _seed(test_session)
+    p = _player(test_session, lg, "Šeško", 439)
+    last_active = LAST_GW - ROSTER_GAP_REVIEW_WINDOW + 1
+    _hold(test_session, mgr, p, gws, range(1, last_active + 1))
+
+    checks = services.data_health(test_session, lg)
+    row = next(c for c in checks if c["check"] == "no unexplained late-season roster gaps")
+    assert row["ok"] is False
+    assert "Šeško" in row["detail"]
+
+
+def test_health_check_is_ok_with_no_gaps(test_session):
+    lg, mgr, gws = _seed(test_session)
+    p = _player(test_session, lg, "Onroster", 1)
+    _hold(test_session, mgr, p, gws, ALL_GWS)
+
+    checks = services.data_health(test_session, lg)
+    row = next(c for c in checks if c["check"] == "no unexplained late-season roster gaps")
+    assert row["ok"] is True

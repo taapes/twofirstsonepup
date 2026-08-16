@@ -280,6 +280,22 @@ def current_tanking_streak(
 MIN_IL_STAY_GWS = 4
 SEASON_LAST_GW = 38
 
+# Two diagnostic heuristics, not league rules — tune freely.
+# How close to the final GW a roster gap has to start to be worth a
+# commissioner's attention as a possible unrecorded IL/international absence
+# (see services.unexplained_roster_gaps). A gap that started long before this
+# is almost certainly just an ordinary mid-season drop.
+ROSTER_GAP_REVIEW_WINDOW = 5
+# How many CONSECUTIVE gameweeks a player must have held down immediately
+# before the gap for it to be worth flagging. Checked against real prod data:
+# without this, ordinary end-of-season streaming (a player picked up and
+# dropped again within a week or two, completely routine) swamped the list —
+# 53 flagged cases, nearly all with a 1-3 GW run. A genuine "established on the
+# roster, then vanished" absence (the Šeško case: 36 straight GWs) looks
+# nothing like that. This cuts the noise down to the cases actually worth a
+# human's two minutes.
+ROSTER_GAP_MIN_TENURE = 8
+
 
 def il_same_position(injured_position, replacement_position) -> bool:
     """The IL replacement must play the same position as the injured player."""
