@@ -3029,6 +3029,22 @@ def _derive_keeper_status(
         if not kept_all:
             kept = {k: v for k, v in kept.items() if k[0] in kept_for}
 
+    # Off-roster discovery keepers: submit_keepers deliberately allows the bonus 6th
+    # keeper to be ANY player, not one on the roster or covered by IL — that IS the
+    # whole point of the discovery draft. Without this union such a selection was
+    # invisible everywhere that reads this function's OUTPUT (the keepers page,
+    # keeper_candidates) even though it already correctly blocks everyone else from
+    # drafting him (search_players) and correctly counts toward the manager's
+    # draft-slot math (effective_keeper_selections, e503afd) — the same gap, in the
+    # read path instead of the slot-count path. `p is not None` excludes a goalie-team
+    # selection (player_id NULL); `- final_candidates` keeps this additive only for
+    # pairs with no roster/IL story to tell. Scoped by `kept`, itself already
+    # privacy-filtered above, so this can't leak a hidden pick to an unentitled viewer.
+    discovery_only = {
+        (m, p) for (m, p), is_disc in kept.items() if is_disc and p is not None
+    } - final_candidates
+    final_candidates |= discovery_only
+
     def _dropped(mid, pid, upto=None) -> bool:
         # A candidate reached purely through IL coverage (see final_candidates
         # above) may have no recorded roster presence at all — .get, not [], and
@@ -3088,7 +3104,13 @@ def _derive_keeper_status(
             (mid, pid) in traded_in,
             _dropped(mid, pid, upto),
             carried,
-            acquisition=seed_acq.get((mid, pid)),
+            # A pure discovery candidate (off-roster, off-IL) has none of the signals
+            # above to go on — the discovery draft IS the acquisition, worth a full
+            # draft-length clock, exactly what submit_keepers already synthesizes at
+            # submission time. A commissioner seed still wins over it, same as always.
+            acquisition=seed_acq.get((mid, pid)) or (
+                "discovery" if (mid, pid) in discovery_only else None
+            ),
             traded_from=inherited,
         )
         return memo[key]

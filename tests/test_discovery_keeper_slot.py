@@ -152,3 +152,59 @@ def test_a_rostered_ordinary_selection_still_counts(test_session):
     assert [s.player_id for s in counted] == [held.id]
     board = services.get_draft_board(test_session, lg, UPCOMING)
     assert len([b for b in board if b["original_owner"] == "A"]) == 14
+
+
+def test_an_off_roster_discovery_keeper_shows_on_the_keepers_page(test_session):
+    """The bug reported live during draft prep: the slot-count fix (above) never
+    touched `_derive_keeper_status`, so the SAME off-roster discovery keeper who
+    correctly cost his owner a slot was invisible on the keepers report itself —
+    `get_keepers`/`keeper_candidates`'s report view are built entirely from this
+    function's output, and it never had a discovery carve-out of its own."""
+    lg, mgrs, gws = _seed(test_session)
+    disc = _player(test_session, lg, "Discovery", 900, pos="MID")
+    _select(test_session, lg, mgrs["A"], disc, is_discovery=True)
+
+    report = services.get_keepers(test_session, lg, viewer_is_admin=True)
+    mine = next(r for r in report if r["manager"] == "A")
+    row = next(p for p in mine["players"] if p["player"] == "Discovery")
+    assert row["acquisition"] == "discovery"
+    assert row["years_remaining"] == 4
+    assert row["eligible"] is True
+    assert row["kept"] is True
+
+
+def test_a_commissioner_seed_still_overrides_the_discovery_clock(test_session):
+    """The override precedence a commissioner already relies on elsewhere must keep
+    working for this new path too — a seed wins over the synthesized discovery clock,
+    exactly as it wins over a normal derivation."""
+    from models import KeeperSeed
+
+    lg, mgrs, gws = _seed(test_session)
+    disc = _player(test_session, lg, "Discovery", 900, pos="MID")
+    _select(test_session, lg, mgrs["A"], disc, is_discovery=True)
+    test_session.add(KeeperSeed(league_id=lg.id, manager_id=mgrs["A"].id,
+                                player_id=disc.id, years_remaining=1,
+                                acquisition="waiver"))
+    test_session.commit()
+
+    status = services._derive_keeper_status(test_session, lg, kept_all=True)
+    st = status[mgrs["A"].id][disc.id]
+    assert (st["acquisition"], st["years_remaining"]) == ("waiver", 1)
+
+
+def test_privacy_default_is_unaffected_by_the_carve_out(test_session):
+    """A caller passing no viewer at all keeps the exact pre-fix shape: an ordinary
+    rostered candidate's ELIGIBILITY is still public (this function's own documented
+    design), while the discovery-only candidate — reachable ONLY through the `kept`
+    dict, which itself defaults to empty with no viewer — stays invisible exactly as
+    it already was before this fix. The carve-out is additive to an already-scoped
+    dict, never a new leak."""
+    lg, mgrs, gws = _seed(test_session)
+    held = _player(test_session, lg, "Held", 902)
+    _rostered(test_session, lg, mgrs["A"], held, gws)
+    disc = _player(test_session, lg, "Discovery", 900, pos="MID")
+    _select(test_session, lg, mgrs["A"], disc, is_discovery=True)
+
+    status = services._derive_keeper_status(test_session, lg)
+    assert held.id in status[mgrs["A"].id], "ordinary eligibility is public, unchanged"
+    assert disc.id not in status[mgrs["A"].id], "discovery-only stays gated with no viewer"
