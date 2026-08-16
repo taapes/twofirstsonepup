@@ -388,6 +388,59 @@ def test_a_queued_club_can_be_removed(test_session):
     assert services.get_draft_queue(test_session, lg, "1", UPCOMING) == []
 
 
+def test_reordering_moves_an_entry_earlier(test_session):
+    lg, _, _, players = _seed(test_session)
+    fids = _outfield_fpl_ids(players)
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", player_fpl_id=fids[0],
+                          season_year=UPCOMING)
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", player_fpl_id=fids[1],
+                          season_year=UPCOMING)
+    q = services.get_draft_queue(test_session, lg, "1", UPCOMING)
+    assert [e["fpl_id"] for e in q] == [fids[0], fids[1]]
+
+    services.reorder_queue(test_session, lg, fpl_manager_id="1", season_year=UPCOMING,
+                           ordered_keys=[f"player:{fids[1]}", f"player:{fids[0]}"])
+    q = services.get_draft_queue(test_session, lg, "1", UPCOMING)
+    assert [e["fpl_id"] for e in q] == [fids[1], fids[0]]
+
+
+def test_reordering_handles_mixed_players_and_clubs(test_session):
+    lg, _, _, players = _seed(test_session)
+    fid = _outfield_fpl_ids(players)[0]
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", player_fpl_id=fid,
+                          season_year=UPCOMING)
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", team_code=3,
+                          season_year=UPCOMING)
+    services.reorder_queue(
+        test_session, lg, fpl_manager_id="1", season_year=UPCOMING,
+        ordered_keys=["team:3", f"player:{fid}"],
+    )
+    q = services.get_draft_queue(test_session, lg, "1", UPCOMING)
+    assert [(e["kind"], e.get("team_code") or e.get("fpl_id")) for e in q] == [
+        ("team", 3), ("player", fid),
+    ]
+
+
+def test_reorder_rejects_a_stale_submission(test_session):
+    """The set-equality check is the whole safety net against a race — a submitted
+    order that no longer matches the real queue (something added/removed elsewhere)
+    is refused outright, never silently partial-applied."""
+    lg, _, _, players = _seed(test_session)
+    fids = _outfield_fpl_ids(players)
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", player_fpl_id=fids[0],
+                          season_year=UPCOMING)
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", player_fpl_id=fids[1],
+                          season_year=UPCOMING)
+
+    with pytest.raises(RuleViolation, match="your queue changed"):
+        services.reorder_queue(
+            test_session, lg, fpl_manager_id="1", season_year=UPCOMING,
+            ordered_keys=[f"player:{fids[0]}", f"player:{fids[2]}"],  # fids[2] never queued
+        )
+    q = services.get_draft_queue(test_session, lg, "1", UPCOMING)
+    assert [e["fpl_id"] for e in q] == [fids[0], fids[1]], "unchanged on refusal"
+
+
 def test_autodraft_takes_a_queued_club(test_session):
     lg, _, _, _ = _seed(test_session)
     services.add_to_queue(test_session, lg, fpl_manager_id="1", team_code=3,
@@ -395,6 +448,20 @@ def test_autodraft_takes_a_queued_club(test_session):
     out = services.approve_queued_pick(test_session, lg, season_year=UPCOMING)
     assert out["player"] == "Arsenal"
     assert services.get_draft_queue(test_session, lg, "1", UPCOMING) == []
+
+
+def test_autodraft_follows_the_reordered_queue(test_session):
+    """The actual point of the feature: reordering must change what autodraft picks,
+    not just what get_draft_queue reports. Asserting rank alone would miss this."""
+    lg, _, _, _ = _seed(test_session)
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", team_code=3,
+                          season_year=UPCOMING)   # Arsenal, queued first
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", team_code=43,
+                          season_year=UPCOMING)   # Man City, queued second
+    services.reorder_queue(test_session, lg, fpl_manager_id="1", season_year=UPCOMING,
+                           ordered_keys=["team:43", "team:3"])
+    out = services.approve_queued_pick(test_session, lg, season_year=UPCOMING)
+    assert out["player"] == "Man City"
 
 
 def test_autodraft_skips_a_club_someone_else_took(test_session):
@@ -545,3 +612,20 @@ def test_a_queued_club_renders_with_a_remove_form(client, test_session):
     body = client.get(f"/draft/{UPCOMING}/queue").text
     assert "Arsenal" in body and "goalie team" in body
     assert 'name="team_code" value="3"' in body
+
+
+def test_the_reorder_route_persists_the_new_order(client, test_session):
+    lg, mgrs, _, players = _seed(test_session)
+    _login(client, test_session, mgrs["A"])
+    fid = _outfield_fpl_ids(players)[0]
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", player_fpl_id=fid,
+                          season_year=UPCOMING)
+    services.add_to_queue(test_session, lg, fpl_manager_id="1", team_code=3,
+                          season_year=UPCOMING)
+
+    r = client.post(f"/draft/{UPCOMING}/queue/reorder",
+                    data={"order": f"team:3,player:{fid}"})
+    assert r.status_code == 200, r.text
+
+    q = services.get_draft_queue(test_session, lg, "1", UPCOMING)
+    assert [e["kind"] for e in q] == ["team", "player"]

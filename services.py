@@ -4163,6 +4163,40 @@ def remove_from_queue(
     db.commit()
 
 
+def reorder_queue(
+    db: Session, league: League, *, fpl_manager_id: str, season_year: int,
+    draft_type: str = "main", ordered_keys: list[str],
+) -> list[dict]:
+    """Replace a manager's queue order wholesale — same shape as
+    set_draft_order_override: resolve every key up front, then rewrite rank 0..N-1 in
+    one commit, so the stored order can never end up with a gap or a duplicate.
+
+    `ordered_keys` are "player:<fpl_id>" / "team:<team_code>" strings, matching the
+    `kind` values get_draft_queue already returns. The submitted set must exactly
+    match the manager's CURRENT queue — this is the only guard needed against two
+    tabs (or a queue mutation elsewhere) racing an in-progress reorder: a stale submit
+    is refused outright rather than silently dropping or duplicating an entry.
+    """
+    from models import DraftQueue, PlTeam
+
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    existing = db.query(DraftQueue).filter_by(
+        league_id=league.id, season_year=season_year,
+        draft_type=draft_type, manager_id=manager.id,
+    ).all()
+    by_key = {
+        (f"team:{db.get(PlTeam, r.team_id).code}" if r.team_id
+         else f"player:{db.get(Player, r.player_id).fpl_id}"): r
+        for r in existing
+    }
+    if set(ordered_keys) != set(by_key):
+        raise RuleViolation("your queue changed — reload and try again")
+    for i, key in enumerate(ordered_keys):
+        by_key[key].rank = i
+    db.commit()
+    return get_draft_queue(db, league, fpl_manager_id, season_year, draft_type)
+
+
 def approve_queued_pick(
     db: Session, league: League, *, season_year: int, draft_type: str = "main"
 ) -> dict:

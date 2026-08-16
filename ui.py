@@ -1550,6 +1550,24 @@ def draft_queue_remove(
     return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
 
 
+@router.post("/draft/{year}/queue/reorder", response_class=HTMLResponse)
+def draft_queue_reorder(
+    year: int, request: Request, order: str = Form(...),
+    draft_type: str = Form("main"), db: Session = Depends(get_db),
+):
+    league = _league_or_404(db)
+    fpl = current_manager_id(request)
+    if not fpl:
+        return _forbidden(request, "Log in to manage your queue.")
+    keys = [k.strip() for k in order.split(",") if k.strip()]
+    try:
+        services.reorder_queue(db, league, fpl_manager_id=fpl, ordered_keys=keys,
+                               season_year=year, draft_type=draft_type)
+    except RuleViolation as e:
+        return _err(e)
+    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
+
+
 @router.post("/draft/{year}/approve-queued", response_class=HTMLResponse)
 def draft_approve_queued(year: int, request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)

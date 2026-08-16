@@ -5,11 +5,13 @@
   {% elif queue %}
   <ol class="reorder" style="counter-reset:none">
     {% for p in queue %}
-    <li data-fpl="{{ p.fpl_id }}">
+    <li data-key="{{ 'team:' ~ p.team_code if p.kind == 'team' else 'player:' ~ p.fpl_id }}">
       <span class="grip">{{ loop.index }}.</span>
       <span class="oname">{{ p.name }}
         <span class="sub">{{ "goalie team" if p.kind == "team" else p.position }}</span></span>
       <span class="movers">
+        {% if not loop.first %}<button type="button" onclick="moveRow(this,-1)" title="up">↑</button>{% endif %}
+        {% if not loop.last %}<button type="button" onclick="moveRow(this,1)" title="down">↓</button>{% endif %}
         <form method="post" action="{{ base }}/queue/remove" hx-post="{{ base }}/queue/remove"
               hx-target="#queue" hx-swap="outerHTML" style="display:inline">
           {% if p.kind == "team" %}
@@ -24,6 +26,12 @@
     </li>
     {% endfor %}
   </ol>
+  {% if queue|length > 1 %}
+  <button type="button"
+    hx-post="{{ base }}/queue/reorder"
+    hx-vals='js:{order: collectQueueOrder(this), draft_type: "{{ draft_type }}"}'
+    hx-target="#queue" hx-swap="outerHTML">Save order</button>
+  {% endif %}
   <p class="sub">If you're away when on the clock, the commissioner can approve your top
     available queued player.</p>
   {% else %}

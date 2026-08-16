@@ -189,6 +189,10 @@
         var ids = [].map.call(form.querySelectorAll('#orderList li'), function(li){ return li.dataset.fpl; });
         form.querySelector('#orderField').value = ids.join(',');
       }
+      function collectQueueOrder(btn) {
+        var list = btn.closest('#queue').querySelectorAll('li[data-key]');
+        return [].map.call(list, function(li){ return li.dataset.key; }).join(',');
+      }
       function resolvePlayer(form) {
         var name = form.querySelector('[name=player_name]').value;
         var opt = document.querySelector('#playerList option[value="' + name.replace(/"/g,'\\"') + '"]');
