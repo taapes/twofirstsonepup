@@ -18,8 +18,15 @@ from auth import (
     verify_password,
 )
 from db import get_db
-from models import InjuryList, Manager
-from rules import ROSTER_SIZE, RuleViolation, SEASON_LAST_GW, goalie_teams_on
+from models import InjuryList, Manager, PlTeam
+from rules import (
+    GOALIE_TEAM_MODES,
+    ROSTER_SIZE,
+    RuleViolation,
+    SEASON_LAST_GW,
+    draft_picks_per_manager,
+    goalie_teams_on,
+)
 from templating import templates
 
 router = APIRouter()
@@ -609,6 +616,10 @@ def admin_health(request: Request, db: Session = Depends(get_db)):
         "writes_locked": league.writes_locked,
         "keepers_locked": league.keepers_locked,
         "sync_locked": league.sync_locked,
+        "goalie_team_mode": league.goalie_team_mode,
+        "goalie_team_modes": GOALIE_TEAM_MODES,
+        "goalie_team_picks": draft_picks_per_manager(league.goalie_team_mode),
+        "goalie_team_clubs": db.query(PlTeam).filter_by(is_current_pl=True).count(),
         "phase_ctx": services.phase_context(db, league),
         "phase_manual": league.phase_manual,
         "discovery_open": league.discovery_open,
@@ -765,6 +776,22 @@ def admin_lock(
     league.keepers_locked = keepers_lock == "on"
     league.sync_locked = sync_lock == "on"
     db.commit()
+    return RedirectResponse("/admin/health", status_code=303)
+
+
+@router.post("/admin/goalie-team-mode")
+def admin_goalie_team_mode(
+    request: Request, db: Session = Depends(get_db), mode: str = Form(...),
+):
+    """Switch the goalie-team rule. Its own form, not folded into /admin/lock: the
+    locks are transient operational switches and this changes the shape of a draft."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.set_goalie_team_mode(db, league, mode)
+    except RuleViolation as e:
+        return _err(e)
     return RedirectResponse("/admin/health", status_code=303)
 
 

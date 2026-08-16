@@ -57,6 +57,39 @@
   </form>
 </div>
 
+<h2>Goalie Teams</h2>
+<div class="card" style="padding:12px;max-width:480px">
+  <p class="sub">Whether managers draft a Premier League <em>club</em> instead of
+    individual goalkeepers. Currently <strong>{{ goalie_team_mode }}</strong> —
+    {{ goalie_team_picks }} picks per manager.</p>
+  <form method="post" action="/admin/goalie-team-mode">
+    <label>Mode
+      <select name="mode">
+        {% for m in goalie_team_modes %}
+        <option value="{{ m }}" {% if m == goalie_team_mode %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" style="margin-left:8px">Save</button>
+  </form>
+  <ul class="sub" style="margin:8px 0 0;padding-left:18px">
+    <li><strong>off</strong> — the old rule: 15 picks, goalkeepers drafted and kept
+      individually.</li>
+    <li><strong>redraft</strong> — 13 outfielders + 1 goalie team; clubs are drafted
+      fresh every season and can't be kept.</li>
+    <li><strong>keeper</strong> — as redraft, but a club may be one of your 5 keepers,
+      on a 4-year clock.</li>
+  </ul>
+  <p class="sub" style="margin:8px 0 0">
+    {% if goalie_team_clubs >= 20 %}✓ {{ goalie_team_clubs }} clubs synced.
+    {% else %}⚠ Only {{ goalie_team_clubs }} clubs in <code>pl_teams</code> — run
+    <code>POST /admin/sync?force=1</code>, or the goalie-team picker will be empty.{% endif %}
+  </p>
+  <p class="sub">This setting belongs to <em>this</em> league row and is carried forward
+    at rollover. Changing it mid-draft would resize a board that already has picks in
+    it — set it before the draft starts.</p>
+</div>
+
 <h2>Manager Passwords</h2>
 <div class="card" style="padding:12px;max-width:480px">
   <p class="sub">Reset clears a manager's password; they set a new one on next login.

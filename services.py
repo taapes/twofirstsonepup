@@ -64,6 +64,7 @@ from rules import (
     h2h_standings,
     il_can_return,
     il_same_position,
+    GOALIE_TEAM_MODES,
     draft_picks_per_manager,
     generate_draft_slots,
     goalie_team_keepable,
@@ -2999,6 +3000,34 @@ def _goalie_team_history(db: Session) -> dict:
     ):
         out[(sy, tid)] = (fpl, "keeper")
     return out
+
+
+def set_goalie_team_mode(db: Session, league: League, mode: str) -> dict:
+    """Switch the goalie-team rule for this league row.
+
+    Audited, because it is the single flag that changes what a draft IS — 14 picks
+    instead of 15, goalkeepers off the board, clubs on it — and a season that started
+    under one value and finished under the other would be unexplainable afterwards.
+
+    Refuses an unknown value rather than storing it: `goalie_teams_on` treats anything
+    it doesn't recognise as 'off', so a typo would silently hand out 15-pick boards
+    with no error anywhere.
+    """
+    mode = (mode or "off").strip().lower()
+    if mode not in GOALIE_TEAM_MODES:
+        raise RuleViolation(
+            f"unknown goalie-team mode '{mode}' — one of {', '.join(GOALIE_TEAM_MODES)}"
+        )
+    was = league.goalie_team_mode
+    if was == mode:
+        return {"mode": mode, "changed": False}
+    league.goalie_team_mode = mode
+    record_audit(db, league, action="league.goalie_team_mode",
+                 summary=f"Goalie-team rule: {was} → {mode}",
+                 details={"from": was, "to": mode,
+                          "picks_per_manager": draft_picks_per_manager(mode)})
+    db.commit()
+    return {"mode": mode, "changed": True}
 
 
 def goalie_team_owner(db: Session, league: League) -> dict:

@@ -105,3 +105,115 @@ def test_keepers_still_come_off_the_top():
         ["A"], ["A"], {"A": 5}, picks_per_manager=draft_picks_per_manager("redraft")
     )
     assert len(slots) == 9
+
+
+# ---- the admin switch ------------------------------------------------------
+def _admin(client):
+    import os
+
+    r = client.post("/admin/login", data={"password": os.getenv("ADMIN_PASSWORD", "sports")})
+    assert r.status_code in (200, 303), r.text
+    return client
+
+
+@pytest.fixture
+def client(test_session):
+    from fastapi.testclient import TestClient
+
+    from main import app
+
+    return TestClient(app, follow_redirects=False)
+
+
+def _league(session, mode="off"):
+    from models import League
+
+    lg = League(fpl_league_id="1", name="S", season_year=2026, is_current=True,
+                sync_locked=False, phase="offseason", goalie_team_mode=mode)
+    session.add(lg)
+    session.commit()
+    return lg
+
+
+def test_the_mode_can_be_switched_and_is_audited(test_session):
+    """Audited because it is the one flag that changes what a draft IS. A season that
+    started under one value and finished under the other would be unexplainable."""
+    import services
+    from models import AuditLog
+
+    lg = _league(test_session)
+    out = services.set_goalie_team_mode(test_session, lg, "redraft")
+    assert out == {"mode": "redraft", "changed": True}
+    test_session.refresh(lg)
+    assert lg.goalie_team_mode == "redraft"
+
+    entry = (test_session.query(AuditLog)
+             .filter_by(action="league.goalie_team_mode").one())
+    assert entry.details["from"] == "off" and entry.details["to"] == "redraft"
+    assert entry.details["picks_per_manager"] == 14
+
+
+def test_switching_to_the_same_mode_writes_nothing(test_session):
+    import services
+    from models import AuditLog
+
+    lg = _league(test_session, mode="redraft")
+    assert services.set_goalie_team_mode(test_session, lg, "redraft")["changed"] is False
+    assert test_session.query(AuditLog).filter_by(
+        action="league.goalie_team_mode").count() == 0
+
+
+def test_an_unknown_mode_is_refused_not_stored(test_session):
+    """`goalie_teams_on` treats anything it doesn't recognise as 'off', so a typo
+    would silently hand out 15-pick boards with no error anywhere."""
+    import services
+    from rules import RuleViolation
+
+    lg = _league(test_session)
+    with pytest.raises(RuleViolation, match="unknown goalie-team mode"):
+        services.set_goalie_team_mode(test_session, lg, "kepeer")
+    test_session.refresh(lg)
+    assert lg.goalie_team_mode == "off"
+
+
+def test_the_admin_page_switches_it(client, test_session):
+    import services
+
+    lg = _league(test_session)
+    _admin(client)
+    r = client.post("/admin/goalie-team-mode", data={"mode": "redraft"})
+    assert r.status_code == 303, r.text
+    test_session.refresh(lg)
+    assert lg.goalie_team_mode == "redraft"
+
+    body = client.get("/admin/health").text
+    assert "Goalie Teams" in body and "14 picks per manager" in body
+
+
+def test_an_anonymous_request_cannot_switch_it(client, test_session):
+    """Redirected to /who, not /admin/login — the site-wide gate is the OUTER of the
+    two gates and catches this before is_admin is ever consulted."""
+    lg = _league(test_session)
+    r = client.post("/admin/goalie-team-mode", data={"mode": "redraft"})
+    assert r.status_code == 303 and r.headers["location"] == "/who"
+    test_session.refresh(lg)
+    assert lg.goalie_team_mode == "off"
+
+
+def test_a_logged_in_manager_cannot_switch_it(client, test_session):
+    """Past the gate, refused by is_admin — the check that actually protects this."""
+    from auth import hash_password
+    from models import Manager
+
+    lg = _league(test_session)
+    m = Manager(league_id=lg.id, fpl_manager_id="1", name="A", display_name="A",
+                password_hash=hash_password("pw"))
+    test_session.add(m)
+    test_session.commit()
+    assert client.post("/login", data={"manager_id": "1",
+                                       "password": "pw"}).status_code == 303
+
+    r = client.post("/admin/goalie-team-mode", data={"mode": "redraft"})
+    assert r.status_code == 303 and "/admin/login" in r.headers["location"]
+    test_session.refresh(lg)
+    assert lg.goalie_team_mode == "off"
