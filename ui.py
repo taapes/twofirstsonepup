@@ -396,6 +396,7 @@ def keepers_submit(
     request: Request, db: Session = Depends(get_db),
     fpl_manager_id: str = Form(...), season_year: int = Form(...),
     keeper_fpl_ids: list[int] = Form(default=[]), discovery_fpl_id: str = Form(""),
+    keeper_team_code: str = Form(""),
 ):
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "keepers_editable", lock_attr="keepers_locked"):
@@ -407,6 +408,8 @@ def keepers_submit(
             db, league, fpl_manager_id=fpl_manager_id, keeper_fpl_ids=keeper_fpl_ids,
             season_year=season_year,
             discovery_fpl_id=int(discovery_fpl_id) if discovery_fpl_id.strip() else None,
+            keeper_team_code=(int(keeper_team_code) if keeper_team_code.strip()
+                              else None),
         )
     except RuleViolation as e:
         return _err(e)

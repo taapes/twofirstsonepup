@@ -15,6 +15,22 @@
       {% endfor %}
     </tbody>
   </table>
+  {% if candidates.goalie_team_keepable and candidates.goalie_team %}
+  {% set gt = candidates.goalie_team %}
+  <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+    <strong>Goalie team</strong>
+    <p class="sub">Keeping your club costs one of your five, the same as a player.
+      Either way it uses one of your fourteen picks.</p>
+    <label>
+      <input type="checkbox" name="keeper_team_code" value="{{ gt.team_code }}"
+             {% if gt.selected %}checked{% endif %}
+             {% if not gt.eligible %}disabled{% endif %}>
+      {{ gt.player }} <span class="tag">{{ gt.short_name }} · {{ gt.acquisition }}</span>
+      {% if gt.eligible %}<span class="sub">{{ gt.years_remaining }} yrs left</span>
+      {% else %}<span class="pill warn">{{ gt.reason or "max" }}</span>{% endif %}
+    </label>
+  </div>
+  {% endif %}
   <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
     <strong>Discovery keeper (optional 6th)</strong>
     <p class="sub">Search ALL players — the discovery keeper need not be on this roster.</p>

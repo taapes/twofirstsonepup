@@ -44,6 +44,7 @@ from rules import (
     DISCOVERY_OPEN_DAY,
     DISCOVERY_OPEN_MONTH,
     KEEPER_FRESH_DRAFT,
+    KEEPER_FRESH_WAIVER,
     MIN_IL_STAY_GWS,
     PAYOUT_STRUCTURE,
     PHASE_IN_SEASON,
@@ -65,6 +66,7 @@ from rules import (
     il_same_position,
     draft_picks_per_manager,
     generate_draft_slots,
+    goalie_team_keepable,
     goalie_teams_on,
     keeper_eligible,
     keeper_status,
@@ -531,6 +533,24 @@ def sync_plan(db: Session, league: League, now=None) -> str:
     )
 
 
+def _carry_club_seed(db: Session, new_league: League, manager, team_id, remaining: int):
+    """Write (or update) a goalie team's carried keeper clock on the new season."""
+    seed = (
+        db.query(KeeperSeed)
+        .filter_by(manager_id=manager.id, team_id=team_id)
+        .one_or_none()
+    )
+    if seed:
+        seed.years_remaining = remaining
+        seed.league_id = new_league.id
+        seed.season_year = new_league.season_year
+        return
+    db.add(KeeperSeed(
+        league_id=new_league.id, manager_id=manager.id, team_id=team_id,
+        years_remaining=remaining, season_year=new_league.season_year,
+    ))
+
+
 def advance_season(db: Session, old_league: League, new_league: League) -> dict:
     """Roll the league over to a new season (Preseason). The new league row must
     already be synced (the route runs sync for the new FPL id first). Carries forward,
@@ -568,6 +588,7 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
 
     # 2. keeper carry (decrement remaining for players kept for the new season)
     status = _derive_keeper_status(db, old_league)
+    clubs = _derive_gk_team_keeper_status(db, old_league)
     seeded = 0
     for ks in db.query(KeeperSelection).filter_by(
         league_id=old_league.id, season_year=new_league.season_year
@@ -575,6 +596,17 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
         om = db.get(Manager, ks.manager_id)
         nm = new_mgrs.get(om.fpl_manager_id) if om else None
         if not nm:
+            continue
+        if ks.team_id is not None:
+            # A kept goalie team, carried on its own clock. Without this branch it
+            # falls into the `derived is None` skip below and the clock silently never
+            # ticks — the club would be keepable forever, with nothing logged.
+            club = clubs.get(ks.manager_id)
+            if club is None or club["team_id"] != ks.team_id:
+                continue
+            _carry_club_seed(db, new_league, nm, ks.team_id,
+                             max(club["years_remaining"] - 1, 0))
+            seeded += 1
             continue
         derived = status.get(ks.manager_id, {}).get(ks.player_id)
         if derived is None:
@@ -2726,6 +2758,11 @@ def _derive_keeper_status(
     gw = latest_gameweek(db, league)
     if gw is None:
         return {}
+    clubs_on = goalie_teams_on(league.goalie_team_mode)
+    live_positions = (
+        {pid: pos for pid, pos in db.query(Player.id, Player.position)}
+        if clubs_on else {}
+    )
     last_n = gw.number
     # season-scoped identity: `players` is global and always holds the
     # latest season, so names/positions off it are wrong for a past one.
@@ -2891,17 +2928,137 @@ def _derive_keeper_status(
         # Season identity first; fall back to the live pool rather than rendering a
         # raw UUID at someone, which is what a player with no snapshot row used to do.
         p = players.get(pid) or db.get(Player, pid)
+        # Under the goalie-team rule a goalkeeper is not a keepable asset at all — his
+        # CLUB is. Enforced here rather than only in the UI: this dict is what
+        # submit_keepers validates against, so without it a manager could keep Raya
+        # and then draft Arsenal and own him twice on a 14-slot board.
+        # Position comes from the live pool, not the season snapshot, which is last
+        # season's and would misclassify anyone FPL has reclassified.
+        gk_off_board = clubs_on and (live_positions.get(pid) or "").upper() == "GKP"
         status.setdefault(owner, {})[pid] = {
             "player": p.name if p else str(pid),
             "position": p.position if p else None,
             "acquisition": acq,
             "years_remaining": remaining,
-            "eligible": keeper_eligible(remaining),
+            "eligible": keeper_eligible(remaining) and not gk_off_board,
+            "reason": "goalkeepers are kept as a club" if gk_off_board else None,
             # keyed on the OWNER: a KeeperSelection belongs to whoever submitted it
             "kept": (owner, pid) in kept,  # submitted keeper for next season
             "kept_discovery": kept.get((owner, pid), False),
         }
     return status
+
+
+def _goalie_team_history(db: Session) -> dict:
+    """{(season_year, team_id): (fpl_manager_id, 'draft'|'keeper')} across every season.
+
+    Keyed on the FPL entry id, not managers.id: `managers` has one row per manager PER
+    SEASON, so a club held for three years belongs to three different manager rows and
+    a UUID-keyed history would read as three different owners.
+    """
+    out: dict = {}
+    for sy, tid, fpl in (
+        db.query(DraftPick.season_year, DraftPick.team_id, Manager.fpl_manager_id)
+        .join(Manager, Manager.id == DraftPick.manager_id)
+        .filter(DraftPick.team_id.isnot(None), DraftPick.draft_type == "main")
+    ):
+        out[(sy, tid)] = (fpl, "draft")
+    # A keeper selection for season S beats a draft pick for S: you can't do both, and
+    # if somehow both exist the retention is the later fact.
+    for sy, tid, fpl in (
+        db.query(KeeperSelection.season_year, KeeperSelection.team_id,
+                 Manager.fpl_manager_id)
+        .join(Manager, Manager.id == KeeperSelection.manager_id)
+        .filter(KeeperSelection.team_id.isnot(None))
+    ):
+        out[(sy, tid)] = (fpl, "keeper")
+    return out
+
+
+def _derive_gk_team_keeper_status(
+    db: Session,
+    league: League,
+    *,
+    kept_for: set | None = None,
+    kept_all: bool = False,
+) -> dict:
+    """{manager_id: {...}} — each manager's goalie team and its keeper clock.
+
+    A club has no `rosters` rows, so none of `_derive_keeper_status`'s machinery
+    applies: there is no GW-by-GW continuity to walk and no drop to detect. Ownership
+    is a discrete per-season fact (drafted, or kept), so the clock is just how long
+    ago it was acquired — `KEEPER_FRESH_DRAFT` minus the seasons since.
+
+    Returns at most one entry per manager: the club they hold for the CURRENT season,
+    which is the one they're deciding whether to keep for the next.
+
+    A relegated club is void — the slot goes back into the draft — so eligibility is
+    gated on `is_current_pl` as well as the clock.
+
+    `kept` is redacted by default, exactly like the player path: `/v1` has no viewer,
+    and a club keeper is as private as any other until keepers are revealed.
+    """
+    if not goalie_team_keepable(league.goalie_team_mode):
+        return {}
+    cur = league.season_year or 0
+    history = _goalie_team_history(db)
+    if not history:
+        return {}
+
+    teams = {t.id: t for t in db.query(PlTeam)}
+    managers = db.query(Manager).filter_by(league_id=league.id).all()
+    seeds = {
+        s.team_id: s
+        for s in db.query(KeeperSeed).filter(
+            KeeperSeed.league_id == league.id, KeeperSeed.team_id.isnot(None)
+        )
+    }
+    submitted = {
+        s.team_id: s.manager_id
+        for s in db.query(KeeperSelection).filter(
+            KeeperSelection.league_id == league.id,
+            KeeperSelection.season_year == cur + 1,
+            KeeperSelection.team_id.isnot(None),
+        )
+    }
+
+    out: dict = {}
+    for m in managers:
+        held = [tid for (sy, tid), (fpl, _how) in history.items()
+                if sy == cur and fpl == m.fpl_manager_id]
+        if not held:
+            continue
+        tid = held[0]
+        # Walk back while the SAME manager still held the SAME club. A gap means they
+        # lost it and got it again, which restarts the clock exactly as a drop does
+        # for a player.
+        acquired = cur
+        while history.get((acquired - 1, tid), (None, None))[0] == m.fpl_manager_id:
+            acquired -= 1
+        acquisition = history[(acquired, tid)][1]
+        acquisition = "draft" if acquisition == "draft" else "waiver"
+        seed = seeds.get(tid)
+        remaining = (
+            seed.years_remaining if seed is not None
+            else (KEEPER_FRESH_DRAFT if acquisition == "draft" else KEEPER_FRESH_WAIVER)
+            - (cur - acquired)
+        )
+        team = teams.get(tid)
+        in_pl = bool(team and team.is_current_pl)
+        disclose = kept_all or (kept_for and m.id in kept_for)
+        out[m.id] = {
+            "team_id": tid,
+            "team_code": team.code if team else None,
+            "player": team.name if team else str(tid),
+            "short_name": team.short_name if team else None,
+            "position": GOALIE_TEAM_POSITION,
+            "acquisition": acquisition,
+            "years_remaining": remaining,
+            "eligible": keeper_eligible(remaining) and in_pl,
+            "reason": None if in_pl else "relegated — no longer a Premier League club",
+            "kept": bool(disclose and submitted.get(tid) == m.id),
+        }
+    return out
 
 
 def get_keepers(
@@ -2935,11 +3092,17 @@ def get_keepers(
         kept_for=mine,
         kept_all=viewer_is_admin or keepers_revealed(league),
     )
+    clubs = _derive_gk_team_keeper_status(
+        db, league,
+        kept_for=mine,
+        kept_all=viewer_is_admin or keepers_revealed(league),
+    )
     out = []
     for m in managers:
         items = list(status.get(m.id, {}).values())
         items.sort(key=lambda x: (not x["eligible"], -x["years_remaining"], x["player"]))
-        out.append({"manager": m.display, "manager_fpl": m.fpl_manager_id, "players": items})
+        out.append({"manager": m.display, "manager_fpl": m.fpl_manager_id,
+                    "players": items, "goalie_team": clubs.get(m.id)})
     return out
 
 
@@ -2951,10 +3114,17 @@ def submit_keepers(
     keeper_fpl_ids: list[int],
     season_year: int,
     discovery_fpl_id: int | None = None,
+    keeper_team_code: int | None = None,
 ) -> dict:
     """Validate and persist a manager's keeper selection for `season_year`.
     Enforces eligibility + caps (<=5, +1 discovery, <=2 waiver). Replaces any
-    prior selection for that manager/season."""
+    prior selection for that manager/season.
+
+    `keeper_team_code` keeps the manager's goalie team, under `goalie_team_mode =
+    'keeper'`. It costs one of the five, exactly like a player — the difference
+    between the two modes is that cap, not the draft slot: a retained club consumes
+    one of the fourteen picks either way.
+    """
     manager = _resolve_manager(db, league, fpl_manager_id)
     status = _derive_keeper_status(db, league).get(manager.id, {})
     by_fpl = {p.fpl_id: p for p in db.query(Player)}
@@ -2987,7 +3157,19 @@ def submit_keepers(
                     "candidates (traded away?)"
                 )
         selections.append({**st, "fpl_id": fid, "player_id": player.id,
-                           "is_discovery": is_discovery})
+                           "team_id": None, "is_discovery": is_discovery})
+
+    if keeper_team_code is not None:
+        if not goalie_team_keepable(league.goalie_team_mode):
+            raise RuleViolation("goalie teams aren't kept in this league")
+        club = _derive_gk_team_keeper_status(db, league).get(manager.id)
+        team = _resolve_team(db, keeper_team_code)
+        if not club or club["team_id"] != team.id:
+            raise RuleViolation(
+                f"{team.name} is not {manager.display}'s goalie team"
+            )
+        selections.append({**club, "fpl_id": None, "player_id": None,
+                           "team_id": team.id, "is_discovery": False})
 
     errors = validate_keeper_selection(
         selections, has_discovery_keeper=discovery_fpl_id is not None
@@ -3004,6 +3186,7 @@ def submit_keepers(
                 league_id=league.id,
                 manager_id=manager.id,
                 player_id=s["player_id"],
+                team_id=s["team_id"],
                 season_year=season_year,
                 is_discovery=s["is_discovery"],
             )
@@ -3013,7 +3196,8 @@ def submit_keepers(
                           f"{season_year}: " + ", ".join(s["player"] for s in selections)),
                  manager_ids=[manager.id],
                  details={"season_year": season_year,
-                          "keeper_fpl_ids": all_fids, "discovery_fpl_id": discovery_fpl_id})
+                          "keeper_fpl_ids": all_fids, "discovery_fpl_id": discovery_fpl_id,
+                          "keeper_team_code": keeper_team_code})
     db.commit()
     return {
         "manager": manager.display,
@@ -3045,6 +3229,9 @@ def get_keeper_selections(
     Private until keepers are revealed: without a viewer this returns [], which is
     what the unauthenticated /v1 endpoint should say while selections are still open.
     """
+    # Two queries, not one join. A goalie team has no PlayerSeason row, so the inner
+    # join that resolves a player's season identity silently drops every club
+    # selection — the keeper would simply vanish from the report.
     rows = (
         db.query(KeeperSelection, Manager, PlayerSeason)
         .join(Manager, Manager.id == KeeperSelection.manager_id)
@@ -3054,21 +3241,32 @@ def get_keeper_selections(
                 PlayerSeason.league_id == league.id)
         .all()
     )
+    club_rows = (
+        db.query(KeeperSelection, Manager, PlTeam)
+        .join(Manager, Manager.id == KeeperSelection.manager_id)
+        .join(PlTeam, PlTeam.id == KeeperSelection.team_id)
+        .filter(KeeperSelection.league_id == league.id,
+                KeeperSelection.season_year == season_year)
+        .all()
+    )
     show_all = viewer_is_admin or keepers_revealed(league)
     # A selection whose player has since been traded away no longer counts, so it
     # must not be listed as a keeper either — the manager is simply one short.
-    counts = {(s.manager_id, s.player_id)
+    counts = {(s.manager_id, s.player_id, s.team_id)
               for s in effective_keeper_selections(db, league, season_year)}
     by_manager: dict = {}
-    for sel, m, p in rows:
-        if (sel.manager_id, sel.player_id) not in counts:
+    for sel, m, thing in rows + club_rows:
+        if (sel.manager_id, sel.player_id, sel.team_id) not in counts:
             continue
         mine = viewer_fpl is not None and m.fpl_manager_id == str(viewer_fpl)
         if not (show_all or mine):
             continue
-        by_manager.setdefault(m.display, []).append(
-            {"player": p.name, "position": p.position, "is_discovery": sel.is_discovery}
-        )
+        by_manager.setdefault(m.display, []).append({
+            "player": thing.name,
+            "position": (GOALIE_TEAM_POSITION if sel.team_id
+                         else getattr(thing, "position", None)),
+            "is_discovery": sel.is_discovery,
+        })
     return [{"manager": k, "keepers": v} for k, v in sorted(by_manager.items())]
 
 
@@ -3820,7 +4018,10 @@ def effective_keeper_selections(
         for s in db.query(KeeperSelection).filter_by(
             league_id=league.id, season_year=season_year
         )
-        if owner.get(s.player_id) == s.manager_id
+        # A goalie team has no `rosters` row, so the player-keyed ownership map has no
+        # opinion about it and would drop every club selection on the floor — costing
+        # the manager the draft slot the keeper was supposed to save.
+        if s.team_id is not None or owner.get(s.player_id) == s.manager_id
     ]
 
 
@@ -5084,8 +5285,58 @@ def data_health(db: Session, league: League) -> list[dict]:
         if gw is not None else set()
     )
     unseeded = on_roster - seeded
+    if goalie_teams_on(league.goalie_team_mode):
+        # A goalkeeper can never be an individual keeper now, so he can never need a
+        # seed. Left in, this check lists every keeper in the league, forever, and the
+        # genuinely unseeded players get lost in it.
+        gk_ids = {
+            pid for (pid,) in db.query(Player.id).filter(Player.position == "GKP")
+        }
+        unseeded -= gk_ids
     add("rostered players have a keeper seed", not unseeded,
         f"{len(unseeded)} without a seed" if unseeded else "ok")
+
+    if goalie_teams_on(league.goalie_team_mode):
+        upcoming = (league.season_year or 0) + 1
+        picks = (
+            db.query(DraftPick)
+            .filter(DraftPick.league_id == league.id,
+                    DraftPick.season_year == upcoming,
+                    DraftPick.draft_type == "main",
+                    DraftPick.team_id.isnot(None))
+            .all()
+        )
+        names = {m.id: m.display for m in mgrs}
+        tnames = {t.id: t.name for t in db.query(PlTeam)}
+        per_manager: dict = {}
+        per_club: dict = {}
+        for dp in picks:
+            per_manager.setdefault(dp.manager_id, []).append(dp)
+            per_club.setdefault(dp.team_id, []).append(dp)
+        # Both are backed by partial unique indexes, so a violation means somebody
+        # wrote around the service layer. Surfaced anyway: the draft is unrecoverable
+        # once two managers believe they own the same club.
+        doubled = [names.get(mid, "?") for mid, rows in per_manager.items() if len(rows) > 1]
+        add("one goalie team per manager", not doubled,
+            ", ".join(doubled) if doubled else f"{len(per_manager)}/{len(mgrs)} drafted")
+        shared = [tnames.get(tid, "?") for tid, rows in per_club.items() if len(rows) > 1]
+        add("no club drafted twice", not shared,
+            ", ".join(shared) if shared else "ok")
+
+        # A submitted keeper that resolves to nothing is invisible everywhere else:
+        # advance_season skips it silently and the manager just quietly loses a slot.
+        sel = db.query(KeeperSelection).filter_by(
+            league_id=league.id, season_year=upcoming
+        ).all()
+        counted = {
+            (x.manager_id, x.player_id, x.team_id)
+            for x in effective_keeper_selections(db, league, upcoming)
+        }
+        stale = [names.get(x.manager_id, "?") for x in sel
+                 if (x.manager_id, x.player_id, x.team_id) not in counted]
+        add("submitted keepers all still count", not stale,
+            f"{len(stale)} no longer held ({', '.join(sorted(set(stale)))})"
+            if stale else "ok")
 
     # pick trades must name an original owner
     bad_picks = (
@@ -5125,12 +5376,11 @@ def keeper_candidates(db: Session, league: League, fpl_manager_id: str) -> dict:
     items.sort(key=lambda x: (not x["eligible"], -x["years_remaining"], x["player"]))
     # current submitted selection (upcoming season) so the form can preselect
     upcoming = (league.season_year or 0) + 1
-    selected = {
-        s.player_id: s.is_discovery
-        for s in db.query(KeeperSelection).filter_by(
-            league_id=league.id, manager_id=manager.id, season_year=upcoming
-        )
-    }
+    rows_sel = db.query(KeeperSelection).filter_by(
+        league_id=league.id, manager_id=manager.id, season_year=upcoming
+    ).all()
+    selected = {s.player_id: s.is_discovery for s in rows_sel if s.player_id}
+    selected_team = next((s.team_id for s in rows_sel if s.team_id), None)
     # Match on the stable player_id, not fpl_id: a departed player's fpl_id is None,
     # and keying on that would make EVERY departed player look selected.
     for it in items:
@@ -5145,8 +5395,16 @@ def keeper_candidates(db: Session, league: League, fpl_manager_id: str) -> dict:
         p = db.get(Player, disc_pid)
         if p:
             discovery = {"fpl_id": p.fpl_id, "player": p.name}
+    # The manager's goalie team, under 'keeper' mode. Empty dict rather than a missing
+    # key so the template can ask once; `keepable` says whether the checkbox exists at
+    # all, which is the difference between the two modes.
+    club = _derive_gk_team_keeper_status(db, league, kept_for={manager.id}).get(manager.id)
+    if club is not None:
+        club = {**club, "selected": selected_team == club["team_id"]}
     return {"manager": manager.display, "fpl": manager.fpl_manager_id,
-            "season": upcoming, "players": items, "discovery": discovery}
+            "season": upcoming, "players": items, "discovery": discovery,
+            "goalie_team": club,
+            "goalie_team_keepable": goalie_team_keepable(league.goalie_team_mode)}
 
 
 def get_trade_notes(db: Session, league: League) -> list[dict]:

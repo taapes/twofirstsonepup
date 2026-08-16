@@ -427,6 +427,16 @@ class KeeperSeed(Base):
     __tablename__ = "keeper_seeds"
     __table_args__ = (
         UniqueConstraint("manager_id", "player_id", name="uq_keeper_seed_mgr_player"),
+        CheckConstraint(
+            "num_nonnulls(player_id, team_id) = 1",
+            name="ck_keeper_seed_player_or_team",
+        ),
+        Index(
+            "uq_keeper_seed_mgr_team",
+            "manager_id", "team_id",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -436,8 +446,13 @@ class KeeperSeed(Base):
     manager_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("managers.id"), index=True
     )
-    player_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("players.id"), index=True
+    player_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), index=True, nullable=True
+    )
+    # A goalie team's carried clock. Unused in the rule's first season — no club has
+    # any history yet — but the rollover needs somewhere to write from year two.
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pl_teams.id"), nullable=True
     )
     years_remaining: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     season_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -455,6 +470,25 @@ class KeeperSelection(Base):
         UniqueConstraint(
             "manager_id", "player_id", "season_year", name="uq_keeper_sel_mgr_player_season"
         ),
+        CheckConstraint(
+            "num_nonnulls(player_id, team_id) = 1",
+            name="ck_keeper_sel_player_or_team",
+        ),
+        # A manager keeps at most one goalie team, and a club is kept by at most one
+        # manager. Partial, because Postgres counts NULLs as distinct and every
+        # ordinary player row would otherwise register as its own club.
+        Index(
+            "uq_keeper_sel_one_team_per_manager",
+            "league_id", "manager_id", "season_year",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_keeper_sel_team_once",
+            "league_id", "season_year", "team_id",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -464,8 +498,12 @@ class KeeperSelection(Base):
     manager_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("managers.id"), index=True
     )
-    player_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("players.id"), index=True
+    player_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), index=True, nullable=True
+    )
+    # A kept goalie team. Mutually exclusive with player_id (see the CHECK).
+    team_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pl_teams.id"), nullable=True
     )
     season_year: Mapped[int] = mapped_column(Integer, index=True)
     is_discovery: Mapped[bool] = mapped_column(

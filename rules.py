@@ -476,9 +476,18 @@ def validate_keeper_selection(
     if len(selections) > limit:
         errors.append(f"{len(selections)} keepers selected, limit is {limit}")
 
-    ineligible = [s["player"] for s in selections if not s.get("eligible")]
-    if ineligible:
-        errors.append("ineligible (4-year limit / dropped): " + ", ".join(ineligible))
+    # Grouped by REASON. A selection may carry one (a goalkeeper under the goalie-team
+    # rule is ineligible for a reason that has nothing to do with a clock), and a
+    # manager told "4-year limit / dropped" about their goalkeeper goes looking for a
+    # bug that isn't there.
+    by_reason: dict = {}
+    for s in selections:
+        if not s.get("eligible"):
+            by_reason.setdefault(
+                s.get("reason") or "4-year limit / dropped", []
+            ).append(s["player"])
+    for reason, names in by_reason.items():
+        errors.append(f"ineligible ({reason}): " + ", ".join(names))
 
     waiver = [
         s for s in selections
