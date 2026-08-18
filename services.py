@@ -5772,39 +5772,71 @@ def next_open_pick(board: list[dict]) -> dict | None:
 # ---- league history / honor roll ----
 def get_history(db: Session, league: League) -> dict:
     """Season-by-season winners + career honor roll + per-season standings +
-    discovery-draft results."""
+    discovery-draft results. Reads across all league rows, not just the current one.
+    The `league` parameter is retained for signature stability but not used by the queries."""
     from models import DiscoveryResult, HistoricalStanding, ManagerHonors, SeasonHistory
 
-    seasons = (
+    # Dedupe by year, NEWEST LEAGUE ROW WINS. The tiebreak is the whole point: two
+    # rows for one year only happen around a rollover, when the same history has been
+    # imported onto both the outgoing and incoming league row, and the incoming one is
+    # the correction. Without the League join the winner was whatever order Postgres
+    # happened to return — in practice heap order, so the STALE row won.
+    seen_years = set()
+    deduped_seasons = []
+    for s in (
         db.query(SeasonHistory)
-        .filter_by(league_id=league.id)
-        .order_by(SeasonHistory.year.desc())
+        .join(League, League.id == SeasonHistory.league_id)
+        .order_by(League.season_year.desc(), SeasonHistory.year.desc())
         .all()
-    )
-    honors = (
+    ):
+        if s.year not in seen_years:
+            deduped_seasons.append(s)
+            seen_years.add(s.year)
+    # Display order is by year; the league-row ordering above only picked the winners.
+    deduped_seasons.sort(key=lambda s: s.year or "", reverse=True)
+
+    # Same rule, keyed on the manager instead of the year: honors are a career total,
+    # so the newest row's figures supersede an older row's rather than merging.
+    seen_managers = set()
+    deduped_honors = []
+    for h in (
         db.query(ManagerHonors)
-        .filter_by(league_id=league.id)
-        .order_by(ManagerHonors.titles.desc(), ManagerHonors.cups.desc(), ManagerHonors.manager_name)
+        .join(League, League.id == ManagerHonors.league_id)
+        .order_by(League.season_year.desc())
         .all()
+    ):
+        if h.manager_name not in seen_managers:
+            deduped_honors.append(h)
+            seen_managers.add(h.manager_name)
+    deduped_honors.sort(
+        key=lambda h: (-(h.titles or 0), -(h.cups or 0), h.manager_name or "")
     )
+
     standings_by_season: dict = {}
     for s in (
         db.query(HistoricalStanding)
-        .filter_by(league_id=league.id)
         .order_by(HistoricalStanding.year.desc(), HistoricalStanding.rank)
         .all()
     ):
-        standings_by_season.setdefault(s.year, []).append(
-            {"rank": s.rank, "team": s.team_name, "manager": s.manager_name,
-             "w": s.wins, "d": s.draws, "l": s.losses, "pf": s.points_for, "h2h": s.h2h_points}
-        )
+        if s.year not in standings_by_season:
+            standings_by_season[s.year] = []
+            standings_by_season[s.year].append(
+                {"rank": s.rank, "team": s.team_name, "manager": s.manager_name,
+                 "w": s.wins, "d": s.draws, "l": s.losses, "pf": s.points_for, "h2h": s.h2h_points}
+            )
+        else:
+            # Year already seen; only add if this is the first occurrence (ordering guarantees this)
+            standings_by_season[s.year].append(
+                {"rank": s.rank, "team": s.team_name, "manager": s.manager_name,
+                 "w": s.wins, "d": s.draws, "l": s.losses, "pf": s.points_for, "h2h": s.h2h_points}
+            )
     return {
         "seasons": [
             {"year": s.year, "league": s.league_winner, "cup": s.cup_winner, "pup": s.pup_winner}
-            for s in seasons
+            for s in deduped_seasons
         ],
         "honors": [
-            {"manager": h.manager_name, "titles": h.titles, "cups": h.cups} for h in honors
+            {"manager": h.manager_name, "titles": h.titles, "cups": h.cups} for h in deduped_honors
         ],
         "standings_by_season": [
             {"year": y, "rows": rows} for y, rows in standings_by_season.items()
@@ -5815,18 +5847,22 @@ def get_history(db: Session, league: League) -> dict:
 
 
 def _cups_by_season(db: Session, league: League) -> list[dict]:
+    """Cup brackets by season, across all league rows. The `league` parameter is
+    retained for signature stability but not used."""
     from models import CupMatch
 
     by_season: dict = {}
     for c in (
         db.query(CupMatch)
-        .filter_by(league_id=league.id)
         .order_by(CupMatch.season.desc(), CupMatch.bracket, CupMatch.round, CupMatch.slot)
         .all()
     ):
+        # Dedupe by season: only add the first occurrence (from ordering, that's the newest row)
+        if c.season not in by_season:
+            by_season[c.season] = []
         label = "Cup" if c.bracket == "cup" else "Pup Cup"
         rd = {1: "R1", 2: "Semi", 3: "Final"}.get(c.round, f"R{c.round}")
-        by_season.setdefault(c.season, []).append({
+        by_season[c.season].append({
             "bracket": label, "round": rd, "seed": c.seed,
             "manager": c.manager_label, "total": c.total,
         })
@@ -5834,16 +5870,20 @@ def _cups_by_season(db: Session, league: League) -> list[dict]:
 
 
 def _discovery_by_season(db: Session, league: League) -> list[dict]:
+    """Discovery results by season, across all league rows. The `league` parameter is
+    retained for signature stability but not used."""
     from models import DiscoveryResult
 
     by_season: dict = {}
     for r in (
         db.query(DiscoveryResult)
-        .filter_by(league_id=league.id)
         .order_by(DiscoveryResult.season.desc(), DiscoveryResult.pick_number)
         .all()
     ):
-        by_season.setdefault(r.season, []).append(
+        # Dedupe by season: only add the first occurrence (from ordering, that's the newest row)
+        if r.season not in by_season:
+            by_season[r.season] = []
+        by_season[r.season].append(
             {"id": str(r.id), "pick": r.pick_number, "round": r.round,
              "manager": r.manager_name, "player": r.player_name}
         )

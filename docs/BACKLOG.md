@@ -876,15 +876,33 @@ they're a standing multi-year outlook on pick ownership, not season-scoped histo
 ### History page is scoped to current league row
 
 **Priority:** `P2` — surfaces after every rollover.
-**Status:** `open`. Found 2026-08-17.
+**Status:** `done`. Completed 2026-08-18.
 
-`get_history(db, league)` (`services.py:5392`) filters `SeasonHistory`, `ManagerHonors`,
-and `HistoricalStanding` all by `league_id=league.id`. After rollover the current league
-is the new season's row; it has no history rows yet. History is by definition
-cross-season and should query across all league rows, not just the current one. Fix:
-drop the `league_id` filter (or join across all leagues belonging to the same logical
-league group — currently there is only ever one logical league, so a straight drop is
-correct) and sort by year descending.
+**Fix applied.** Removed `league_id` filter from all 5 queries across 3 functions:
+- `get_history`: `SeasonHistory`, `ManagerHonors`, `HistoricalStanding`
+- `_cups_by_season`: `CupMatch`
+- `_discovery_by_season`: `DiscoveryResult`
+
+All 5 queries now read across all league rows, not just the current one.
+
+**Deduplication — "first wins" needed a defined `first`.** `seasons` (by year) and
+`honors` (by manager name) dedupe; `standings`/`cups`/`discovery` MERGE their groups by
+year, as specified. The two deduping queries now join `League` and order by
+`League.season_year DESC`, so the **newest league row wins**, then re-sort for display.
+Without that join the winner was whatever order Postgres returned — in practice heap
+order, so the *stale* row won. This matters exactly where the duplicate arises: around a
+rollover, when the same history is imported onto both the outgoing and incoming row and
+the incoming one is the correction. Pinned by
+`test_history_dedupes_duplicate_years`, and mutation-tested (dropping the join fails it).
+
+**Note for whoever touches these tests:** `SeasonHistory.year`, `HistoricalStanding.year`,
+`CupMatch.season` and `DiscoveryResult.season` are **VARCHAR**, not Integer — only
+`League.season_year` is an int. The first cut of the tests compared `'2025' == 2025` and
+silently passed only because they were being SKIPPED for want of `TEST_DATABASE_URL`.
+Functions retain their `league` parameter for signature stability; it is noted as unused
+in docstrings. Tests added in `tests/test_history_cross_season.py` verify cross-row
+reads and deduplication. The template (`templates/history.html`) is unchanged; the
+query result shapes are identical.
 
 ---
 
