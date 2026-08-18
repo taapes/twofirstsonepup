@@ -1270,6 +1270,48 @@ def admin_pick_delete(
     return _corrections_redirect()
 
 
+@router.post("/admin/corrections/discovery/link")
+def admin_discovery_link(
+    request: Request, db: Session = Depends(get_db),
+    season_year: str = Form(...), pick_number: str = Form(...),
+    player_fpl_id: str = Form(...),
+):
+    """Attach a real player to a free-text discovery pick. Deliberately a human
+    decision — see services.link_discovery_pick for why nothing auto-matches."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.link_discovery_pick(
+            db, league,
+            season_year=_safe_int(season_year, 2000, 2100, field="season"),
+            pick_number=_safe_int(pick_number, 1, 999, field="pick number"),
+            player_fpl_id=_safe_int(player_fpl_id, 1, 10_000_000, field="player id"),
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/discovery/unlink")
+def admin_discovery_unlink(
+    request: Request, db: Session = Depends(get_db),
+    season_year: str = Form(...), pick_number: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.unlink_discovery_pick(
+            db, league,
+            season_year=_safe_int(season_year, 2000, 2100, field="season"),
+            pick_number=_safe_int(pick_number, 1, 999, field="pick number"),
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
 @router.get("/admin/keepers", response_class=HTMLResponse)
 def admin_keepers(request: Request, db: Session = Depends(get_db)):
     """Correct a player's derived keeper facts. Acquisition drives the =<2 waiver

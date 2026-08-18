@@ -188,7 +188,10 @@ Write tests for these. They are custom and non-obvious:
   `POST /admin/.../keepers`, `GET /v1/.../keeper-selections/{year}`,
   `keeper_selections` table) — enforces ≤5 keepers (+1 with a discovery keeper),
   ≤2 waiver-acquired (discovery excluded), all eligible; replaces the prior
-  submission for that season.
+  submission for that season. Acquisition labels are `rules.KEEPER_ACQUISITIONS` =
+  `draft | waiver | trade | discovery`; only `waiver` shortens the clock (3 vs 4) and
+  only `waiver` counts against the ≤2 cap. See the discovery-draft bullet for how the
+  `discovery` label is asserted — it can't be derived from rosters or trades.
   **Selections are PRIVATE until they lock** (`rules.keepers_revealed` = `keepers_locked`
   or the phase has left offseason; `enter_draft_phase` sets both, so the draft reveals
   them). Redacted in **services, not templates** — `/v1` is exempt from the login gate and
@@ -269,6 +272,34 @@ Write tests for these. They are custom and non-obvious:
   one bonus keeper allowed. *Built:* `services.get_discovery_board` (2-round snake
   over reverse standings), `GET /discovery/{year}` + `/search` + `POST .../pick`
   (draft_type='discovery'), gated by the `discovery_open` phase flag.
+  **A discovery acquisition is draft-length (4 years), not waiver-length**, and carries
+  its own `"discovery"` label in `rules.KEEPER_ACQUISITIONS`. It has to be asserted
+  explicitly, because `_derive_keeper_status` reads only rosters and trades and a
+  September pick is neither — he joins in January, so he's on no GW1 roster and has no
+  `Trade` row, and falls through to `("waiver", 3)`. Two independent witnesses supply
+  it, and they cover each other's blind spot: `discovery_linked` (from `DraftPick`,
+  public, so it works for **viewer-less** callers) and `discovery_flagged` (every
+  `is_discovery` selection — from `KeeperSelection`, so it stays behind the keeper
+  privacy gate and is empty at `submit_keepers` time, which is why that function
+  synthesizes the label itself on BOTH the on- and off-roster paths). Don't collapse
+  them. `discovery_only` is the narrower off-roster subset and keeps its own job of
+  widening the candidate set. The synthesized label is gated on **not dropped** —
+  `acquisition=` short-circuits `keeper_status`'s dropped branch, so ungated it would
+  launder a genuine drop-and-re-acquire clean forever. A seed still beats all of it.
+  **`"discovery"` the LABEL is not `KeeperSelection.is_discovery` the FLAG**: the flag
+  is the bonus 6th slot and is what `validate_keeper_selection` keys the cap exemption
+  on. A discovery-acquired player kept in an ordinary slot is labelled `"discovery"`
+  and raises no cap. Don't conflate them.
+  **Linking a pick to a real player is `services.link_discovery_pick`, admin-only and
+  never automatic.** A pick is recorded as free text (`record_discovery_pick`) because
+  the player has no `players` row yet; linking is what lets the derivation see it at
+  all. `Player.name` is FPL's short `web_name` while managers type full names, so
+  name-matching is a coin flip and a wrong link hands someone another manager's keeper
+  on a 4-year clock — nothing downstream would flag it. `player_label` is kept as
+  entered (the board still prefers it). No migration was needed: the `DraftPick` CHECK
+  is team-scoped. Admin form on `/admin/corrections`; `unlink_discovery_pick` undoes a
+  mislink. Linking also makes him `taken` in **discovery** search only — the overlay is
+  `draft_type`-scoped, so the main draft is untouched.
 - **Main draft:** Lottery mechanics are OUT of the app — the commissioner sets
   the round-1 order (`POST /admin/.../draft/order`, stored in `draft_lottery`).
   Rounds 2+ = reverse standings. Keepers are FREE: a manager makes 15−keepers

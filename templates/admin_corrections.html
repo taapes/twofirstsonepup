@@ -53,9 +53,16 @@
 
 <h2>Draft picks <span class="sub">({{ picks|length }})</span></h2>
 <div class="card" style="padding:10px;overflow-x:auto">
+  <p class="sub">A <strong>discovery</strong> pick is recorded as free text, because the
+    player isn't in the Premier League yet. Once he joins, link it to his real player
+    record — that link is what gives him the 4-year discovery keeper clock instead of a
+    3-year waiver one. Enter his FPL id (the <code>fpl_id</code> shown on the Players
+    tab). Nothing is ever matched by name automatically: FPL stores short names and
+    managers call out full ones, and a wrong link hands someone another manager's
+    keeper.</p>
   {% if picks %}
   <table class="stats">
-    <thead><tr><th>Season</th><th>Type</th><th class="num">Rd</th><th class="num">Pick</th><th>Manager</th><th>Player</th><th></th></tr></thead>
+    <thead><tr><th>Season</th><th>Type</th><th class="num">Rd</th><th class="num">Pick</th><th>Manager</th><th>Player</th><th>Link</th><th></th></tr></thead>
     <tbody>
       {% for p in picks %}
       <tr>
@@ -65,6 +72,30 @@
         <td class="num">{{ p.pick_number }}</td>
         <td>{{ p.manager or "—" }}</td>
         <td>{{ p.player or "—" }}</td>
+        <td style="white-space:nowrap">
+          {% if p.linkable %}
+            {% if p.linked %}
+              <span class="tag">linked</span>
+              {% if p.player_label and p.player_label != p.linked_player %}
+                <span class="sub">(as entered: {{ p.player_label }})</span>
+              {% endif %}
+              <form method="post" action="/admin/corrections/discovery/unlink" style="display:inline"
+                    onsubmit="return confirm('Unlink this pick? The free-text name stays; only the player record is detached.')">
+                <input type="hidden" name="season_year" value="{{ p.season_year }}">
+                <input type="hidden" name="pick_number" value="{{ p.pick_number }}">
+                <button class="mini" type="submit">Unlink</button>
+              </form>
+            {% else %}
+              <form method="post" action="/admin/corrections/discovery/link" style="display:inline">
+                <input type="hidden" name="season_year" value="{{ p.season_year }}">
+                <input type="hidden" name="pick_number" value="{{ p.pick_number }}">
+                <input name="player_fpl_id" inputmode="numeric" placeholder="FPL id"
+                       style="width:80px" required>
+                <button class="mini" type="submit">Link</button>
+              </form>
+            {% endif %}
+          {% else %}<span class="sub">—</span>{% endif %}
+        </td>
         <td>
           <form method="post" action="/admin/corrections/pick/delete" style="display:inline"
                 onsubmit="return confirm('Delete this pick? The slot re-opens so it can be recorded again.')">

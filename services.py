@@ -2832,10 +2832,11 @@ def set_keeper_override(
 ) -> dict:
     """Correct a player's derived keeper facts for a manager.
 
-    `acquisition` is 'draft' | 'waiver' | 'trade'; both fields are optional, and only
-    what's passed is changed. Overriding acquisition matters because the =<2 waiver
-    keeper cap counts on it, and the derivation calls any unexplained roster gap a
-    drop — a missing injury-list record is enough to cost someone a waiver slot.
+    `acquisition` is one of `rules.KEEPER_ACQUISITIONS` ('draft' | 'waiver' | 'trade' |
+    'discovery'); both fields are optional, and only what's passed is changed.
+    Overriding acquisition matters because the =<2 waiver keeper cap counts on it, and
+    the derivation calls any unexplained roster gap a drop — a missing injury-list
+    record is enough to cost someone a waiver slot.
     """
     from rules import KEEPER_ACQUISITIONS
 
@@ -3154,10 +3155,48 @@ def _derive_keeper_status(
     # selection (player_id NULL); `- final_candidates` keeps this additive only for
     # pairs with no roster/IL story to tell. Scoped by `kept`, itself already
     # privacy-filtered above, so this can't leak a hidden pick to an unentitled viewer.
-    discovery_only = {
+    #
+    # Two sets, deliberately: `discovery_flagged` is EVERY is_discovery selection, on
+    # roster or off, and is what the acquisition channel below reads. `discovery_only`
+    # is the off-roster subset, and is the one that widens the candidate set — an
+    # on-roster pick is already a candidate and must not be added twice.
+    discovery_flagged = {
         (m, p) for (m, p), is_disc in kept.items() if is_disc and p is not None
-    } - final_candidates
+    }
+    discovery_only = discovery_flagged - final_candidates
     final_candidates |= discovery_only
+
+    # A discovery pick LINKED to a real player (services.link_discovery_pick) is the
+    # only way this derivation can see the September discovery draft at all: it reads
+    # rosters and trades, and a discovery pick is neither. Without it a player taken in
+    # September who joins the PL in January is on nobody's GW1 roster and has no Trade
+    # row, so he falls through rules.keeper_status to ("waiver", 3) — a keeper year
+    # short of the draft-length clock a discovery acquisition earns.
+    #
+    # This is NOT redundant with `discovery_flagged` above. That set comes from
+    # KeeperSelection and so is empty for any caller with no viewer — including
+    # submit_keepers, which is exactly when the label matters most. This one comes from
+    # DraftPick, which is public draft history under no privacy gate at all, so it
+    # works for every caller. They cover each other's blind spot.
+    #
+    # Keyed through Manager.fpl_manager_id, never managers.id: `managers` has one row
+    # per manager PER SEASON, and a pick made before a rollover lives on the OUTGOING
+    # league row under that row's own manager uuid. Same hazard, same fix, as
+    # _goalie_team_history.
+    mine = {
+        m.fpl_manager_id: m.id
+        for m in db.query(Manager).filter_by(league_id=league.id)
+    }
+    discovery_linked = set()
+    for pid_linked, fpl in (
+        db.query(DraftPick.player_id, Manager.fpl_manager_id)
+        .join(Manager, Manager.id == DraftPick.manager_id)
+        .filter(DraftPick.draft_type == "discovery",
+                DraftPick.player_id.isnot(None))
+    ):
+        mid_here = mine.get(fpl)
+        if mid_here is not None:
+            discovery_linked.add((mid_here, pid_linked))
 
     def _dropped(mid, pid, upto=None) -> bool:
         # A candidate reached purely through IL coverage (see final_candidates
@@ -3213,17 +3252,33 @@ def _derive_keeper_status(
             inherited = s_acq
             if carried is None:
                 carried = s_years
+        was_dropped = _dropped(mid, pid, upto)
         memo[key] = keeper_status(
             1 in presence.get((mid, pid), set()),   # started_with_manager (on GW1 roster)
             (mid, pid) in traded_in,
-            _dropped(mid, pid, upto),
+            was_dropped,
             carried,
-            # A pure discovery candidate (off-roster, off-IL) has none of the signals
-            # above to go on — the discovery draft IS the acquisition, worth a full
-            # draft-length clock, exactly what submit_keepers already synthesizes at
-            # submission time. A commissioner seed still wins over it, same as always.
+            # The discovery draft IS an acquisition, worth a full draft-length clock —
+            # but it leaves no trace in rosters or trades, so without an explicit label
+            # here every discovery player derives as an ordinary waiver pickup. Two
+            # independent witnesses to it (see where each is built): the manager's own
+            # is_discovery selection, and a commissioner-linked discovery DraftPick.
+            #
+            # Gated on `not was_dropped` so the label can only ever ADD the missing
+            # story, never erase one the roster actually tells: a player genuinely
+            # dropped and re-acquired is a waiver pickup no matter how he first
+            # arrived, and `acquisition=` short-circuits that branch entirely. An
+            # off-roster discovery keeper has no roster history at all, so _dropped is
+            # False for him and this gate is transparent to the case it matters for.
+            #
+            # A commissioner seed still wins over all of it, same as always.
             acquisition=seed_acq.get((mid, pid)) or (
-                "discovery" if (mid, pid) in discovery_only else None
+                "discovery"
+                if not was_dropped and (
+                    (mid, pid) in discovery_flagged
+                    or (mid, pid) in discovery_linked
+                )
+                else None
             ),
             traded_from=inherited,
         )
@@ -3772,6 +3827,13 @@ def submit_keepers(
     manager = _resolve_manager(db, league, fpl_manager_id)
     status = _derive_keeper_status(db, league).get(manager.id, {})
     by_fpl = {p.fpl_id: p for p in db.query(Player)}
+    # A commissioner seed is the override of record and outranks the discovery clock
+    # synthesized below, exactly as it outranks every other derived value.
+    # manager_id is already league-scoped (one manager row per season), so it alone
+    # is the right filter — the same one set_keeper_override writes through.
+    seeded = {
+        s.player_id for s in db.query(KeeperSeed).filter_by(manager_id=manager.id)
+    }
 
     # the discovery keeper can be any player (off-roster), so the roster
     # checkboxes won't include it — make sure it's part of the set to persist
@@ -3795,18 +3857,42 @@ def submit_keepers(
                 st = {"player": player.name, "eligible": True,
                       "acquisition": "discovery",
                       "years_remaining": KEEPER_FRESH_DRAFT}
-                if (goalie_teams_on(league.goalie_team_mode)
-                        and (player.position or "").upper() == "GKP"):
-                    # The one door left open into individual goalkeeper ownership: the
-                    # discovery keeper may be ANY player, so it bypasses the roster
-                    # candidate list where the rule is otherwise enforced.
-                    st = {**st, "eligible": False,
-                          "reason": "goalkeepers are kept as a club"}
             else:
                 raise RuleViolation(
                     f"{player.name} is not one of {manager.display}'s keeper "
                     "candidates (traded away?)"
                 )
+        elif is_discovery and player.id not in seeded:
+            # THE BUG THIS FIXES. The synthesis above only ever ran in the off-roster
+            # branch, so it missed the ordinary success case exactly: a September
+            # discovery pick who JOINS the Premier League and is on the roster — which
+            # is the only way he becomes keepable at all. There `status.get` hits and
+            # the derived ("waiver", 3) won, costing him a keeper year, because the
+            # derivation reads rosters and trades and a discovery pick is neither.
+            #
+            # This can't be left to _derive_keeper_status's discovery_flagged set:
+            # that reads KeeperSelection, and this call deliberately passes no viewer,
+            # so it is empty here. A LINKED discovery pick does reach the derivation
+            # (discovery_linked) and would already have produced this — but linking is
+            # a manual admin step that may not have happened yet, and the manager
+            # ticking the discovery box is itself the assertion.
+            st = {**st, "acquisition": "discovery",
+                  "years_remaining": KEEPER_FRESH_DRAFT,
+                  # Recomputed, not inherited: a derived ("waiver", 0) carries
+                  # eligible=False, which would survive the corrected clock and refuse
+                  # a legitimate keeper. The goalie-team refusal isn't a clock
+                  # question, so it's the one thing that still stands.
+                  "eligible": keeper_eligible(KEEPER_FRESH_DRAFT)
+                              and st.get("reason") is None}
+        if (is_discovery and goalie_teams_on(league.goalie_team_mode)
+                and (player.position or "").upper() == "GKP"):
+            # The one door left open into individual goalkeeper ownership: the
+            # discovery keeper may be ANY player, so it bypasses the roster candidate
+            # list where the rule is otherwise enforced. Applies to an on-roster
+            # discovery pick too — a keeper who joined the PL in January is still a
+            # keeper, and his club, not he, is the keepable asset.
+            st = {**st, "eligible": False,
+                  "reason": "goalkeepers are kept as a club"}
         selections.append({**st, "fpl_id": fid, "player_id": player.id,
                            "team_id": None, "is_discovery": is_discovery})
 
@@ -5764,6 +5850,129 @@ def record_discovery_pick(
     return {"pick": pick_number, "owner": owner.display, "player": name}
 
 
+def _discovery_pick_or_404(
+    db: Session, league: League, season_year: int, pick_number: int
+) -> DraftPick:
+    row = (
+        db.query(DraftPick)
+        .filter_by(league_id=league.id, season_year=season_year,
+                   draft_type="discovery", pick_number=pick_number)
+        .one_or_none()
+    )
+    if not row:
+        raise RuleViolation(
+            f"no {season_year} discovery pick #{pick_number}"
+        )
+    if row.team_id is not None:
+        # A goalie-team pick carries nothing else (the DraftPick CHECK), so writing
+        # player_id here would fail at the constraint with an opaque IntegrityError.
+        raise RuleViolation("that pick is a goalie team, not a player")
+    return row
+
+
+def link_discovery_pick(
+    db: Session, league: League, *, season_year: int, pick_number: int,
+    player_fpl_id: int,
+) -> dict:
+    """Attach a real `players` row to a free-text discovery pick.
+
+    A discovery pick is recorded in September as a NAME (`record_discovery_pick`),
+    because the player is by definition not yet in the Premier League and so has no
+    `players` row to point at. When he later joins, this is what connects the two —
+    and that link is the only thing that lets `_derive_keeper_status` see the pick at
+    all, since the derivation reads rosters and trades, never `draft_picks`.
+
+    **Always an explicit admin action, never automatic name-matching.** `Player.name`
+    is FPL's short `web_name` ("Woltemade") while a manager types whatever they had in
+    mind ("Nick Woltemade"), so a fuzzy match is a coin flip — and a wrong link hands
+    one manager another's keeper with a 4-year clock, which nothing downstream would
+    flag as suspicious. A follow-up session adds sync-driven match SUGGESTIONS; they
+    call this function on admin confirm, so the human is still the one deciding.
+
+    `player_label` is kept exactly as entered. It's the historical record of what the
+    manager actually called out on draft night, and `get_discovery_board` deliberately
+    prefers it, so the board keeps reading the way the draft happened.
+    """
+    row = _discovery_pick_or_404(db, league, season_year, pick_number)
+    player = _resolve_player(db, player_fpl_id)
+
+    if row.player_id == player.id:
+        # Idempotent: the follow-up suggestion flow can confirm the same match twice
+        # (two admins, a double-submit) without an error or a second audit entry.
+        return {"season_year": season_year, "pick_number": pick_number,
+                "label": row.player_label, "player": player.name, "linked": True,
+                "changed": False}
+    if row.player_id is not None:
+        prior = db.get(Player, row.player_id)
+        raise RuleViolation(
+            f"pick #{pick_number} is already linked to "
+            f"{prior.name if prior else row.player_id} — unlink it first"
+        )
+    clash = (
+        db.query(DraftPick)
+        .filter(DraftPick.league_id == league.id,
+                DraftPick.season_year == season_year,
+                DraftPick.draft_type == "discovery",
+                DraftPick.player_id == player.id,
+                DraftPick.id != row.id)
+        .first()
+    )
+    if clash:
+        # Two picks pointing at one player would make him two managers' keeper at once,
+        # and _derive_keeper_status would label whichever it saw last.
+        raise RuleViolation(
+            f"{player.name} is already linked to {season_year} discovery pick "
+            f"#{clash.pick_number}"
+        )
+
+    mgr = db.get(Manager, row.manager_id) if row.manager_id else None
+    record_audit(
+        db, league, action="discovery.link",
+        summary=(f"Linked {season_year} discovery pick #{pick_number} "
+                 f"({mgr.display if mgr else '?'} — {row.player_label or '—'}) "
+                 f"to {player.name}"),
+        manager_ids=[row.manager_id] if row.manager_id else None,
+        details={"season_year": season_year, "pick_number": pick_number,
+                 "player_fpl_id": player_fpl_id, "player": player.name,
+                 "previous": _previous(row, ["player_id", "player_label"])},
+    )
+    row.player_id = player.id
+    db.commit()
+    return {"season_year": season_year, "pick_number": pick_number,
+            "label": row.player_label, "player": player.name, "linked": True,
+            "changed": True}
+
+
+def unlink_discovery_pick(
+    db: Session, league: League, *, season_year: int, pick_number: int,
+) -> dict:
+    """Detach a player from a discovery pick — the undo for a mislink.
+
+    The free-text `player_label` was never touched by the link, so clearing the FK
+    restores the pick exactly as recorded rather than blanking it.
+    """
+    row = _discovery_pick_or_404(db, league, season_year, pick_number)
+    if row.player_id is None:
+        raise RuleViolation(f"pick #{pick_number} isn't linked to a player")
+
+    prior = db.get(Player, row.player_id)
+    mgr = db.get(Manager, row.manager_id) if row.manager_id else None
+    record_audit(
+        db, league, action="discovery.unlink",
+        summary=(f"Unlinked {season_year} discovery pick #{pick_number} "
+                 f"({mgr.display if mgr else '?'}) from "
+                 f"{prior.name if prior else '?'}"),
+        manager_ids=[row.manager_id] if row.manager_id else None,
+        details={"season_year": season_year, "pick_number": pick_number,
+                 "previous": _previous(row, ["player_id", "player_label"])},
+    )
+    row.player_id = None
+    db.commit()
+    return {"season_year": season_year, "pick_number": pick_number,
+            "label": row.player_label, "player": None, "linked": False,
+            "changed": True}
+
+
 def next_open_pick(board: list[dict]) -> dict | None:
     """The on-the-clock slot: first board pick with no player recorded yet."""
     return next((b for b in board if not b.get("player")), None)
@@ -5905,13 +6114,23 @@ def corrections_data(db: Session, league: League) -> dict:
         .all()
     ):
         label = p.player_label
+        linked_name = None
         if p.player_id:
             pl = db.get(Player, p.player_id)
             label = pl.name if pl else label
+            linked_name = pl.name if pl else None
         picks.append({
             "id": str(p.id), "season_year": p.season_year, "draft_type": p.draft_type,
             "round": p.round, "pick_number": p.pick_number,
             "manager": names.get(p.manager_id), "player": label,
+            # The discovery link tool below reads these. `label` above collapses the
+            # two into one display string; the form needs to know which it is, and a
+            # free-text pick needs its as-entered name kept visible next to the
+            # linked player's so a mislink is obvious at a glance.
+            "linked": p.player_id is not None,
+            "linked_player": linked_name,
+            "player_label": p.player_label,
+            "linkable": p.draft_type == "discovery" and p.team_id is None,
         })
     return {
         # get_trades is cross-season now; flatten back to the flat list this

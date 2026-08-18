@@ -469,7 +469,9 @@ class KeeperSeed(Base):
     )
     years_remaining: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     season_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # 'draft' | 'waiver' | 'trade', or NULL to use the derived value
+    # 'draft' | 'waiver' | 'trade' | 'discovery' (rules.KEEPER_ACQUISITIONS), or NULL
+    # to use the derived value. A seed always WINS over the derivation, including over
+    # the 'discovery' label synthesized from a linked discovery pick.
     acquisition: Mapped[str | None] = mapped_column(String, nullable=True)
 
 

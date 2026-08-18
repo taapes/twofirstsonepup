@@ -411,7 +411,69 @@ Four consequences to handle beyond the roster view:
 ### Discovery-drafted players get a 3-year waiver clock instead of 4
 
 **Priority:** `P2` — next bites at the September discovery draft, not this one.
-**Status:** `open`
+**Status:** `done 2026-08-18` (Item 4a — the structural fix). Item 4b, the
+sync-driven match SUGGESTIONS + unmatched-picks dashboard, is still to do and
+builds on `services.link_discovery_pick` from this change.
+
+**What was built.**
+
+- `"discovery"` joins `rules.KEEPER_ACQUISITIONS`. `rules.keeper_status` needed no
+  change at all — its `if acquisition:` branch already gives any non-`"waiver"` label
+  the full draft-length clock, and its final branch returns `traded_from` verbatim, so
+  the label chains through a trade untouched. `set_keeper_override` accepts it for free
+  via its membership check.
+- **`services.link_discovery_pick` / `unlink_discovery_pick`** — set/clear
+  `DraftPick.player_id` on a `draft_type='discovery'` row while keeping `player_label`
+  exactly as entered (`get_discovery_board` still prefers the label, so the board reads
+  the way the draft happened). No migration: the `DraftPick` CHECK is team-scoped, so
+  `(discovery, player_id set, player_label kept)` was always storable. Idempotent on a
+  repeat of the same link; refuses a missing pick, a goalie-team pick, a re-link over an
+  existing one, and two picks pointing at one player. Audited both ways
+  (`discovery.link` / `discovery.unlink`) with previous values. Admin form on
+  `/admin/corrections` beside the pick tools.
+  **Never auto-matched by name, deliberately** — `Player.name` is FPL's short
+  `web_name` and managers type full names, so a match is a coin flip and a wrong link
+  hands one manager another's keeper on a 4-year clock with nothing downstream to flag
+  it. Item 4b's suggestions call this function on admin *confirm*.
+- **`_derive_keeper_status`** now has two independent witnesses to a discovery
+  acquisition, because neither alone covers every caller. `discovery_linked` comes from
+  `DraftPick` — public draft history, no privacy gate, works for viewer-less callers —
+  and is bridged through `Manager.fpl_manager_id`, never `managers.id`, since a pick
+  made before a rollover carries the outgoing row's manager uuid (the
+  `_goalie_team_history` hazard). `discovery_flagged` is the new broader split of the
+  old `discovery_only`: *every* `is_discovery` selection rather than only the off-roster
+  ones, and it stays behind the same privacy gate `discovery_only` already respected.
+  `discovery_only` keeps its original narrower job of widening the candidate set.
+- **`submit_keepers`** applies the discovery clock on the **on-roster** path too — the
+  actual reported bug — unless a `KeeperSeed` exists, and recomputes `eligible` from the
+  corrected clock rather than inheriting the stale derived flag. The goalie-team GKP
+  refusal now covers the on-roster discovery case as well.
+
+**One deviation from the plan, deliberate.** The synthesized `"discovery"` label is
+gated on `not dropped`. `acquisition=` short-circuits `rules.keeper_status`'s dropped
+branch entirely, so without the gate a linked pick would launder a genuine
+drop-and-re-acquire clean *forever* — a player who went through the open wire is a
+waiver pickup no matter how he first arrived. An off-roster discovery keeper has no
+roster history, so `_dropped` is False for him and the gate is transparent to the case
+it matters for; the pinned seed-precedence test still passes untouched.
+
+**Surprise worth recording.** `set_keeper_override` with an `acquisition` but no
+`years_remaining` snapshots the *currently derived* clock into the new seed — so
+correcting a mislabelled `("waiver", 3)` to `"discovery"` yields `("discovery", 3)`,
+not 4, because the seed then outranks the label's own fresh-clock default. That is
+pre-existing and applies identically to `"draft"` and `"trade"`; it is pinned by
+`test_an_acquisition_only_override_freezes_the_clock_it_found`. Pass `years_remaining`
+explicitly to move the clock.
+
+**Tests.** `tests/test_discovery_acquisition.py` (27 cases): derivation via a linked
+pick, the unlinked control, cross-manager isolation, cross-league-row bridging, seed
+precedence on both paths, the drop gate, the trade chain, `submit_keepers`' on-roster
+override and its GKP refusal, `set_keeper_override`, the full link/unlink surface, the
+draft_type-scoped taken overlay, and the privacy split. `test_discovery_keeper_slot.py`
+and `test_keeper_privacy.py` pass unchanged.
+
+<details>
+<summary>Original investigation (2026-08-15)</summary>
 
 **Symptom.** A player taken in the September discovery draft should count as
 draft-acquired for keeper purposes (4 years, `rules.KEEPER_FRESH_DRAFT`). He is instead
@@ -454,6 +516,8 @@ general alternative and would also fix the derivation itself.
 **Test gap.** No test constructs a discovery pick and asserts on keeper status. Existing
 discovery coverage is only the cap (`tests/test_rules.py:309-346`) and board
 availability (`tests/test_draft_availability.py:140-165`).
+
+</details>
 
 ---
 

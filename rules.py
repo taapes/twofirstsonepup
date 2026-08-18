@@ -439,7 +439,15 @@ KEEPER_FRESH_WAIVER = 3
 KEEPER_MAX_WAIVER = 2
 
 
-KEEPER_ACQUISITIONS = ("draft", "waiver", "trade")
+# 'discovery' is a September discovery-draft acquisition. It is draft-LIKE for the
+# clock (the `if acquisition:` branch below gives any non-waiver label the full
+# draft-length clock) but keeps its own label, because the two are genuinely
+# different acquisitions and the keepers report should say which one happened.
+# NOTE: it is NOT the same thing as KeeperSelection.is_discovery, which flags the
+# BONUS 6th keeper slot. A discovery-acquired player kept in an ordinary slot is
+# labelled 'discovery' and does not raise the cap; see validate_keeper_selection,
+# which keys the cap exemption on the flag, never on this label.
+KEEPER_ACQUISITIONS = ("draft", "waiver", "trade", "discovery")
 
 
 def keeper_status(
