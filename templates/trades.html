@@ -2,14 +2,26 @@
 {% block title %}Trades{% endblock %}
 {% block content %}
 <h1>Trades</h1>
-<p class="sub">Player + pick trades. <a href="/trade">Record a trade →</a></p>
-<div class="card">
-  {% if trades %}
-  <table>
+<p class="sub">Player + pick trades, every season. <a href="/trade">Record a trade →</a></p>
+<div data-filter-root>
+<div class="frow" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+  <select data-filter="season"><option value="">All seasons</option>
+    {% for y in seasons %}<option value="{{ y }}">{{ y }}</option>{% endfor %}
+  </select>
+  <select data-filter="manager"><option value="">All managers</option>
+    {% for m in managers %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+  </select>
+  <input type="search" data-filter="search" placeholder="Search…">
+</div>
+{% if trades %}
+{% for season in trades %}
+<details class="card" data-season="{{ season.year }}" {% if loop.first %}open{% endif %}>
+  <summary>{{ season.year }} ({{ season.trades|length }})</summary>
+  <table style="margin-top:8px">
     <thead><tr><th>Type</th><th>What</th><th>From</th><th>To</th><th class="num">GW</th><th>Source</th></tr></thead>
     <tbody>
-      {% for t in trades %}
-      <tr>
+      {% for t in season.trades %}
+      <tr data-managers="|{{ t['from'] }}|{{ t['to'] }}|">
         <td class="tag">{{ t.kind }}</td>
         <td>{{ t.what }}</td>
         <td>{{ t['from'] }}</td>
@@ -20,7 +32,9 @@
       {% endfor %}
     </tbody>
   </table>
-  {% else %}<div class="empty">No trades recorded.</div>{% endif %}
+</details>
+{% endfor %}
+{% else %}<div class="card"><div class="empty">No trades recorded.</div></div>{% endif %}
 </div>
 
 {% if trade_notes %}

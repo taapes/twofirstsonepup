@@ -957,19 +957,22 @@ def _player_stat_dict(p: "Player | PlayerSeason") -> dict:
 _POSITION_ORDER = {"GKP": 0, "DEF": 1, "MID": 2, "FWD": 3}
 
 
-def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None:
-    """A single manager's current squad with rich per-player stats + a recent
-    points trend (from stored gameweek_points). None if the manager isn't found."""
-    manager = (
-        db.query(Manager)
-        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
-        .one_or_none()
-    )
-    if not manager:
-        return None
-    gw = latest_gameweek(db, league)
-    players = _squad_players(db, league, manager.id, gw.id if gw else None)
+def _rich_player_rows(
+    db: Session, league: League, manager: "Manager", players: list
+) -> list[dict]:
+    """The shared rendering core of get_my_team / get_my_team_in_progress: a
+    resolved list of Player-or-PlayerSeason rows (duck-typed, same as
+    _player_stat_dict) -> rich per-player dicts with stats, a recent-points trend,
+    and the upcoming-season keeper badge.
 
+    Takes already-resolved ROWS, not player ids: get_my_team's roster-based lookup
+    and get_my_team_in_progress's keeper+draft-pick lookup resolve ids to rows
+    differently (the former via PlayerSeason only, the latter falling back to the
+    global Player row for anyone with no snapshot yet), and that difference has to
+    happen before this shared part.
+    """
+    if not players:
+        return []
     # recent points trend per player (last 5 synced GWs, oldest->newest)
     recent = (
         db.query(GameweekPoints, Gameweek)
@@ -1003,17 +1006,86 @@ def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None
     out_players = []
     for p in players:
         d = _player_stat_dict(p)
-        d["trend"] = trend.get(p.player_id, [])
-        # p is a PlayerSeason row: p.id is the snapshot's own PK, and keeper_pids
-        # holds players.id — so this must compare player_id or it is always False.
-        d["is_keeper"] = p.player_id in keeper_pids
+        # p may be a PlayerSeason row (.id is the snapshot's own PK, NOT
+        # players.id — its player_id is) or a global Player row (.id IS
+        # players.id, for anyone with no season snapshot yet).
+        pid = p.player_id if isinstance(p, PlayerSeason) else p.id
+        d["trend"] = trend.get(pid, [])
+        d["is_keeper"] = pid in keeper_pids
         out_players.append(d)
     out_players.sort(key=lambda d: (_POSITION_ORDER.get(d["position"], 9), d["name"]))
+    return out_players
+
+
+def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None:
+    """A single manager's current squad with rich per-player stats + a recent
+    points trend (from stored gameweek_points). None if the manager isn't found."""
+    manager = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    if not manager:
+        return None
+    gw = latest_gameweek(db, league)
+    players = _squad_players(db, league, manager.id, gw.id if gw else None)
     return {
         "manager": manager.display,
         "fpl": manager.fpl_manager_id,
         "gameweek": gw.number if gw else None,
-        "players": out_players,
+        "players": _rich_player_rows(db, league, manager, players),
+        "status": _manager_status(db, league, manager),
+    }
+
+
+def get_my_team_in_progress(
+    db: Session, league: League, fpl_manager_id: str
+) -> dict | None:
+    """Like get_my_team, but for the draft/preseason window before FPL rosters
+    exist: shows kept players UNION draft picks so far, instead of last season's
+    finished roster. None if the manager isn't found — matching get_my_team.
+
+    Reuses get_teams_in_progress' cross-row resolution for WHICH players this
+    manager holds, then get_my_team's rich per-player rendering for HOW to show
+    them. Clubs (goalie teams) are out of scope, matching get_my_team today, which
+    has no club concept on the My Team page at all.
+    """
+    manager = (
+        db.query(Manager)
+        .filter_by(league_id=league.id, fpl_manager_id=str(fpl_manager_id))
+        .one_or_none()
+    )
+    if not manager:
+        return None
+
+    draft_year, sel_league, selections, picks, manager_for = _in_progress_bridge(
+        db, league
+    )
+    pids: set = set()
+    for s in selections:
+        if s.player_id is None:
+            continue  # a kept club — no club concept on My Team, see docstring
+        target = manager_for(s.manager_id)
+        if target and target[0] == manager.id:
+            pids.add(s.player_id)
+    for p in picks:
+        if p.player_id is None:
+            continue  # a drafted club, or (shouldn't happen) neither set
+        target = manager_for(p.manager_id)
+        if target and target[0] == manager.id:
+            pids.add(p.player_id)
+
+    ps_map = season_identity(db, league, pids) if pids else {}
+    rows = list(ps_map.values())
+    missing = pids - set(ps_map)
+    if missing:
+        rows += db.query(Player).filter(Player.id.in_(missing)).all()
+
+    return {
+        "manager": manager.display,
+        "fpl": manager.fpl_manager_id,
+        "gameweek": None,
+        "players": _rich_player_rows(db, league, manager, rows),
         "status": _manager_status(db, league, manager),
     }
 
@@ -1802,6 +1874,22 @@ def get_transactions(db: Session, league: League) -> list[dict]:
         {"gameweek": gw, "moves": sorted(by_gw[gw], key=lambda x: (x["manager"], x["action"]))}
         for gw in sorted(by_gw, reverse=True)
     ]
+
+
+def get_all_transactions(db: Session) -> list[dict]:
+    """get_transactions, across every season, newest season first.
+
+    A thin wrapper, not a reimplementation: GW numbers repeat 1-38 every season,
+    so diffing roster snapshots by bare GW number across league rows would
+    compare unrelated gameweeks. Each row's per-league derivation is untouched;
+    this only groups the results by season for the page.
+    """
+    out = []
+    for lg in db.query(League).order_by(League.season_year.desc()):
+        weeks = get_transactions(db, lg)
+        if weeks:
+            out.append({"year": lg.season_year, "weeks": weeks})
+    return out
 
 
 def player_pool_freshness(db: Session) -> dict:
@@ -3239,7 +3327,9 @@ def set_goalie_team_mode(db: Session, league: League, mode: str) -> dict:
     return {"mode": mode, "changed": True}
 
 
-def goalie_team_owner(db: Session, league: League) -> dict:
+def goalie_team_owner(
+    db: Session, league: League, *, season_year: int | None = None
+) -> dict:
     """{team_id: fpl_manager_id} — who holds each goalie team right now.
 
     Base is the season's draft pick or keeper selection; commissioner-entered club
@@ -3251,8 +3341,13 @@ def goalie_team_owner(db: Session, league: League) -> dict:
     moves nobody instead of teleporting a club (`/admin/health` surfaces the ones that
     didn't apply). `created_at` is the only reliable ordering: `date` is NULL on
     commissioner rows and the PK is a random uuid4.
+
+    `season_year` overrides `league.season_year`, for the same reason
+    `_derive_gk_team_keeper_status` grew the same parameter: pre-rollover, `league`
+    (current) is still the outgoing row, one year behind the draft actually running.
+    Every existing caller omits it and gets the prior behavior exactly.
     """
-    cur = league.season_year or 0
+    cur = season_year if season_year is not None else (league.season_year or 0)
     owner = {
         tid: fpl for (sy, tid), (fpl, _how) in _goalie_team_history(db).items()
         if sy == cur
@@ -3321,6 +3416,7 @@ def _derive_gk_team_keeper_status(
     *,
     kept_for: set | None = None,
     kept_all: bool = False,
+    season_year: int | None = None,
 ) -> dict:
     """{manager_id: {...}} — each manager's goalie team and its keeper clock.
 
@@ -3337,10 +3433,17 @@ def _derive_gk_team_keeper_status(
 
     `kept` is redacted by default, exactly like the player path: `/v1` has no viewer,
     and a club keeper is as private as any other until keepers are revealed.
+
+    `season_year` decouples "which season's clock" from "which league row scopes the
+    managers" — every existing caller omits it and gets `league.season_year` exactly
+    as before. get_teams_in_progress needs it: pre-rollover, `league` (current) is
+    still the OUTGOING row, whose own `season_year` is one behind the draft actually
+    running, while `_goalie_team_history` is keyed by the real draft year regardless
+    of which row is current.
     """
     if not goalie_team_keepable(league.goalie_team_mode):
         return {}
-    cur = league.season_year or 0
+    cur = season_year if season_year is not None else (league.season_year or 0)
     history = _goalie_team_history(db)
     if not history:
         return {}
@@ -3362,7 +3465,7 @@ def _derive_gk_team_keeper_status(
         )
     }
 
-    owner = goalie_team_owner(db, league)
+    owner = goalie_team_owner(db, league, season_year=cur)
     out: dict = {}
     for m in managers:
         held = [tid for tid, fpl in owner.items() if fpl == m.fpl_manager_id]
@@ -3405,6 +3508,200 @@ def _derive_gk_team_keeper_status(
             "reason": None if in_pl else "relegated — no longer a Premier League club",
             "kept": bool(disclose and submitted.get(tid) == m.id),
         }
+    return out
+
+
+def _draft_year_for(league: League) -> int:
+    """The season a draft-in-progress view (or anything else needing 'the draft
+    that's either running now or just finished') should read.
+
+    The main draft runs on the OUTGOING league row, pre-rollover — 'offseason' (the
+    draft hasn't started; the pool being prepared is next season) and 'draft' both
+    point one year past this row's own `season_year`. Once the rollover has run,
+    the CURRENT row's `season_year` already IS that same draft year — 'preseason'
+    and 'in_season' read it directly. Centralizing this here (rather than the
+    `season_year + 1` expression scattered across templates/routes/scripts) means a
+    later season-alignment migration only has to change this one function.
+    """
+    if league.phase in ("offseason", "draft"):
+        return (league.season_year or 0) + 1
+    return league.season_year or 0
+
+
+def _in_progress_bridge(db: Session, league: League):
+    """Cross-row lookup for the draft/preseason in-progress squad view.
+
+    The 2026-style main draft (and the keeper selections that feed its board) can
+    live on a DIFFERENT league row than `league` — pre-rollover it runs on the
+    outgoing row. This resolves: the draft year; the league row that actually holds
+    this year's `KeeperSelection` rows; this year's main-draft `DraftPick` rows
+    (queried with NO league filter, the same precedent `_goalie_team_history`
+    already uses); and a manager bridge from whatever row a selection/pick's
+    `manager_id` belongs to onto `league`'s own Manager row, matched by the stable
+    `fpl_manager_id` — never `managers.id`, which is minted fresh per season.
+
+    Returns (draft_year, sel_league, selections, picks, manager_for), where
+    manager_for(old_manager_id) -> (bucket_id, display_name, fpl_manager_id) or
+    None. A manager with no counterpart on `league` yet renders under their OWN
+    row's identity rather than being dropped.
+    """
+    draft_year = _draft_year_for(league)
+
+    sel_league = league
+    if not db.query(KeeperSelection).filter_by(
+        league_id=league.id, season_year=draft_year
+    ).first():
+        other = (
+            db.query(League)
+            .join(KeeperSelection, KeeperSelection.league_id == League.id)
+            .filter(KeeperSelection.season_year == draft_year, League.id != league.id)
+            .first()
+        )
+        if other:
+            sel_league = other
+    selections = effective_keeper_selections(db, sel_league, draft_year)
+
+    picks = (
+        db.query(DraftPick)
+        .filter(DraftPick.season_year == draft_year, DraftPick.draft_type == "main")
+        .all()
+    )
+
+    ref_ids = {s.manager_id for s in selections} | {p.manager_id for p in picks}
+    ref_managers = (
+        {m.id: m for m in db.query(Manager).filter(Manager.id.in_(ref_ids))}
+        if ref_ids else {}
+    )
+    cur_by_fpl = {
+        m.fpl_manager_id: m for m in db.query(Manager).filter_by(league_id=league.id)
+    }
+
+    def manager_for(manager_id):
+        src = ref_managers.get(manager_id)
+        if src is None:
+            return None
+        target = cur_by_fpl.get(src.fpl_manager_id) or src
+        return target.id, target.display, target.fpl_manager_id
+
+    return draft_year, sel_league, selections, picks, manager_for
+
+
+def get_teams_in_progress(db: Session, league: League) -> list[dict]:
+    """Like get_keepers, but for the draft/preseason window before FPL rosters
+    exist: each manager's kept players UNION their draft picks so far, instead of
+    last season's finished roster. Output shape matches get_keepers' per-manager
+    dict (manager/manager_fpl/players) — the routes swap between the two with no
+    template change.
+
+    Keeper privacy is moot here: by the time this view is used, enter_draft_phase
+    has already set keepers_locked=True, so selections are fully revealed — this
+    always derives with kept_all=True.
+
+    Kept players/clubs render their REAL derived acquisition/years/eligible facts.
+    A freshly drafted player has no tenure to derive from, so he renders the fact
+    he WILL have the moment a season starts: a fresh 4-year draft acquisition
+    (rules.KEEPER_FRESH_DRAFT) — not None, which the shared _roster_card.html
+    template compares with `> 0` and would crash on.
+    """
+    draft_year, sel_league, selections, picks, manager_for = _in_progress_bridge(
+        db, league
+    )
+
+    kept_status = _derive_keeper_status(db, sel_league, kept_all=True)
+    names = player_names(db, league)
+    positions = {p.id: p.position for p in db.query(Player)}
+    pl_teams = {t.id: t for t in db.query(PlTeam)}
+    clubs_keepable = goalie_team_keepable(league.goalie_team_mode)
+    club_status = (
+        _derive_gk_team_keeper_status(
+            db, league, kept_all=True, season_year=draft_year
+        )
+        if clubs_keepable else {}
+    )
+
+    managers = (
+        db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
+    )
+    by_manager = {
+        m.id: {"manager": m.display, "manager_fpl": m.fpl_manager_id, "players": []}
+        for m in managers
+    }
+
+    # A kept club (goalie_team_mode == 'keeper') is fully described by club_status,
+    # keyed on this league's own managers already — no bridging needed.
+    for mid, club in club_status.items():
+        if mid in by_manager:
+            by_manager[mid]["players"].append(club)
+
+    def _drafted_player(pid):
+        return {
+            "player": names.get(pid, str(pid)), "position": positions.get(pid),
+            "acquisition": "draft", "years_remaining": KEEPER_FRESH_DRAFT,
+            "eligible": True, "reason": None, "kept": False, "kept_discovery": False,
+        }
+
+    def _drafted_club(tid):
+        team = pl_teams.get(tid)
+        return {
+            "player": team.name if team else str(tid), "position": GOALIE_TEAM_POSITION,
+            "acquisition": "draft", "years_remaining": 0, "eligible": False,
+            "reason": "not kept in redraft mode", "kept": False, "kept_discovery": False,
+        }
+
+    for s in selections:
+        if s.team_id is not None:
+            continue  # keeper-mode clubs are already in "players" via club_status
+        target = manager_for(s.manager_id)
+        if target is None:
+            continue
+        mid, display, fpl = target
+        bucket = by_manager.setdefault(
+            mid, {"manager": display, "manager_fpl": fpl, "players": []}
+        )
+        fact = kept_status.get(s.manager_id, {}).get(s.player_id)
+        bucket["players"].append(fact if fact else {
+            "player": names.get(s.player_id, str(s.player_id)),
+            "position": positions.get(s.player_id), "acquisition": None,
+            "years_remaining": 0, "eligible": False,
+            "reason": "keeper status could not be derived",
+            "kept": True, "kept_discovery": s.is_discovery,
+        })
+
+    for p in picks:
+        target = manager_for(p.manager_id)
+        if target is None:
+            continue
+        mid, display, fpl = target
+        bucket = by_manager.setdefault(
+            mid, {"manager": display, "manager_fpl": fpl, "players": []}
+        )
+        if p.team_id is not None:
+            if not clubs_keepable:
+                bucket["players"].append(_drafted_club(p.team_id))
+            # else: already in "players" via club_status above
+        elif p.player_id is not None:
+            bucket["players"].append(_drafted_player(p.player_id))
+        # else: a main-draft row with neither set shouldn't exist (the model's
+        # CHECK is deliberately narrow, per models.py) — skip rather than crash.
+
+    out = []
+    seen = set()
+    for m in managers:
+        entry = by_manager[m.id]
+        entry["players"].sort(
+            key=lambda x: (not x["eligible"], -x["years_remaining"], x["player"])
+        )
+        out.append(entry)
+        seen.add(m.id)
+    # Any manager bridged from an older row with no current-row counterpart:
+    # never dropped, rendered under their own identity at the end.
+    for mid, entry in by_manager.items():
+        if mid in seen:
+            continue
+        entry["players"].sort(
+            key=lambda x: (not x["eligible"], -x["years_remaining"], x["player"])
+        )
+        out.append(entry)
     return out
 
 
@@ -4879,24 +5176,49 @@ def get_draft_board(
 
 
 def get_future_picks(db: Session, league: League) -> list[dict]:
-    """Future pick ownership by year — only picks that have changed hands —
-    computed from the same pick_ownership source as the draft board, so a newly
-    entered pick trade shows up here automatically."""
+    """Future pick ownership by year, across every league row — computed from the
+    same pick_ownership source as the draft board, so a newly entered pick trade
+    shows up here automatically. Only years still ahead of `league`'s own season
+    are shown: this is a forward-looking outlook, not an archive.
+
+    Future picks are deliberately season-AGNOSTIC (decided 2026-08-18) — a
+    standing multi-year outlook on who owns what, never migrated between league
+    rows even once the season-alignment migration lands. So this scans every
+    league row for FuturePick/pick-Trade rows, not just the current one.
+
+    pick_ownership itself STAYS league-scoped (it's the draft board's single
+    source of truth) — called once per (league row, year) pair, iterating rows
+    ASCENDING by season_year so a newer row's entry for the same
+    (round, original_owner) wins. The same future year can legitimately have
+    rows on more than one league row (e.g. entered before a rollover, then again
+    after), and person names are the stable key across them.
+    """
     from models import FuturePick
 
-    years = {y for (y,) in db.query(FuturePick.season_year).filter_by(league_id=league.id).distinct()}
+    leagues = db.query(League).order_by(League.season_year.asc()).all()
+    league_ids = [lg.id for lg in leagues]
+    years = {
+        y for (y,) in db.query(FuturePick.season_year)
+        .filter(FuturePick.league_id.in_(league_ids)).distinct()
+    }
     years |= {
         y for (y,) in db.query(Trade.pick_season_year)
-        .filter(Trade.league_id == league.id, Trade.pick_season_year.isnot(None)).distinct()
+        .filter(Trade.league_id.in_(league_ids), Trade.pick_season_year.isnot(None))
+        .distinct()
     }
+    cur = league.season_year or 0
+    years = {y for y in years if y >= cur}
+
     out = []
     for y in sorted(years):
         entry = {"year": y}
         for dt in ("main", "discovery"):
-            own = pick_ownership(db, league, y, dt)
+            merged: dict = {}
+            for lg in leagues:
+                merged.update(pick_ownership(db, lg, y, dt))
             entry[dt] = [
                 {"round": rnd, "original_owner": orig, "owner": owner}
-                for (rnd, orig), owner in sorted(own.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+                for (rnd, orig), owner in sorted(merged.items(), key=lambda kv: (kv[0][0], kv[0][1]))
             ]
         if entry["main"] or entry["discovery"]:
             out.append(entry)
@@ -5127,19 +5449,67 @@ def search_players(
 
 
 # ---- trades view + draft helpers ----
-def get_trades(db: Session, league: League) -> list[dict]:
-    """All trades for the league — synced player trades and commissioner-entered
-    pick/player trades — newest-ish first (by GW then id)."""
-    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    pnames = player_names(db, league)
-    rows = db.query(Trade).filter_by(league_id=league.id).all()
-    out = []
-    for t in rows:
-        if t.pick_round is not None:
+def _trade_season_year(trade: "Trade", leagues_by_id: dict) -> int:
+    """Which season a trade belongs to for DISPLAY grouping — computed on read,
+    never taken from the storing row alone, so a post-GW38 offseason trade shows
+    under the season it's headed INTO rather than the one that just ended.
+
+    `event_gw` set (FPL-synced, mid-season): the trade happened during that row's
+    own season and can't have crossed a season boundary — the storing row's
+    `season_year` is exactly right.
+
+    `event_gw` NULL (commissioner-entered): bucket `created_at` against the trade
+    deadline (Jan 31, per the spec) — a January trade belongs to the season that
+    started the PREVIOUS calendar year; any other month belongs to the season
+    starting THAT year. That second case is what puts a May-Dec (post-GW38,
+    offseason) trade into the FOLLOWING season, the confirmed rule.
+
+    KNOWN IMPRECISION, deliberately not solved here: `Trade.created_at` was
+    backfilled by migration f5a6b7c8d9e0 (2026-08-11) with ONE SHARED timestamp
+    on every pre-migration row, so a pre-migration commissioner trade (no
+    event_gw) always buckets into 2026 regardless of when it actually happened.
+    An admin can set `event_gw` via `edit_trade` to re-file a misfiled row onto
+    the correct season — that flips it onto the (always-correct) first branch.
+    """
+    if trade.event_gw is not None:
+        lg = leagues_by_id.get(trade.league_id)
+        return lg.season_year if lg else 0
+    d = trade.created_at
+    return d.year - 1 if d.month == 1 else d.year
+
+
+def get_trades(db: Session) -> list[dict]:
+    """All trades across every season — synced player trades and commissioner-
+    entered player/pick/club trades — grouped by the season each belongs to (see
+    _trade_season_year), newest season first; within a season, newest first
+    (event_gw desc, then created_at desc; rows with no event_gw sort last).
+
+    Cross-season by design: trades are a permanent record of who dealt with whom,
+    not scoped to whichever league row is current. Names/players must therefore
+    be resolved across ALL managers/players, not one league's — a single-league
+    map would silently render a blank from/to cell for a trade whose managers
+    belong to a different row.
+    """
+    leagues_by_id = {lg.id: lg for lg in db.query(League)}
+    names = {m.id: m.display for m in db.query(Manager)}
+    # No single league's season_identity overlay is right for every row's trades
+    # here — this is exactly the global fallback player_names() itself uses for
+    # anyone without a snapshot on the league it's called with.
+    pnames = {p.id: p.name for p in db.query(Player)}
+    pl_teams = {t.id: t.name for t in db.query(PlTeam)}
+
+    by_year: dict = {}
+    for t in db.query(Trade).all():
+        if t.team_id is not None:
+            # A goalie-team trade (team_id set, pick_round and player_id both
+            # NULL) used to fall through to the player branch and render
+            # kind="player", what="—" — fixed here.
+            kind, what = "club", pl_teams.get(t.team_id, "—")
+        elif t.pick_round is not None:
             kind, what = "pick", t.draft_pick or f"R{t.pick_round} pick"
         else:
             kind, what = "player", pnames.get(t.player_id, "—")
-        out.append({
+        row = {
             "id": str(t.id),
             "kind": kind,
             "what": what,
@@ -5148,8 +5518,19 @@ def get_trades(db: Session, league: League) -> list[dict]:
             "gw": t.event_gw,
             "source": "FPL" if t.fpl_trade_id else "site",
             "edited": bool(t.manually_edited),
-        })
-    out.sort(key=lambda x: (x["gw"] is None, x["gw"] or 0), reverse=True)
+        }
+        by_year.setdefault(_trade_season_year(t, leagues_by_id), []).append((t, row))
+
+    out = []
+    for year in sorted(by_year, reverse=True):
+        ordered = sorted(
+            by_year[year],
+            key=lambda pair: (
+                pair[0].event_gw is None, -(pair[0].event_gw or 0),
+                -pair[0].created_at.timestamp(),
+            ),
+        )
+        out.append({"year": year, "trades": [row for _t, row in ordered]})
     return out
 
 
@@ -5493,7 +5874,10 @@ def corrections_data(db: Session, league: League) -> dict:
             "manager": names.get(p.manager_id), "player": label,
         })
     return {
-        "trades": get_trades(db, league),
+        # get_trades is cross-season now; flatten back to the flat list this
+        # page (and its edit/delete forms) expects — newest season first, and
+        # within a season already ordered newest-first.
+        "trades": [row for season in get_trades(db) for row in season["trades"]],
         "discovery": _discovery_by_season(db, league),
         "picks": picks,
         "managers": [

@@ -3,7 +3,7 @@
 {% block content %}
 <h1>Transactions</h1>
 <p class="sub">Weekly roster moves (adds/drops), derived from each gameweek's squad
-  snapshot — covers waivers, free agency, and trades.</p>
+  snapshot — covers waivers, free agency, and trades. Every season, current first.</p>
 {% if window and window.state != "between" %}
 <div class="card" style="padding:10px 12px">
   <strong>{{ window.label }}</strong>
@@ -11,23 +11,39 @@
     GW{{ window.next_gw }} (deadline {{ window.next_deadline }}). Add/drops are made in FPL.</span>
 </div>
 {% endif %}
-{% for w in weeks %}
-<h2>GW{{ w.gameweek }}</h2>
-<div class="card" style="margin-bottom:12px">
-  <table>
-    <thead><tr><th>Manager</th><th></th><th>Player</th></tr></thead>
-    <tbody>
-      {% for m in w.moves %}
-      <tr>
-        <td>{{ m.manager }}</td>
-        <td>{% if m.action == "added" %}<span class="pill">+ added</span>{% else %}<span class="pill warn">− dropped</span>{% endif %}</td>
-        <td>{{ m.player }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div data-filter-root>
+<div class="frow" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+  <select data-filter="season"><option value="">All seasons</option>
+    {% for y in seasons %}<option value="{{ y }}">{{ y }}</option>{% endfor %}
+  </select>
+  <select data-filter="manager"><option value="">All managers</option>
+    {% for m in managers %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+  </select>
+  <input type="search" data-filter="search" placeholder="Search…">
+</div>
+{% for season in seasons_data %}
+<div data-season="{{ season.year }}">
+  <h2>{{ season.year }}</h2>
+  {% for w in season.weeks %}
+  <h4>GW{{ w.gameweek }}</h4>
+  <div class="card" style="margin-bottom:12px">
+    <table>
+      <thead><tr><th>Manager</th><th></th><th>Player</th></tr></thead>
+      <tbody>
+        {% for m in w.moves %}
+        <tr data-managers="|{{ m.manager }}|">
+          <td>{{ m.manager }}</td>
+          <td>{% if m.action == "added" %}<span class="pill">+ added</span>{% else %}<span class="pill warn">− dropped</span>{% endif %}</td>
+          <td>{{ m.player }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
 </div>
 {% else %}
-<div class="empty">No transactions yet (needs at least two gameweeks of roster data).</div>
+<div class="empty">No transactions yet (needs at least two gameweeks of roster data, any season).</div>
 {% endfor %}
+</div>
 {% endblock %}

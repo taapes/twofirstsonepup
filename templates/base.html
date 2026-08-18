@@ -29,6 +29,7 @@
     .pill { display:inline-block; padding:1px 7px; border-radius:999px; font-size:.75rem; background:rgba(55,214,122,.13); color:var(--accent); }
     .pill.warn { background:rgba(255,107,107,.15); color:var(--warn); }
     .empty { padding:14px; color:var(--muted); }
+    .hidden { display:none !important; }
     #htmx-error-banner { position:fixed; left:50%; bottom:18px; transform:translateX(-50%);
       max-width:min(90vw,600px); background:var(--card); border:1px solid var(--warn);
       color:var(--warn); padding:10px 16px; border-radius:8px; font-size:.9rem;
@@ -164,6 +165,39 @@
       document.getElementById('discoveryId').value = '';
       document.getElementById('discoveryName').textContent = '— none —';
     }
+    // Client-side filter for /trades, /transactions, /picks: a season <select>,
+    // a manager <select> and a text <input> narrow rows already on the page — no
+    // new endpoint. A row's data-managers is pipe-delimited ("|Kevin T|Kevin F|")
+    // so a manager filter matches a whole name, never a substring of another
+    // manager's (two names in this league differ only by a trailing initial).
+    function _applyRowFilters(root) {
+      var seasonEl = root.querySelector('[data-filter="season"]');
+      var managerEl = root.querySelector('[data-filter="manager"]');
+      var searchEl = root.querySelector('[data-filter="search"]');
+      var season = seasonEl ? seasonEl.value : '';
+      var manager = managerEl ? managerEl.value.toLowerCase() : '';
+      var q = searchEl ? searchEl.value.trim().toLowerCase() : '';
+      root.querySelectorAll('[data-season]').forEach(function (section) {
+        var seasonOk = !season || section.dataset.season === season;
+        var rows = section.querySelectorAll('[data-managers]');
+        var anyVisible = false;
+        rows.forEach(function (row) {
+          var rowManagers = (row.dataset.managers || '').toLowerCase();
+          var managerOk = !manager || rowManagers.indexOf('|' + manager + '|') !== -1;
+          var textOk = !q || row.textContent.toLowerCase().indexOf(q) !== -1;
+          var visible = seasonOk && managerOk && textOk;
+          row.classList.toggle('hidden', !visible);
+          if (visible) anyVisible = true;
+        });
+        section.classList.toggle('hidden', !seasonOk || (rows.length > 0 && !anyVisible));
+      });
+    }
+    document.querySelectorAll('[data-filter-root]').forEach(function (root) {
+      root.querySelectorAll('[data-filter]').forEach(function (el) {
+        el.addEventListener('input', function () { _applyRowFilters(root); });
+        el.addEventListener('change', function () { _applyRowFilters(root); });
+      });
+    });
   </script>
 </body>
 </html>

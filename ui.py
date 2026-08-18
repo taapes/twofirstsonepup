@@ -320,13 +320,22 @@ def logout(request: Request):
 
 
 # ---- public league views ----
+def _teams_data(db: Session, league, request: Request) -> list[dict]:
+    """get_teams_in_progress while the draft is running or the new season hasn't
+    synced any rosters yet (phase draft/preseason); get_keepers otherwise —
+    unchanged for every other phase."""
+    if league.phase in ("draft", "preseason"):
+        return services.get_teams_in_progress(db, league)
+    return services.get_keepers(db, league, **_viewer(request))
+
+
 @router.get("/teams", response_class=HTMLResponse)
 def teams_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     return templates.TemplateResponse(
         "teams.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
-         "teams": services.get_keepers(db, league, **_viewer(request))},
+         "teams": _teams_data(db, league, request)},
     )
 
 
@@ -341,8 +350,7 @@ def team_page(fpl_manager_id: str, request: Request, db: Session = Depends(get_d
     if not m:
         raise HTTPException(status_code=404, detail="team not found")
     team = next(
-        (t for t in services.get_keepers(db, league, **_viewer(request))
-         if t["manager"] == m.display),
+        (t for t in _teams_data(db, league, request) if t["manager"] == m.display),
         None,
     )
     return templates.TemplateResponse(
@@ -434,7 +442,12 @@ def _resolve_my_fpl(request: Request, db: Session, league) -> str | None:
 def my_team_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     fpl = _resolve_my_fpl(request, db, league)
-    team = services.get_my_team(db, league, fpl) if fpl else None
+    if not fpl:
+        team = None
+    elif league.phase in ("draft", "preseason"):
+        team = services.get_my_team_in_progress(db, league, fpl)
+    else:
+        team = services.get_my_team(db, league, fpl)
     cur = services.current_gameweek(db, league)
     return templates.TemplateResponse("my_team.html", {
         "request": request, "league": league, "team": team,
@@ -593,10 +606,18 @@ def my_team_upcoming_page(request: Request, db: Session = Depends(get_db)):
 @router.get("/picks", response_class=HTMLResponse)
 def picks_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
+    future_picks = services.get_future_picks(db, league)
+    managers = sorted({
+        name
+        for season in future_picks
+        for draft_type in ("main", "discovery")
+        for p in season.get(draft_type, [])
+        for name in (p["original_owner"], p["owner"])
+    })
     return templates.TemplateResponse(
         "picks.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
-         "future_picks": services.get_future_picks(db, league)},
+         "future_picks": future_picks, "managers": managers},
     )
 
 
@@ -1458,10 +1479,18 @@ def trade_submit(
 @router.get("/trades", response_class=HTMLResponse)
 def trades_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
+    trades = services.get_trades(db)
+    # Filter option lists, derived from what's actually on the page (client-side
+    # filtering only — no new endpoints).
+    seasons = [season["year"] for season in trades]
+    managers = sorted({
+        name for season in trades for row in season["trades"]
+        for name in (row["from"], row["to"]) if name
+    })
     return templates.TemplateResponse(
         "trades.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
-         "trades": services.get_trades(db, league),
+         "trades": trades, "seasons": seasons, "managers": managers,
          "trade_notes": services.get_trade_notes(db, league)},
     )
 
@@ -1469,9 +1498,16 @@ def trades_page(request: Request, db: Session = Depends(get_db)):
 @router.get("/transactions", response_class=HTMLResponse)
 def transactions_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
+    seasons_data = services.get_all_transactions(db)
+    seasons = [season["year"] for season in seasons_data]
+    managers = sorted({
+        move["manager"]
+        for season in seasons_data for week in season["weeks"] for move in week["moves"]
+    })
     return templates.TemplateResponse(
         "transactions.html",
-        {"request": request, "league": league, "weeks": services.get_transactions(db, league),
+        {"request": request, "league": league, "seasons_data": seasons_data,
+         "seasons": seasons, "managers": managers,
          "window": services.waiver_window(db, league)},
     )
 

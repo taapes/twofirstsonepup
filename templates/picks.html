@@ -9,13 +9,22 @@
   <thead><tr><th class="num">Round</th><th>Original owner</th><th>Now owned by</th></tr></thead>
   <tbody>
     {% for p in picks %}
-    <tr><td class="num">{{ p.round }}</td><td>{{ p.original_owner }}</td><td>{{ p.owner }}</td></tr>
+    <tr data-managers="|{{ p.original_owner }}|{{ p.owner }}|">
+      <td class="num">{{ p.round }}</td><td>{{ p.original_owner }}</td><td>{{ p.owner }}</td>
+    </tr>
     {% endfor %}
   </tbody>
 </table>
 {% endmacro %}
+<div data-filter-root>
+<div class="frow" style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+  <select data-filter="manager"><option value="">All managers</option>
+    {% for m in managers %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+  </select>
+</div>
 {% if future_picks %}
   {% for season in future_picks %}
+  <div data-season="{{ season.year }}">
   <h2>{{ season.year }}</h2>
   {% if season.main %}
   <div class="card"><table><thead><tr><th colspan="3">Main draft</th></tr></thead></table>{{ pick_table(season.main) }}</div>
@@ -23,8 +32,10 @@
   {% if season.discovery %}
   <div class="card"><table><thead><tr><th colspan="3">Discovery draft</th></tr></thead></table>{{ pick_table(season.discovery) }}</div>
   {% endif %}
+  </div>
   {% endfor %}
 {% else %}
   <div class="card empty">No traded future picks.</div>
 {% endif %}
+</div>
 {% endblock %}

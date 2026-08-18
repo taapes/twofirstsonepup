@@ -476,8 +476,24 @@ edited, not today's league row. Found while looking at the IL backfill form belo
 ### Show the in-progress squad (keepers + picks so far) once the draft starts — and after it
 
 **Priority:** `P1` — real UX gap during a live draft and in preseason; not draft-blocking.
-**Status:** `open`. Deferred by the user on 2026-08-17 — investigated and designed,
-not built. Captured here so the investigation isn't lost.
+**Status:** `done 2026-08-18`. Built as `services.get_teams_in_progress` /
+`get_my_team_in_progress`, wired into `/teams`, `/team/{fpl}`, `/my-team` for
+`phase in ("draft", "preseason")`. One correction to the design below, found during
+implementation: the design predates the rollover, so selections/picks for a
+pre-rollover draft live on the OUTGOING league row with that row's own
+`manager_id`s — both new functions resolve draft data by `season_year` (via the new
+`_draft_year_for`/`_in_progress_bridge` helpers) and bridge managers across rows by
+`Manager.fpl_manager_id`, never `managers.id`. Also fixed in passing: extended
+`_derive_gk_team_keeper_status` and `goalie_team_owner` with an optional
+`season_year` override (both defaulted to the prior behavior for every existing
+caller) — needed because, pre-rollover, `league.season_year` lags the draft year
+by one, and a club pick would otherwise be invisible in the in-progress view. Tests
+in `tests/test_in_progress_squad.py` (14 cases: real-vs-blank facts, cross-row
+bridging, orphaned managers, redraft/keeper-mode clubs, route phase-branching, and
+a `/v1` API stability guard). Full suite green, 0 skipped, excluding the three
+files (`test_audit.py`, `test_demo.py`, `test_sync_freeze.py`) that by design hit
+the live configured `DATABASE_URL` rather than `TEST_DATABASE_URL` — unrelated to
+this change and blocked in this environment by no network access to Neon.
 
 **Preseason gap (added 2026-08-17, same root cause).** Once the draft is complete and
 the league moves to `preseason`, managers cannot see their teams at all on `/my-team`.
@@ -695,6 +711,18 @@ events actually asked for.
 **Status:** `open` — **deliberately deferred until after the 2026 draft** (decided
 2026-08-15, the day before it)
 
+**Note added 2026-08-18.** The trades page's season-attribution rule is now LIVE on
+read (see "Trades, transactions, and picks pages are scoped to the current league
+row", done): a post-GW38 (offseason) commissioner-entered trade already DISPLAYS
+under the following season, computed by `services._trade_season_year` from
+`Trade.created_at` against the Jan 31 deadline. **The eventual storage migration
+must match this same boundary** — a trade currently displayed under season N+1 by
+the read-side rule needs to end up STORED as season N+1 too, or the migration and
+the display will disagree the moment it runs. Also confirmed the same day: future
+picks (`FuturePick` rows) are deliberately season-agnostic and are explicitly
+OUT OF SCOPE for this migration — they never move between league rows, this season
+or any future one.
+
 **The intent.** A season ends at GW38. Everything after that — keepers, trades, the
 draft, future picks — belongs to the *following* season and should be stored on that
 season's league row.
@@ -770,7 +798,41 @@ env in Render immediately after any rollover.
 ### Trades, transactions, and picks pages are scoped to the current league row
 
 **Priority:** `P2` — surfaces immediately after every rollover.
-**Status:** `open`. Found 2026-08-17 after the 26/27 rollover blanked all three pages.
+**Status:** `done 2026-08-18`. `get_trades(db)` now queries every league row and
+groups by season (a NEW display-attribution rule — see below); `get_all_transactions(db)`
+wraps the existing per-league `get_transactions` per season (kept per-league
+internally: GW numbers repeat 1-38 every season, so a bare-number cross-league diff
+would compare unrelated gameweeks); `get_future_picks` scans every row for candidate
+years, keeping `pick_ownership` league-scoped and letting the newest row win a tie on
+`(round, original_owner)`. All three pages got client-side season/manager/text
+filters (`trades`/`transactions`: season + manager + text; `picks`: manager only —
+`base.html`'s new `_applyRowFilters`, no new endpoints). Fixed in passing: a
+goalie-team trade used to render `kind="player", what="—"`; now `kind="club"` with
+the club's name. Tests in `tests/test_cross_season_trades.py` (12 cases). Full suite
+green, 0 skipped, excluding the three files that hit the live `DATABASE_URL` by
+design (unrelated, no network path to Neon in this environment).
+
+**New rule, confirmed 2026-08-18 — a trade's season is DISPLAY-computed, never taken
+from the storing row.** `services._trade_season_year`: an FPL-synced trade
+(`event_gw` set) can't have crossed a season boundary, so the storing row's own
+`season_year` is exactly right. A commissioner-entered trade (`event_gw` NULL) is
+bucketed by `created_at` against the spec's Jan 31 trade deadline — any trade after
+GW38 (May–Dec, offseason) belongs to the FOLLOWING season, any January trade belongs
+to the season that started the previous calendar year. **Known imprecision, not
+solved**: `Trade.created_at` was backfilled by migration `f5a6b7c8d9e0`
+(2026-08-11) with one shared timestamp on every pre-migration row, so a
+pre-migration commissioner trade always buckets into 2026 regardless of when it
+actually happened; an admin can set `event_gw` via `edit_trade` to re-file a
+misfiled row. **This same rule must be honored by the eventual storage migration**
+(see the "Post-GW38 activity" entry below) — the display grouping and the storage
+alignment need to agree on where a post-GW38 trade belongs.
+
+**Confirmed 2026-08-18: future picks are deliberately season-agnostic and are
+NEVER migrated between league rows**, even once the storage migration below lands —
+they're a standing multi-year outlook on pick ownership, not season-scoped history.
+
+<details>
+<summary>Original investigation (2026-08-17), kept for context</summary>
 
 **Root cause — three separate pages, same structural mistake.**
 
@@ -806,6 +868,8 @@ env in Render immediately after any rollover.
   filter to `pick_season_year >= current_year` to keep the view forward-looking. The
   `pick_ownership` call already passes `league` for manager name resolution — may need the
   same cross-league name map as trades.
+
+</details>
 
 ---
 
