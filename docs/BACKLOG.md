@@ -15,60 +15,30 @@ for work that is *known but not done*.
 
 ## What to do next
 
-Ordered 2026-08-15, the day before the draft. **The highest-priority work is operational,
-not code** — only item 0 involves running anything against the repo.
+Re-triaged **2026-08-18**, post-draft and post-rollover. The 2026-08-15 pre-draft P0s
+are all discharged (draft ran 08-16, rollover ran 08-17). Every open item now has an
+execution plan + a copy-paste session prompt with a recommended model in
+**`docs/SESSION_PLANS.md`** — run them in file order:
 
-### P0 — before the draft
+1. **Item 1** — in-progress squad view (`/my-team` and `/teams` are blank all
+   preseason) — Sonnet 5
+2. **Item 2** — trades/transactions/picks pages cross-season + season attribution
+   (Jan-31 rule) + filters — Sonnet 5
+3. **Item 3** — history page cross-season — Haiku 4.5
+4. **Items 4a/4b** — discovery pick links + the "discovery" keeper clock, then
+   sync-driven match suggestions + admin dashboard (before the September discovery
+   draft) — Opus 5
+5. **Item 5a** — migrate the 2026 draft onto the 26/27 row (snapshot + Neon-branch
+   rehearsal mandated) — Opus 5
+6. **Item 6** — IL ownership design session (before the season's first IL case) —
+   Opus 5
+7. **Item 7** — keeper years survive a drop (rules decided: frozen while unowned;
+   preseason FA carries; only a draft resets) — Opus 5
+8. **Items 8–16** — small fixes and tooling, any idle session — Haiku/Sonnet
 
-Worked **one at a time**: clarify → plan → do → confirm, before moving to the next.
-
-**1. Apply the goalie-team migrations to prod and set `goalie_team_mode` on the 25/26
-row.** Confirmed: goalie teams are live for this draft (14 picks + a club). First because
-it fails *silently* — unset, the board sizes to 15 instead of 14, no club can be drafted,
-and three preflight checks skip. Set it on the **25/26** row; the draft runs on the
-outgoing season.
-
-**2. Backfill the two IL placements** — Šeško/Scott (`start_gw=37`, replacement Gabriel
-Jesus, per commit `4cf5d40`) and Kudus/Kevin T (replacement Trossard), via
-`POST /admin/keepers/il-backfill`. **This blocks item 3 for those two managers:** an IL'd
-player only becomes a keeper candidate once the IL row exists, so Scott and Kevin T
-cannot submit a correct keeper list until this is done.
-*Sequencing hazard:* do any **goalkeeper** IL backfill **before** item 1 — switching
-goalie teams on makes historical GK backfills impossible. Neither of these two is a GK.
-
-**3. Chase the six outstanding keeper submissions.** A manager with no submission gets a
-full un-reduced board, which shifts *every other manager's* pick positions, not just
-their own.
-
-**4. Run `scripts/preflight_draft.py`** — data readiness. Read two lines: the
-`(checking the 2026 draft)` print, and check 6's detail, which must describe a **14**-round
-board. Preflight goes red once the phase is `draft`, so there is no verify-while-live mode.
-
-**5. Full regression, green with ZERO skips, on the exact code being drafted with — the
-LAST thing before starting the draft.** The code-readiness gate, deliberately last so it
-runs against the finished state rather than a moving one. The 553-pass run on 2026-08-15
-does **not** discharge it: it ran against a working tree carrying another session's
-in-flight `rules.py` / `services.py` edits, so it tested code that isn't what will be
-deployed. Command and acceptance criteria: see
-[Running a full regression](#running-a-full-regression-before-the-draft) below —
-**`0 skipped` is part of passing**, and both failure modes are silent.
-
-### P1 — after the draft
-5. Release overlay (G. Jesus, Trossard) — one mechanism, both cases.
-6. `goalie_team_owner` season skew — self-heals at the rollover.
-
-### P2 — after the rollover
-7. Post-GW38 season alignment (+ migrate the 2026-stamped rows onto the 26/27 row).
-8. Keeper years survive a drop.
-9. Discovery picks get a 3-year clock instead of 4.
-
-### P3 — tooling and quality
-10. IL backfill name search — would have made item 2 painless.
-11. preflight's "rollover NOT done" check can't detect a rollover.
-12. Make the test skip loud. *(P3 only because item 0 pins the workaround by hand; with
-    this guard, item 0 becomes a one-command check.)*
-13. Historical GK IL backfill refusal — promote if a goalkeeper case appears.
-14. v2 in-app league — `blocked`.
+Parked: **Item 5b** (provisional-row season alignment — planning session, spring
+2027); **v2 in-app league** — `blocked`. Retired as moot 2026-08-18: the 25/26
+G. Jesus / Trossard / Kudus data corrections (see the annotated entries below).
 
 ---
 
@@ -87,6 +57,68 @@ goalie-team commits, so treat every line as *verify*, not *assume*.
 ---
 
 ## Bugs
+
+### Review IL-driven keeper restoration end to end — one signal, three separate carve-outs so far
+
+**Priority:** `P1` — re-triaged 2026-08-18: the 26/27 season is starting and IL
+self-service is live, so the next mid-season IL case can arrive any week. The two
+25/26 incidents below are retired as moot (frozen row, correct keepers carried); this
+entry is now purely forward-looking. Scoped as the Item 6 design session in
+`docs/SESSION_PLANS.md`.
+**Status:** `open`. Raised 2026-08-16 after two same-night incidents (Šeško/Scott,
+Kudus/Kevin T) turned out to be the same structural gap wearing two different masks.
+
+**What actually happened tonight, precisely.**
+
+- **Šeško/Scott**: an `InjuryList` row (Šeško, replacement G.Jesus) already existed
+  from an earlier session. It correctly makes Šeško a keeper *candidate* — that union
+  lives in `_derive_keeper_status` (`services.py`, `final_candidates |= {k for k,
+  covered in il.items() if last_n in covered}`). But **nothing else about the IL row
+  corrects roster ownership**: the real, FPL-synced `Roster` row for GW38 still had
+  G.Jesus, not Šeško, in Scott's 15th slot. Every reader of ownership *other than*
+  `_derive_keeper_status` — `effective_owner`/`effective_keeper_selections` (draft slot
+  math), `get_rosters` (`/my-team`), `player_portal` (the Players tab's owner column),
+  the "site trades applied" health check — kept showing G.Jesus as Scott's, and Šeško
+  as nobody's. Fixed tonight by directly deleting the stale `Roster` row and inserting
+  a genuine one for Šeško, plus closing the IL entry via `return_from_il` — justified
+  **only** because this season is permanently frozen (`sync_locked`) and will never be
+  re-synced. That is a one-off correction, not a repeatable mechanism.
+- **Kudus/Kevin T**: no IL row exists for him at all. Instead his `KeeperSelection` is
+  flagged `is_discovery=True` — a mechanism meant for the September discovery draft,
+  repurposed as a workaround because the IL path (as above) doesn't fully work. That
+  workaround then needed **two separate fixes of its own tonight**, in two different
+  functions, discovered one incident at a time: `effective_keeper_selections` didn't
+  know about it (`e503afd`, slot math), then `_derive_keeper_status` didn't know about
+  it either (`958cce8`, the keepers-page display). Both are now fixed, but only because
+  each was hit by accident and diagnosed live.
+
+**The pattern worth reviewing.** Every time the league needs "this player's roster slot
+doesn't reflect reality" — an IL swap, an off-roster discovery pick — the fix has been
+a bespoke boolean carve-out bolted onto whichever *one* reader function broke first.
+There is no single place that answers "who really holds this player, accounting for
+trades AND IL AND discovery" the way `player_ownership`/`effective_owner` already do
+for trades alone. That already-existing overlay pattern generalizes naturally; it just
+hasn't been generalized.
+
+**What to decide, not build, right now:**
+1. Should an IL backfill (`place_on_il`) that names a real replacement also correct
+   `Roster`-derived ownership automatically — via an overlay (like the trade fold in
+   `_owner_maps`), never a direct mutation — so `get_rosters`/`player_portal`/slot math
+   all agree without a manual one-off each time?
+2. Is `is_discovery` an acceptable general-purpose "off-roster keeper" escape hatch, or
+   should IL coverage and discovery status be unified into one mechanism instead of two
+   parallel ones that each need their own carve-out in every reader?
+3. Audit every other reader of `player_ownership`/`effective_owner` for the same
+   blind spot before the next incident finds one by accident — `get_rosters`
+   (`services.py:899`), `player_portal` (`services.py:1832`), and the health check's
+   "site trades applied" section are the ones already confirmed unaware of IL coverage.
+
+**Related, not duplicate:** the "G. Jesus should be a free agent" entry below is the
+*release* half of this same ownership question (a player leaving with no new owner);
+this entry is the *restoration* half (a player returning who was never un-rostered in
+FPL's eyes). A general fix likely wants to solve both through the same mechanism.
+
+---
 
 ### Keeper years must survive a drop — the clock belongs to the player, not the owner
 
@@ -178,9 +210,12 @@ and `:42` ("dropped players lose keeper eligibility"), and the keeper section of
 
 ### Kevin's Kudus: restore the IL keeper and release the replacement
 
-**Priority:** **`P0` for the IL backfill** (it blocks Kevin T's keeper submission),
-`P1` for releasing Trossard.
-**Status:** `open`
+**Priority:** —
+**Status:** `retired 2026-08-18` — moot. The 2026 draft ran with the correct keepers
+(Kudus kept via the workaround); the 25/26 row is frozen and nothing forward-looking
+reads the stale state (clocks derive from carried seeds, which came from the correct
+selections). The forward-looking work is the IL ownership design session in
+`docs/SESSION_PLANS.md` (Item 6).
 
 **What's needed.** Kevin had Kudus on the injury list at the end of 25/26, so Kudus
 should be a **draft keeper** on his squad. Trossard — the replacement who took the roster
@@ -309,9 +344,12 @@ rollover check to test what it claims.
 
 ### G. Jesus should be a free agent, not on Scott's roster
 
-**Priority:** `P1` — cosmetically wrong but mechanically harmless for the draft, which
-reads keeper *selections*, not candidate counts.
-**Status:** `open`
+**Priority:** —
+**Status:** `retired 2026-08-18` — moot for the same reasons as the Kudus entry:
+draft done with correct keepers, the 25/26 row frozen, no forward-looking reader
+touches the stale state. Any residue is cosmetic on archived 25/26 pages only. The
+release-overlay *design* survives as an input to the IL ownership design session
+(`docs/SESSION_PLANS.md` Item 6); the fix sketch below is kept as its record.
 
 **Symptom.** G. Jesus shows on Scott's squad and shouldn't. The desired end state is
 simply that he becomes a **free agent** — treat him as dropped after GW38.
@@ -435,6 +473,222 @@ edited, not today's league row. Found while looking at the IL backfill form belo
 
 ## Features
 
+### Show the in-progress squad (keepers + picks so far) once the draft starts — and after it
+
+**Priority:** `P1` — real UX gap during a live draft and in preseason; not draft-blocking.
+**Status:** `open`. Deferred by the user on 2026-08-17 — investigated and designed,
+not built. Captured here so the investigation isn't lost.
+
+**Preseason gap (added 2026-08-17, same root cause).** Once the draft is complete and
+the league moves to `preseason`, managers cannot see their teams at all on `/my-team`.
+`_squad_players` (`services.py:915`) returns `[]` when `gw_id is None` — which it is
+until the first FPL sync succeeds and populates `gameweeks`. Since FPL hasn't opened the
+new season yet, no sync can run, no gameweek exists, and every manager's My Team page is
+blank despite a fully recorded draft. The fix below (a phase-gated fallback to
+`draft_picks`) resolves both the live-draft and preseason cases identically — extend the
+phase condition from `league.phase == "draft"` to `league.phase in ("draft",
+"preseason")`.
+
+**The ask.** Once the draft starts, `/teams` and `/my-team` should show each
+manager's kept players plus whatever they've drafted so far — growing as picks are
+made — instead of last season's finished roster.
+
+**Confirmed safe before designing anything — worth stating plainly, since the
+literal wording ("cleared") could be misread as data deletion.** This is a pure
+display change. Both pages currently read the `rosters` table for GW38 via
+`_derive_keeper_status`'s `final_candidates` (`services.py`, `/teams`) and
+`_effective_roster_pids` (`services.py`, `/my-team`) — neither queries `DraftPick`
+at all, so during a live draft they show the *old, finished 25/26 squad*, with zero
+connection to tonight's picks. Nothing anywhere in this codebase mutates or deletes
+`rosters` outside `sync.sync_rosters` (CLAUDE.md's two-truths rule), and this
+feature doesn't change that — it builds a *new* view (kept ∪ drafted-so-far) and
+shows that instead, once `league.phase == "draft"`. The real roster data is never
+touched.
+
+**Design, already worked out — two new functions, not two modified ones.**
+`get_keepers` backs a public, unauthenticated `/v1` API route (`api.py:59`) whose
+output must not silently change based on internal phase state — that's an external
+contract. So: write `services.get_teams_in_progress` and
+`services.get_my_team_in_progress` as new siblings, matching their counterparts'
+output shape exactly (zero template changes needed), and have the **routes** decide
+which to call based on `league.phase`:
+- `/teams` (`ui.py`) and `/team/{fpl}`: call the new function when
+  `phase == "draft"`, else the existing `get_keepers`.
+- `/my-team`: same pattern with `get_my_team_in_progress`.
+- `/my-team/upcoming` and `api.py`'s `/v1/.../keepers`: **untouched** — the former
+  never reads the roster list (confirmed — it only uses `me["manager"]`, the
+  display name), the latter must keep its contract stable regardless of phase.
+
+**The two new functions' contents:**
+- `get_teams_in_progress`: per manager, `effective_keeper_selections` (kept
+  players/clubs, with their real derived acquisition/years/eligible — unaffected by
+  this feature) **∪** this manager's `DraftPick` rows for the current draft
+  (rendered with `acquisition=None, years_remaining=None, eligible=None,
+  kept=False` — the same "blank keeper facts for a freshly-drafted player"
+  convention already established for the Players tab, `da36736`). No dedup needed:
+  `record_pick` already refuses a player who's already kept, so the two sets are
+  always disjoint. Keeper privacy is moot in practice here — by the time
+  `phase == "draft"`, `enter_draft_phase` has already set `keepers_locked=True`, so
+  selections are already revealed to everyone.
+- `get_my_team_in_progress`: same idea, but reuses `get_my_team`'s existing rich
+  per-player rendering (stats, ownership, availability, keeper badges) — requires
+  extracting that "id set → rich rows" portion into a small shared helper first, so
+  both functions call it with a different starting id set. A freshly-drafted
+  player's stats shown are automatically **last season's real numbers** (the
+  existing stat-lookup machinery, unchanged) — not zeros, and not something this
+  feature needs to compute specially.
+
+**Tests planned, not written:** a manager with N keepers + M picks shows N+M
+players with the right blank/real fact split; a manager with 0 picks shows only
+keepers (no placeholder rows — confirmed with the user); a phase-not-draft regression
+guard (old pages unchanged outside the draft window); and a public-API guard
+proving `/v1/.../keepers` is identical regardless of phase.
+
+**Full design detail, if picked up later:** this plan was fully fleshed out in a
+2026-08-17 planning session before being deferred — the reasoning above is the
+condensed version. Re-derive quickly by re-reading `_derive_keeper_status`,
+`get_keepers`, `get_my_team`, `_effective_roster_pids`, and `effective_keeper_selections`
+in `services.py`, and `api.py:59`'s `/v1/.../keepers` route.
+
+---
+
+### `/teams` grid renders uneven card heights — one manager's list looks twice as long
+
+**Priority:** `P3` — visual polish, requested 2026-08-16.
+**Status:** `open`
+
+**The ask.** On `/teams`, side-by-side manager cards render very differently tall —
+e.g. John's next to a "Kevin" looked roughly double the length.
+
+**The layout mechanism.** `templates/teams.html` renders one `_roster_card.html` per
+manager (a `<table>`, one row per player) inside `.teamgrid`
+(`templates/base.html:66`):
+```css
+.teamgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:12px; }
+```
+Plain CSS grid, no explicit `align-items` — the default is `stretch`, so every card in
+the same grid *row* is padded to match the tallest card in that row. Managers are
+ordered alphabetically (`Manager.display_name`), so which cards land in the same visual
+row — and therefore which one "sets the height" for its neighbors — depends on however
+many columns the viewport fits, not on anything about the two managers being similar.
+
+**The row counts genuinely vary, which compounds it.** Checked against live data — each
+card's row count is `len(get_keepers(...)[i]["players"])`, i.e. the *keeper-candidate*
+set from `_derive_keeper_status`, not a fixed 15:
+```
+Kevin S  17    Steve    13
+Gaby     15    Kevin F  15
+John     15    Kevin T  15
+Scott    15    Michael  15    Tucker  15
+```
+Most managers sit at exactly 15; **Kevin S (17) and Steve (13) are real outliers**,
+worth a second look on their own terms — I checked both for the exact duplicate-pair
+signature that caused the Šeško/Jesus and Kudus/Trossard incidents earlier tonight (an
+IL-restored player and his still-rostered replacement both counted) and did **not**
+find it in either manager's list; their variance looks like ordinary roster churn, not
+a repeat of that bug. Worth confirming rather than assuming, since this session found
+that exact pattern twice already.
+
+**Text length inside a row varies too.** Acquisition labels differ a lot in width
+(`draft` / `waiver` / `discovery`), and each card column is only `minmax(300px, ...)`
+wide — a run of longer labels can wrap onto a second line and make an otherwise
+same-row-count card visibly taller, independent of row count.
+
+**Fix directions, not mutually exclusive:**
+1. `align-items: start` on `.teamgrid` stops the stretch-to-tallest behavior — cheapest
+   change, but leaves the underlying row-count variance visible rather than fixing the
+   comparison.
+2. Show only **kept** players by default (5 rows for everyone, uniform), with the full
+   15-man roster behind a toggle/expand — matches what a viewer actually compares
+   manager-to-manager ("who's keeping what"), and the page's own full detail stays one
+   click away rather than gone.
+3. If the row-count variance itself is the thing to fix (not just its visual symptom),
+   that's actually the "Review IL-driven keeper restoration" entry above — confirm
+   Kevin S/Steve first before assuming this entry and that one are the same work.
+
+---
+
+### Schedule keeper lock and draft open — fire automatically at a set time
+
+**Priority:** `P3` — new feature, requested 2026-08-16, the night of the 2026 draft.
+**Status:** `open`. Not built tonight — draft night is not the time to add a new
+scheduling subsystem; captured here so the investigation isn't lost.
+
+**The ask.** Let the commissioner set a date/time for keepers to lock and a (separate)
+date/time for the draft to open, and have both happen automatically — no manual click.
+
+**These are already two distinct events in the data model, which is good.** `keepers_locked`
+is a plain boolean toggled by the `keepers_lock` checkbox on `/admin/lock`
+(`ui.admin_lock`), independent of phase. The draft opening is a phase transition,
+`offseason → draft`, done today only via `services.enter_draft_phase` (admin clicks
+"Start draft"). So the feature is naturally two scheduled fields, not one:
+`leagues.keepers_lock_at` and `leagues.draft_opens_at` (nullable datetimes), each
+triggering its own existing action when due.
+
+**There's already a pattern for exactly this — reuse it, don't invent a new one.**
+`services.advance_phase_if_due` (`services.py:701`) is the existing time/GW-driven
+auto-advance heartbeat, called from every `/admin/sync` run: GW38→offseason at season
+end, preseason→in_season at GW1, and the Oct-1 discovery window auto-opening, via the
+pure decision function `rules.next_phase` (`rules.py:148`). The new scheduled checks
+belong right alongside these — compare `now >= keepers_lock_at` / `now >=
+draft_opens_at` the same way `next_phase` compares `today` against the Oct-1 threshold,
+and respect `phase_manual` exactly as the existing transitions do (an admin who has
+manually pinned the phase should not be silently overridden by a schedule they set
+earlier).
+
+**Explicitly excluded from this today, on purpose.** `rules.next_phase`'s docstring is
+direct about it: *"admin-confirmed moves (offseason→draft, draft→preseason, closing
+discovery) are explicit elsewhere."* Opening the draft was deliberately kept a manual,
+admin-confirmed action — this feature is asking to cross that boundary for one specific
+transition, while the manual "Start draft" button must keep working unchanged (an admin
+who wants to open it early, or a schedule that needs correcting, still needs the
+override).
+
+**The real constraint: "automatically" is bounded by the sync cron's cadence, and that
+cadence has real gaps.** `.github/workflows/cron.yml`:
+```yaml
+- cron: "0 6 * * *"          # daily 06:00 UTC — guarantees one full sync/day
+- cron: "*/30 11-23 * * *"   # every 30 min, 11:00–23:00 UTC
+```
+`advance_phase_if_due` only runs when `/admin/sync` runs. Between 23:00 and 06:00 UTC
+there is **no trigger at all** — a schedule that lands in that window won't fire until
+the 06:00 sweep, up to a ~7-hour delay. A time set for, say, 7am ET (11:00 UTC in
+summer) lands right at the edge of the window and is fine; a time set for 9pm ET
+(01:00 UTC) would sit unfired for hours. This has to be surfaced **in the admin UI
+itself** when picking a time, not left as a code comment — a commissioner setting
+"draft opens at 8:00am" needs to see the worst-case delay before they rely on it.
+(CLAUDE.md is explicit that this project deliberately avoids paid Render cron for
+exactly this reason — a finer-grained trigger means either a paid tier or a different
+external pinger, both new infra decisions.)
+
+**A new class of concern this codebase hasn't had to handle yet: timezone.** Every
+existing date field (`draft_date`, the Oct-1 discovery threshold) is a plain `Date`,
+compared against `date.today()` — no time-of-day, no timezone, no DST. A "lock at
+7:00am" field is a genuine `datetime`, and the league is a US-based group while the
+cron and `now` in `advance_phase_if_due` are UTC. Needs a decision: store the admin's
+input as UTC directly (simplest, but the admin must do the mental conversion each time)
+or store a US timezone name alongside and convert at comparison time (friendlier, but
+touches DST twice a year — the one detail that has bitten similar features elsewhere).
+
+**Fix sketch.**
+1. Two nullable `DateTime(timezone=True)` columns on `leagues`:
+   `keepers_lock_at`, `draft_opens_at`.
+2. Extend `advance_phase_if_due` (or a sibling helper called at the same site) to check
+   `now >= keepers_lock_at` → set `keepers_locked = True` (idempotent — clear the field
+   or leave it, but never re-fire), and `now >= draft_opens_at` → call the same path
+   `enter_draft_phase` already uses, so keeper-reveal and the pool-refresh side effect
+   stay in exactly one place.
+3. Admin UI: two datetime inputs on `/admin/health`, with the cron-cadence caveat
+   rendered next to them, and a clear display of "still pinned manually" if
+   `phase_manual` would prevent the scheduled draft-open from firing.
+4. Decide the timezone question above before writing the migration.
+
+**Not in scope for this entry**: any other event someone might later want scheduled
+(discovery close, trade deadline reminders) — resist letting this grow past the two
+events actually asked for.
+
+---
+
 ### Post-GW38 activity should belong to the following season
 
 **Priority:** `P2` — the largest item here; do it with the 2026-row migration.
@@ -510,6 +764,129 @@ id, falling back to the `FPL_DRAFT_LEAGUE_ID` env. After a rollover that env sti
 at the old, now-frozen league, and every sub-task takes the frozen-skip branch which sets
 `log.ok = True` — so **the nightly cron reports green while syncing nothing**. Update the
 env in Render immediately after any rollover.
+
+---
+
+### Trades, transactions, and picks pages are scoped to the current league row
+
+**Priority:** `P2` — surfaces immediately after every rollover.
+**Status:** `open`. Found 2026-08-17 after the 26/27 rollover blanked all three pages.
+
+**Root cause — three separate pages, same structural mistake.**
+
+- `/trades` → `get_trades(db, league)` filters `Trade.league_id == league.id`. All 25/26
+  trades live on the old league row; the new row has none.
+- `/transactions` → `get_transactions(db, league)` filters `Gameweek.league_id == league.id`.
+  No gameweeks yet on the new row → empty.
+- `/picks` → `get_future_picks(db, league)` queries `FuturePick.league_id` and
+  `Trade.league_id`, both on the current row → empty.
+
+**What the user expects (confirmed 2026-08-17).**
+
+- **Trades**: show all trades from every season, not just the current one. Trades are a
+  permanent record of who dealt with whom; there is no reason to hide last season's.
+- **Transactions**: same — cross-season add/drop history. Scoping to one league row makes
+  the page blank for the entire preseason, and loses prior history forever once a season
+  ends.
+- **Picks**: forward-looking view of pick trades for the next ~5 years. These picks are
+  already entered on the old league row; scoping to the new row hides them. The correct
+  scope is all pick trades with `pick_season_year >= current_season_year`, regardless of
+  which league row stores them.
+
+**Fix sketch.**
+
+- `get_trades`: remove the `league_id` filter; join to `League` to get the display
+  league name per row; order by `created_at` desc. Already has a `league` arg for manager
+  name resolution — thread `db` and query all leagues' managers, or accept a name map
+  keyed by `league_id`.
+- `get_transactions`: same — drop the `league_id` filter on Gameweek; group by season
+  with a year header in the template. Alternatively, render per-season with the
+  current season first (matching the trades page's newest-first ordering).
+- `get_future_picks`: drop the `league_id` filters on `FuturePick` and `Trade.league_id`;
+  filter to `pick_season_year >= current_year` to keep the view forward-looking. The
+  `pick_ownership` call already passes `league` for manager name resolution — may need the
+  same cross-league name map as trades.
+
+---
+
+### History page is scoped to current league row
+
+**Priority:** `P2` — surfaces after every rollover.
+**Status:** `open`. Found 2026-08-17.
+
+`get_history(db, league)` (`services.py:5392`) filters `SeasonHistory`, `ManagerHonors`,
+and `HistoricalStanding` all by `league_id=league.id`. After rollover the current league
+is the new season's row; it has no history rows yet. History is by definition
+cross-season and should query across all league rows, not just the current one. Fix:
+drop the `league_id` filter (or join across all leagues belonging to the same logical
+league group — currently there is only ever one logical league, so a straight drop is
+correct) and sort by year descending.
+
+---
+
+### 2026 draft board inaccessible after rollover
+
+**Priority:** `P2` — reference data that managers will want to consult.
+**Status:** `open`. Found 2026-08-17.
+
+After rollover, `/draft/2026` on the new current league row renders empty (all
+`DraftPick` rows are on the old 25/26 league row). The draft board is a permanent record
+— who drafted whom, in what round — and should remain browsable as part of the season
+archive.
+
+**Where it should live (confirmed 2026-08-17).** Under `/seasons` / `/season/{id}` —
+the same place historical standings and scores live. The season detail page should link
+to (or embed) the draft board for that season. The `/draft/{year}` route resolves via
+the current league, which is why it goes blank; a season-scoped route that passes the
+old league row to `get_draft_board` would serve it correctly from the archived data.
+
+**Fix sketch.** Add a `GET /season/{fpl_league_id}/draft/{year}` route (or extend the
+existing `/season/{id}` template to include a draft section) that resolves the league by
+`fpl_league_id` rather than `is_current`, then calls `services.get_draft_board(db,
+old_league, year, "main")`. No data migration needed — the picks are already there.
+
+---
+
+### Post a message to Discord when a trade is recorded
+
+**Priority:** `P3` — new feature, requested 2026-08-15. **To explore, not yet designed.**
+**Status:** `open`
+
+**The ask.** When a trade is posted in the app, announce it in the league's Discord.
+
+**Where it would hook.** Every trade write already emits an audit record, so the action
+names are the natural inventory of what would fire — `trade.record`
+(`services.record_trade`, the public `/trade` form), `trade.player` and `trade.pick`
+(the commissioner draft-page entries), `trade.goalie_team`, plus `trade.edit` and
+`trade.delete`. `record_audit` is the one call all of them already make, which makes it
+the obvious single choke point — worth checking whether that is a feature (one hook, and
+other event types come free later) or a trap (audit is a write-path primitive; coupling
+it to an outbound HTTP call gives every future audited action a network dependency).
+
+**Things to think about before designing it:**
+
+- **A Discord webhook needs no bot** — a URL in env and a JSON POST. Follows the existing
+  secret-handling pattern in `SECURITY.md`; the URL is a credential, so env only.
+- **It must not be able to fail a trade.** The write is the real work and the
+  announcement is a side effect; a Discord outage or a rotated webhook must not roll back
+  or 500 the trade. Fire-and-forget, or queue it.
+- **This is the first *outbound* call in a request handler.** CLAUDE.md's architecture
+  rule ("don't add live FPL calls into request handlers") is about inbound sync, but the
+  reasoning — request latency and an external service's availability leaking into ours —
+  applies identically here.
+- **`sync_trades` is the sharp edge.** Trades also arrive from the FPL feed, and sync is
+  idempotent and re-runs constantly. Announcing on sync without an already-posted marker would
+  re-post the same trade on every run, and a historical backfill would dump the entire
+  trade history into the channel at once. Needs a persisted per-trade flag, not an
+  in-memory guard.
+  
+- **What the message should say** is a real question, not a detail: `get_trades` already
+  assembles the human-readable shape the site renders, so reuse it rather than
+  re-deriving. Decide whether pick trades and club trades read well in one line, and
+  whether commissioner *edits* and *deletes* should announce at all or stay silent.
+- **Adjacent asks it should not quietly grow into**: keeper submissions, draft picks
+  going on the clock, waiver moves. Worth knowing whether this is "trades" or "a
+  notifications feature" before building the first one.
 
 ---
 
