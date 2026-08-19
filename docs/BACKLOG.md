@@ -872,8 +872,47 @@ events actually asked for.
 ### Post-GW38 activity should belong to the following season
 
 **Priority:** `P2` — the largest item here; do it with the 2026-row migration.
-**Status:** `open` — **deliberately deferred until after the 2026 draft** (decided
-2026-08-15, the day before it)
+**Status:** `open` — the MIGRATION half is built and BLOCKED; the provisional-row
+architecture remains deferred.
+
+**Migration half — built 2026-08-18, blocked on identity.**
+`scripts/migrate_2026_draft.py` (dry-run default, `--apply`, one transaction) moves
+`draft_picks` / `keeper_selections` / `draft_lottery` / `draft_order_override` for
+`season_year=2026` from the 25/26 row to the 26/27 row, remapping every manager FK,
+with all unique-constraint collisions checked BEFORE any write. `FuturePick` and
+`Trade` rows deliberately do NOT move: future picks are season-agnostic by design (a
+standing multi-year outlook read cross-league by `/picks`), and a trade is a record of
+when something happened — `get_trades` already attributes it to a season on READ, so
+moving the rows would make storage and display disagree. Keeper seeds are REPORT-ONLY.
+**It currently aborts on production** — see "FPL entry ids are NOT stable across
+seasons" below; nothing has been written.
+
+Two silent failures found and fixed while building it, both of which would have made
+the migrated board *look* fine:
+- **Round-2+ order** came from the row being displayed. The 26/27 row is not empty of
+  standings — it has ten rows of zeroes — so the board would have rendered a
+  plausible but WRONG order rather than failing. `services._prior_season_league` now
+  resolves the order (and the ownership question below) from the `season_year - 1`
+  row, falling back to the passed row so every pre-rollover and archived read is
+  unchanged.
+- **`effective_keeper_selections`** asked "does this manager still hold him" of the
+  row it was passed, and `effective_owner` answers from that row's LATEST GAMEWEEK.
+  The 26/27 row has no gameweeks until FPL opens the season, so every selection would
+  have read as "traded away" — ten full 15-slot boards with kept players draftable,
+  which is the exact failure the pre-rollover draft existed to avoid, arriving from
+  the other direction. Now judged on the prior-season row, with `_manager_bridge`
+  translating the ownership map's manager ids onto the row being read.
+
+The `season_year + 1` expressions are now `services._draft_year_for` at the five
+draft-scoped sites (nav link, keepers page, draft-prep, preflight, `/admin/health`).
+The other five occurrences answer a different question — "which keeper cycle is
+open" — and correctly stay `+1`. Deliberately NOT blanket-flipped: the 2027 draft
+runs pre-rollover on the 26/27 row, where `+1` is right again.
+
+Tests: `tests/test_draft_row_migration.py` (29 cases).
+
+<details>
+<summary>Original deferral rationale (2026-08-15)</summary>
 
 **Note added 2026-08-18.** The trades page's season-attribution rule is now LIVE on
 read (see "Trades, transactions, and picks pages are scoped to the current league
@@ -950,6 +989,8 @@ Two findings that make deferral safer than first assumed:
 
 **The one real cost of waiting:** between the draft and the migration, `/draft/2026` on
 the new row renders empty and the 26/27 season has no draft history of its own.
+
+</details>
 
 **Related trap to fix at the same time.** `/admin/sync` calls `sync_all()` with no league
 id, falling back to the `FPL_DRAFT_LEAGUE_ID` env. After a rollover that env still points

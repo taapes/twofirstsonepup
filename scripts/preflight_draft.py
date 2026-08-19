@@ -60,7 +60,7 @@ def main() -> None:
         # Derived, not a module constant — the pinned 2026 went stale the moment the
         # season it named arrived, and every check below silently looked at the wrong
         # year.
-        upcoming_season = (league.season_year or 0) + 1
+        upcoming_season = services._draft_year_for(league)
         print(f"       (checking the {upcoming_season} draft)")
 
         managers = db.query(Manager).filter_by(league_id=league.id).all()

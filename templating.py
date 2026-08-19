@@ -36,9 +36,16 @@ def _phase(request: Request) -> dict:
 
         with SessionLocal() as db:
             league = services.current_league(db)
-            return {"phase": services.phase_context(db, league) if league else None}
+            return {
+                "phase": services.phase_context(db, league) if league else None,
+                # The draft this row is running (services._draft_year_for), for the
+                # nav link. Computed here rather than as `season_year + 1` in the
+                # template so the nav can't point at a different draft than the pages
+                # it links to once the season-alignment migration has run.
+                "draft_year": services._draft_year_for(league) if league else None,
+            }
     except Exception:
-        return {"phase": None}
+        return {"phase": None, "draft_year": None}
 
 
 def _rules(request: Request) -> dict:

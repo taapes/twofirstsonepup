@@ -4011,7 +4011,60 @@ def get_keeper_selections(
 
 
 # ---- drafts (board generation + commissioner-entered pick/player trades) ----
-def _reverse_standings_managers(db: Session, league: League) -> list[Manager]:
+def _prior_season_league(db: Session, league: League, season_year: int) -> League:
+    """The row for the season that ENDED before `season_year` — i.e. season_year - 1.
+
+    Two questions about a draft are really questions about the season that just
+    finished, and both break the same way once the draft data has been migrated onto
+    the season it describes:
+
+      - the round-2+ ORDER is the reverse of the final standings;
+      - whether a submitted keeper still COUNTS is "did that manager still hold him
+        at the final gameweek".
+
+    Pre-rollover the answer is the passed row itself (the 2026 draft ran on the 25/26
+    row, whose own season_year is 2025), so this is a no-op on the historical path and
+    on every archived season re-read on its own row.
+
+    It matters post-migration. The 26/27 row's own standings are the 26/27 season's —
+    at preseason, ten rows of zeroes — so ordering by them doesn't fail loudly, it
+    yields a plausible-looking WRONG order. And the row has no gameweeks at all yet,
+    so `effective_owner` returns an empty map and every keeper selection reads as
+    "no longer owned", handing all ten managers a full un-reduced board.
+
+    Falls back to `league` when no prior row exists (a first season).
+    """
+    prior = (
+        db.query(League)
+        .filter(League.season_year == (season_year or 0) - 1)
+        .order_by(League.is_current.desc())
+        .first()
+    )
+    return prior or league
+
+
+def _manager_bridge(db: Session, src: League, dst: League) -> dict:
+    """{src manager uuid: dst manager uuid}, matched on the stable FPL entry id.
+
+    `managers` has one row per manager PER SEASON, so any answer computed on one
+    league row has to be translated before it can be compared against ids on another.
+    Empty (and the caller skips the translation) when both are the same row.
+    """
+    if src.id == dst.id:
+        return {}
+    dst_by_fpl = {
+        m.fpl_manager_id: m.id for m in db.query(Manager).filter_by(league_id=dst.id)
+    }
+    return {
+        m.id: dst_by_fpl[m.fpl_manager_id]
+        for m in db.query(Manager).filter_by(league_id=src.id)
+        if m.fpl_manager_id in dst_by_fpl
+    }
+
+
+def _reverse_standings_managers(
+    db: Session, league: League, standings_league: League | None = None
+) -> list[Manager]:
     """Draft order for rounds 2+: worst-placed first.
 
     Reads the ADJUSTED standings, not the raw `Standing.rank` column. A commissioner
@@ -4020,6 +4073,12 @@ def _reverse_standings_managers(db: Session, league: League) -> list[Manager]:
     draft board could disagree, which is exactly what a post-season deduction caused.
     Reuses get_standings rather than re-merging the deltas here, so there is one
     definition of "the standings" and the tie-breaks can't drift apart.
+
+    `standings_league` reads the ORDER off a different row than the one whose managers
+    are returned (see _prior_season_league). The bridge is `fpl_manager_id`, the
+    stable identity — `managers` has one row per manager per season, so the finishing
+    order from last season's row has to be mapped back onto this row's manager uuids
+    or every id would be a stranger to the board.
     """
     by_fpl = {
         m.fpl_manager_id: m
@@ -4027,7 +4086,7 @@ def _reverse_standings_managers(db: Session, league: League) -> list[Manager]:
     }
     ordered = [
         by_fpl[row["fpl"]]
-        for row in get_standings(db, league)          # best first, adjusted
+        for row in get_standings(db, standings_league or league)   # best first, adjusted
         if row.get("fpl") in by_fpl
     ]
     return list(reversed(ordered))                    # worst first
@@ -4785,8 +4844,22 @@ def effective_keeper_selections(
     """Submitted selections that still COUNT — i.e. the selecting manager still holds
     the player. A manager who trades a player away after submitting him doesn't have
     the trade blocked and doesn't have the row deleted: it simply stops counting, and
-    they end up one keeper short (they can re-submit while keepers are unlocked)."""
-    owner = effective_owner(db, league)
+    they end up one keeper short (they can re-submit while keepers are unlocked).
+
+    "Still holds him" is judged on the season that ENDED (see _prior_season_league),
+    which is normally this same row and, post-migration, is not. The 26/27 row has no
+    gameweeks until FPL opens the season, so asking it would return an empty ownership
+    map and silently drop EVERY selection — ten full un-reduced boards with kept
+    players draftable, which is the exact failure the pre-rollover draft existed to
+    avoid, arriving from the other direction.
+    """
+    src = _prior_season_league(db, league, season_year)
+    owner = effective_owner(db, src)
+    bridge = _manager_bridge(db, src, league)
+    if bridge:
+        # The map is keyed by the OTHER row's manager uuids; the selections carry
+        # this row's. Compare like with like or nothing ever matches.
+        owner = {pid: bridge.get(mid, mid) for pid, mid in owner.items()}
     return [
         s
         for s in db.query(KeeperSelection).filter_by(
@@ -5193,8 +5266,13 @@ def get_draft_board(
     managers = db.query(Manager).filter_by(league_id=league.id).all()
     names = {m.id: m.display for m in managers}
     id_by_person = {m.display: m.id for m in managers}
-    r1 = _r1_order_managers(db, league) or _reverse_standings_managers(db, league)
-    rev = _reverse_standings_managers(db, league)
+    # Rounds 2+ run in reverse order of the season that just FINISHED, which is not
+    # necessarily this row's own season — see _prior_season_league. The lottery and
+    # the order overrides stay on the passed row: those are properties of THIS draft,
+    # and the 2026 migration moved them here along with the picks.
+    standings_src = _prior_season_league(db, league, season_year)
+    rev = _reverse_standings_managers(db, league, standings_src)
+    r1 = _r1_order_managers(db, league) or rev
 
     # Only selections that still count: a manager who traded away a player he'd
     # already submitted gets that pick back rather than drafting one short.
@@ -6647,7 +6725,10 @@ def data_health(db: Session, league: League) -> list[dict]:
         (f"{len(unlinked)} unlinked, none matched yet" if unlinked else "ok"))
 
     if goalie_teams_on(league.goalie_team_mode):
-        upcoming = (league.season_year or 0) + 1
+        # The draft being checked, not blindly next year: once the draft data has been
+        # migrated onto the season it belongs to, this row's own season_year IS the
+        # draft year and +1 would check an empty future draft. See _draft_year_for.
+        upcoming = _draft_year_for(league)
         picks = (
             db.query(DraftPick)
             .filter(DraftPick.league_id == league.id,

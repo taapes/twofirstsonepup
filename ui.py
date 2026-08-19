@@ -372,7 +372,10 @@ def keepers_page(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse("keepers_select.html", {
         "request": request, "league": league, "is_admin": is_admin(request),
         "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
-        "season": (league.season_year or 0) + 1,
+        # The draft/keeper cycle this row is actually running — see
+        # services._draft_year_for. Not season_year+1: once the draft data has been
+        # migrated onto its own season's row, +1 names a draft that hasn't happened.
+        "season": services._draft_year_for(league),
         "locked": not editable,
     })
 
@@ -1119,7 +1122,7 @@ def draft_prep(request: Request, db: Session = Depends(get_db)):
             return _forbidden(request, "This page is restricted to the league owner.")
         return RedirectResponse("/login?next=/draft-prep", status_code=303)
     league = _league_or_404(db)
-    year = (league.season_year or 0) + 1
+    year = services._draft_year_for(league)
     live_mode = services.keepers_revealed(league)
     if live_mode:
         prep = services.draft_preparation_live(db, league, year)
