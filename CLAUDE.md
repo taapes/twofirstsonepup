@@ -91,6 +91,17 @@ league-custom field sync never overwrites, and the **stable identity** for
 historical/manager-centric views. Use `Manager.display` (display_name or name)
 for all manager labels; services already do.
 
+**`fpl_manager_id` (FPL's entry_id) is NOT stable across seasons — proven false on
+2026-08-18.** Much of this codebase bridges league rows on it (`advance_season`'s
+identity + keeper carries, `_goalie_team_history`, `_in_progress_bridge`,
+`_manager_bridge`, the login session). At the 26/27 rollover FPL issued all ten
+managers brand-new entry ids (25/26: 5520-268927; 26/27: a contiguous 58528-58537
+block) with **zero** overlap, so every one of those bridges silently matched nothing:
+no display names, no password hashes (all logins broken) and no keeper seeds carried.
+Nothing warned, because each bridge `continue`s on a miss. `display_name` is the only
+identity the league itself owns; prefer it for cross-row work, and treat an
+entry-id bridge as best-effort. See the `P0` backlog entry.
+
 League logic must never corrupt synced canonical data. Custom state lives in its
 own tables alongside, not by mutating FPL-sourced rows.
 

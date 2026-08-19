@@ -1111,6 +1111,60 @@ query result shapes are identical.
 
 ---
 
+### FPL entry ids are NOT stable across seasons — identity carry silently did nothing
+
+**Priority:** `P0` — every manager's login is broken and every keeper clock on the
+26/27 row is missing. It also BLOCKS the 2026-draft row migration.
+**Status:** `open`. Found 2026-08-18 by `scripts/migrate_2026_draft.py`'s dry run,
+which aborted rather than move anything.
+
+**The finding.** `managers.fpl_manager_id` (FPL's `entry_id`) is documented throughout
+this codebase as the stable cross-season identity — `advance_season` carries
+display_name/password_hash/keeper seeds by it, `_goalie_team_history` keys on it, the
+login session stores it, and every cross-row bridge added in Items 1/2/4a uses it.
+Production says it is not stable:
+
+| row | entry ids |
+|---|---|
+| 25/26 (fpl 1754) | 5520, 5687, 17902, 21768, 43908, 192955, 247171, 248583, 264571, 268927 |
+| 26/27 (fpl 11818) | 58528 … 58537 (contiguous, freshly issued) |
+
+Overlap: **zero**. FPL issued every manager a brand-new entry for the new season.
+
+**What that silently broke at the rollover.** `advance_season` matches
+`new_mgrs.get(om.fpl_manager_id)` and `continue`s when it misses, so both carries were
+complete no-ops and nothing logged a warning:
+
+- **display_name** — all ten are NULL on the 26/27 row (confirmed).
+- **password_hash** — all ten are NULL, so **every manager's login is broken**; the
+  session also stores the old entry id, which now matches no current manager row.
+- **KeeperSeed** — **0 rows** on the 26/27 row against 152 on the 25/26 row, so every
+  kept player's clock is gone. `_derive_keeper_status` will derive fresh clocks for
+  them, which is wrong in both directions (a spent keeper becomes keepable again).
+
+**There is no UI to repair it.** `display_name`'s only writer anywhere in the app is
+`advance_season`'s carry — the one that failed. Setting the ten person names needs an
+admin surface or a one-off script before anything else can proceed.
+
+**Order of work.**
+1. Set `display_name` on the ten 26/27 managers. The mapping is NOT mechanically
+   derivable — FPL team names changed too, and while some are obvious ("Fighting
+   Franckes", "Pep's Scraps") others are genuinely ambiguous ("Le Roi De Coupe" →
+   "Le Féez Nuts"?). A commissioner has to supply it.
+2. Reset passwords (the existing `/admin/health` reset button clears the hash so each
+   manager sets a new one), or carry the old hashes across once the mapping exists.
+3. Re-run the keeper carry so the 26/27 seeds exist with the clock ticked.
+4. Then run `scripts/migrate_2026_draft.py --match display`.
+
+**Wider implication to decide.** Every cross-row bridge in the codebase keys on
+`fpl_manager_id` — `_goalie_team_history`, `_in_progress_bridge` (Item 1),
+`_manager_bridge` and `discovery_linked` (Item 4a). All of them silently return
+nothing across a rollover boundary rather than failing. `display_name` is the only
+identity the league actually owns; consider making it the bridge everywhere, with a
+health check that fails when any current manager lacks one.
+
+---
+
 ### 2026 draft board inaccessible after rollover
 
 **Priority:** `P2` — reference data that managers will want to consult.
