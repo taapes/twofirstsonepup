@@ -20,14 +20,13 @@ are all discharged (draft ran 08-16, rollover ran 08-17). Every open item now ha
 execution plan + a copy-paste session prompt with a recommended model in
 **`docs/SESSION_PLANS.md`** — run them in file order:
 
-1. **Item 1** — in-progress squad view (`/my-team` and `/teams` are blank all
-   preseason) — Sonnet 5
-2. **Item 2** — trades/transactions/picks pages cross-season + season attribution
-   (Jan-31 rule) + filters — Sonnet 5
-3. **Item 3** — history page cross-season — Haiku 4.5
-4. **Items 4a/4b** — discovery pick links + the "discovery" keeper clock, then
-   sync-driven match suggestions + admin dashboard (before the September discovery
-   draft) — Opus 5
+1. ~~**Item 1** — in-progress squad view~~ — **done 2026-08-18** (`5a202be`)
+2. ~~**Item 2** — trades/transactions/picks cross-season + Jan-31 attribution +
+   filters~~ — **done 2026-08-18** (`5a202be`)
+3. ~~**Item 3** — history page cross-season~~ — **done 2026-08-18** (`e986a13`)
+4. **Item 4a/4b** — 4a (discovery pick links + the "discovery" keeper clock) is
+   **done 2026-08-18** (`b94979a`); **4b** — sync-driven match suggestions + admin
+   dashboard — still to do, before the September discovery draft — Opus 5
 5. **Item 5a** — migrate the 2026 draft onto the 26/27 row (snapshot + Neon-branch
    rehearsal mandated) — Opus 5
 6. **Item 6** — IL ownership design session (before the season's first IL case) —
@@ -35,6 +34,15 @@ execution plan + a copy-paste session prompt with a recommended model in
 7. **Item 7** — keeper years survive a drop (rules decided: frozen while unowned;
    preseason FA carries; only a draft resets) — Opus 5
 8. **Items 8–16** — small fixes and tooling, any idle session — Haiku/Sonnet
+
+**Next up: Item 4b.** Items 1–4a are done; 5a (draft-row migration) is the next
+substantial one.
+
+Added 2026-08-18, not yet in `SESSION_PLANS.md`: **three test files can commit to the
+production database** (`P3`, under Bugs) — `test_audit.py` / `test_demo.py` /
+`test_sync_freeze.py` resolve their session from `DATABASE_URL`. Deliberate (they test
+code that commits internally), but unguarded. It is also the reason every regression
+summary here says "green excluding those three files".
 
 Parked: **Item 5b** (provisional-row season alignment — planning session, spring
 2027); **v2 in-app league** — `blocked`. Retired as moot 2026-08-18: the 25/26
@@ -532,6 +540,47 @@ availability (`tests/test_draft_availability.py:140-165`).
 *historical* goalkeeper injury-list backfill from a pre-goalie-team season, where
 individual keeper ownership was the rule. The check should consider the season being
 edited, not today's league row. Found while looking at the IL backfill form below.
+
+---
+
+### Three test files can commit to the PRODUCTION database
+
+**Priority:** `P3` — latent, and it has been this way a while, but the failure mode is
+writes to live Neon from a routine `pytest`. Promote if anyone runs the suite on a
+machine with a normal `.env`.
+**Status:** `open`. Found 2026-08-18 while running the Item 4a regression.
+
+**What's actually wrong — and what ISN'T.** `test_audit.py`, `test_demo.py` and
+`test_sync_freeze.py` build their sessions from `db.SessionLocal()` rather than the
+`test_session` fixture, so they connect to whatever `DATABASE_URL` names. **That part is
+deliberate and correct**: they test code that *commits internally* (`services.record_audit`,
+the `sync.*` tasks), and a rollback-based fixture cannot test "this commits atomically"
+inside a transaction it intends to roll back. Both files say so in their docstrings, and
+they delete the rows they create. Don't "fix" it by moving them onto the rollback fixture
+— that would delete the coverage.
+
+The defect is that **nothing constrains the configured DB to be a test one.**
+`tests/conftest.py` already refuses to run when `TEST_DATABASE_URL` is unset or equal to
+`DATABASE_URL` — the project has exactly this safety concept — and these three files
+don't participate in it. On a dev machine with a normal `.env` they will connect to
+production Neon and `commit()`. Cleanup is best-effort: a mid-test failure leaks rows,
+and `test_sync_freeze` commits five times per run.
+
+**Fix (small, either will do).** Point them at `TEST_DATABASE_URL` — the local Postgres
+container from the regression recipe is a real committing database, which is all they
+actually need — or give them the same refuse-if-it-equals-`DATABASE_URL` guard
+`conftest.py` already has. The first is better: it makes them runnable in CI.
+
+**Not a duplicate of the silent-skip item** under "Running a full regression": that one
+is about DB-backed tests *skipping* when `TEST_DATABASE_URL` is missing, and its proposed
+loud-skip guard would not help here, because these three never ask for
+`TEST_DATABASE_URL` at all. If anything they are the inverse — they run when they should
+refuse to.
+
+**How it presents.** In a sandbox with no network to Neon they fail/error as
+`sqlalchemy.exc.OperationalError: connection to server at "ep-...neon.tech"`, which is
+noise that masks real failures — 14 items on every full run. Every regression summary in
+this backlog that says "green excluding these three files" is describing this.
 
 ---
 
