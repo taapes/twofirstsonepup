@@ -1176,15 +1176,29 @@ def _corrections_redirect():
 
 
 @router.get("/admin/corrections", response_class=HTMLResponse)
-def admin_corrections(request: Request, db: Session = Depends(get_db)):
+def admin_corrections(
+    request: Request, db: Session = Depends(get_db), dq: str = "",
+):
     """Fix historical records that are wrong: trades, imported discovery picks, and
     recorded draft picks. Every change is written to the audit log with the previous
-    values, so a bad correction is traceable."""
+    values, so a bad correction is traceable.
+
+    `dq` is the manual player lookup for linking a discovery pick the matcher didn't
+    solve. It goes through `search_players`, so it's accent-insensitive (unaccent on
+    both sides) — typing "Sesko" finds "Šeško", which a browser-side `<datalist>`
+    filter would not.
+    """
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
     league = _league_or_404(db)
+    dq = (dq or "").strip()
     return templates.TemplateResponse("admin_corrections.html", {
         "request": request, "league": league, "is_admin": True,
+        "dq": dq,
+        "player_search": (
+            services.search_players(db, league, q=dq, include_taken=True, limit=15)
+            if dq else []
+        ),
         **services.corrections_data(db, league),
     })
 
@@ -1288,6 +1302,46 @@ def admin_discovery_link(
             pick_number=_safe_int(pick_number, 1, 999, field="pick number"),
             player_fpl_id=_safe_int(player_fpl_id, 1, 10_000_000, field="player id"),
         )
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/discovery/match")
+def admin_discovery_match_now(request: Request, db: Session = Depends(get_db)):
+    """Run the matcher on demand. It also runs daily off the back of a full sync;
+    this is for when you've just recorded a pick and don't want to wait a day."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    services.match_discovery_picks(db)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/discovery/suggestion/confirm")
+def admin_discovery_suggestion_confirm(
+    request: Request, db: Session = Depends(get_db),
+    suggestion_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.confirm_discovery_suggestion(db, league, suggestion_id)
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/discovery/suggestion/reject")
+def admin_discovery_suggestion_reject(
+    request: Request, db: Session = Depends(get_db),
+    suggestion_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.reject_discovery_suggestion(db, league, suggestion_id)
     except RuleViolation as e:
         return _err(e)
     return _corrections_redirect()

@@ -253,6 +253,16 @@ def admin_sync(force: bool = False):
                 if plan == "full":
                     services.flag_ineligible(db, league)
                 services.reconcile_absences(db, league)
+            if plan == "full":
+                # Deliberately OUTSIDE the sync_locked guard above. That guard is
+                # about the current league's ROSTER data being final; this reads the
+                # global player pool (which sync_players just refreshed, frozen
+                # seasons or not) against discovery picks that may live on an older
+                # league row entirely. Its relevance doesn't depend on the current
+                # season's freeze state — in fact the offseason, when everything is
+                # frozen, is exactly when September's picks start arriving in the PL.
+                # Only ever writes suggestions; never links a pick.
+                services.match_discovery_picks(db)
     # plan == "skip": nothing to do (phase advance already ran). Note the daily
     # "full" run calls sync_players first, so the global player pool refreshes once a
     # day even while every season is frozen — that's what keeps promoted clubs and new

@@ -151,7 +151,14 @@ class Player(Base):
     # Current season's element id. Nullable: a player who leaves the PL keeps no
     # slot, and their old id gets reassigned to somebody else.
     fpl_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # FPL's `web_name` — the SHORT form ("Woltemade", "Gabriel"), not a full name.
     name: Mapped[str] = mapped_column(String)
+    # FPL's `first_name + " " + second_name`. Canonical, written by sync_players;
+    # nullable because it only populates on the first sync after this column landed.
+    # `name` above was all we kept, which is why matching a discovery pick's
+    # free-text label needed this: a manager writes "Nick Woltemade" and the pool
+    # says "Woltemade". Display still uses `name` everywhere.
+    full_name: Mapped[str | None] = mapped_column(String, nullable=True)
     position: Mapped[str | None] = mapped_column(String, nullable=True)
     current_team: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -589,6 +596,55 @@ class DraftPick(Base):
         UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
     )
     source: Mapped[str | None] = mapped_column(String, nullable=True)  # draft/keeper/discovery
+
+
+class DiscoveryMatchSuggestion(Base):
+    """A PROPOSED match between a free-text discovery pick and a real player.
+
+    A suggestion is not a link and must never become one on its own. Only
+    `services.link_discovery_pick` writes `DraftPick.player_id`, and only an admin
+    calls it — see that docstring for why: `players.name` is FPL's short web_name
+    while managers type full names, so even a 1.0 score can be the wrong human, and a
+    wrong link silently hands one manager another's keeper on a four-year clock. This
+    table is just the queue of things worth asking the commissioner about.
+
+    UNIQUE (draft_pick_id, player_id) is what makes the daily matcher idempotent: it
+    upserts rather than duplicating, and a pair the commissioner already REJECTED is
+    still present, so it is never proposed a second time.
+
+    `ondelete="CASCADE"` — the only cascade in this schema, deliberately. A suggestion
+    is wholly derived from its pick and regenerable at any time, so it has no meaning
+    once the pick is gone; the alternative is `delete_draft_pick` failing on an FK to
+    a table written years after it.
+    """
+
+    __tablename__ = "discovery_match_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "draft_pick_id", "player_id", name="uq_discovery_suggestion_pick_player"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    draft_pick_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("draft_picks.id", ondelete="CASCADE"),
+        index=True,
+    )
+    player_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), index=True
+    )
+    # 0.0-1.0; 1.0 means the normalized names are identical, which is still only a
+    # suggestion. Ranked descending in the dashboard.
+    score: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    # Which tier produced it: 'exact' | 'strong' | 'close'. Kept so a bad rule can be
+    # identified from the data rather than guessed at.
+    method: Mapped[str] = mapped_column(String)
+    # 'pending' | 'confirmed' | 'rejected'. Rejected rows are KEPT on purpose.
+    status: Mapped[str] = mapped_column(String, server_default="pending")
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class DraftLottery(Base):

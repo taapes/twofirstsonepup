@@ -51,6 +51,95 @@
   {% else %}<p class="empty">No trades recorded.</p>{% endif %}
 </div>
 
+<h2>Unmatched discovery picks
+  <span class="sub">({{ unlinked_discovery|length }})</span></h2>
+<div class="card" style="padding:10px;overflow-x:auto">
+  <p class="sub">A discovery pick stays free text until the player joins the Premier
+    League — that's normal, not a fault. Linking him is what gives him the 4-year
+    discovery keeper clock instead of a 3-year waiver one. The daily sync proposes
+    candidates below; <strong>nothing is ever linked automatically</strong>, however
+    good the score, because FPL stores short names and two people share a name.</p>
+  <form method="post" action="/admin/corrections/discovery/match" style="display:inline">
+    <button class="mini" type="submit">Run matching now</button>
+  </form>
+  <span class="sub">Also runs daily after a full sync.</span>
+
+  {% if unlinked_discovery %}
+  <table class="stats" style="margin-top:10px">
+    <thead><tr><th>Season</th><th class="num">Pick</th><th>Owner</th>
+      <th>As entered</th><th>Suggestions</th><th>Link by FPL id</th></tr></thead>
+    <tbody>
+      {% for u in unlinked_discovery %}
+      <tr>
+        <td class="sub">{{ u.season_year }}</td>
+        <td class="num">{{ u.pick_number }}</td>
+        <td>{{ u.owner or "—" }}</td>
+        <td>{{ u.label or "—" }}</td>
+        <td>
+          {% if u.suggestions %}
+            {% for s in u.suggestions %}
+            <div style="margin-bottom:4px;white-space:nowrap">
+              <strong>{{ s.player }}</strong>
+              {% if s.full_name and s.full_name != s.player %}
+                <span class="sub">{{ s.full_name }}</span>
+              {% endif %}
+              <span class="sub">{{ s.team or "—" }}{% if s.position %} · {{ s.position }}{% endif %}</span>
+              <span class="tag">{{ s.method }} {{ "%.2f"|format(s.score) }}</span>
+              <form method="post" action="/admin/corrections/discovery/suggestion/confirm"
+                    style="display:inline"
+                    onsubmit="return confirm('Link {{ u.label }} to {{ s.player }}? This grants a 4-year keeper clock and cannot be told apart from a correct link later.')">
+                <input type="hidden" name="suggestion_id" value="{{ s.id }}">
+                <button class="mini" type="submit">Confirm</button>
+              </form>
+              <form method="post" action="/admin/corrections/discovery/suggestion/reject"
+                    style="display:inline">
+                <input type="hidden" name="suggestion_id" value="{{ s.id }}">
+                <button class="mini" type="submit">Reject</button>
+              </form>
+            </div>
+            {% endfor %}
+          {% else %}<span class="sub">no candidates yet</span>{% endif %}
+        </td>
+        <td style="white-space:nowrap">
+          <form method="post" action="/admin/corrections/discovery/link" style="display:inline">
+            <input type="hidden" name="season_year" value="{{ u.season_year }}">
+            <input type="hidden" name="pick_number" value="{{ u.pick_number }}">
+            <input name="player_fpl_id" inputmode="numeric" placeholder="FPL id"
+                   style="width:80px" required>
+            <button class="mini" type="submit">Link</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty" style="margin-top:10px">No unlinked discovery picks.</p>
+  {% endif %}
+
+  <form method="get" action="/admin/corrections" style="margin-top:12px">
+    <label>Find a player's FPL id
+      <input name="dq" value="{{ dq or '' }}" placeholder="name" style="width:180px">
+    </label>
+    <button class="mini" type="submit">Search</button>
+    <span class="sub">Accent-insensitive — "Sesko" finds "Šeško".</span>
+  </form>
+  {% if dq %}
+    {% if player_search %}
+    <table class="stats" style="margin-top:8px">
+      <thead><tr><th>Player</th><th>Team</th><th>Pos</th><th class="num">FPL id</th></tr></thead>
+      <tbody>
+        {% for p in player_search %}
+        <tr><td>{{ p.name }}</td><td class="sub">{{ p.team or "—" }}</td>
+          <td class="sub">{{ p.position or "—" }}</td>
+          <td class="num">{{ p.fpl_id if p.fpl_id is not none else "—" }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="empty" style="margin-top:8px">Nobody matches "{{ dq }}".</p>{% endif %}
+  {% endif %}
+</div>
+
 <h2>Draft picks <span class="sub">({{ picks|length }})</span></h2>
 <div class="card" style="padding:10px;overflow-x:auto">
   <p class="sub">A <strong>discovery</strong> pick is recorded as free text, because the

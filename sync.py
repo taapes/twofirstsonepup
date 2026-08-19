@@ -258,6 +258,17 @@ async def sync_players():
         def _name(e):
             return e.get("web_name") or e.get("second_name") or ""
 
+        def _full_name(e):
+            """FPL's first + second name. `_name` above is web_name, the short form,
+            which is all we used to keep — discovery-pick matching needs the long one
+            (a manager writes "Nick Woltemade", the pool says "Woltemade"). None
+            rather than "" when FPL sends neither, so "never synced" and "genuinely
+            blank" stay distinguishable."""
+            full = " ".join(
+                part for part in (e.get("first_name"), e.get("second_name")) if part
+            ).strip()
+            return full or None
+
         # -- phase 1a: decide who will OWN each incoming element id ------------
         targets: dict[int, Player | None] = {}
         adopted = 0
@@ -305,6 +316,7 @@ async def sync_players():
                 "code": e.get("code"),
                 "fpl_id": e["id"],
                 "name": _name(e),
+                "full_name": _full_name(e),
                 "position": _pos(e),
                 "current_team": teams.get(e.get("team")),
                 "status": e.get("status") or c.get("status") or None,

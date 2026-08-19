@@ -266,3 +266,29 @@ def test_departed_player_keeps_identity_and_releases_its_slot(
     assert old.name == "Departed" and old.code == 111
     assert old.fpl_id is None
     assert test_session.query(Player).filter_by(code=999).one().fpl_id == 5
+
+
+def test_sync_writes_the_full_name_alongside_the_web_name(
+    test_session, live_league, monkeypatch
+):
+    """`name` is FPL's web_name — the short form — and first_name/second_name used to
+    be discarded. Matching a discovery pick needs the long one: a manager writes
+    "Nick Woltemade" and the pool says "Woltemade"."""
+    _run_sync(_feed([
+        _el(5, 111, "Woltemade", FWD, first_name="Nick", second_name="Woltemade"),
+    ]), monkeypatch)
+    test_session.expire_all()
+
+    p = test_session.query(Player).filter_by(code=111).one()
+    assert p.name == "Woltemade", "display still uses web_name"
+    assert p.full_name == "Nick Woltemade"
+
+
+def test_a_missing_full_name_stays_null_rather_than_blank(
+    test_session, live_league, monkeypatch
+):
+    """None and "" would both be falsy to the matcher, but only None distinguishes
+    "FPL sent nothing" from "synced and genuinely empty"."""
+    _run_sync(_feed([_el(5, 111, "Mystery", FWD)]), monkeypatch)
+    test_session.expire_all()
+    assert test_session.query(Player).filter_by(code=111).one().full_name is None

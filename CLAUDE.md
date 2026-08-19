@@ -300,6 +300,22 @@ Write tests for these. They are custom and non-obvious:
   is team-scoped. Admin form on `/admin/corrections`; `unlink_discovery_pick` undoes a
   mislink. Linking also makes him `taken` in **discovery** search only — the overlay is
   `draft_type`-scoped, so the main draft is untouched.
+  **Finding the player is assisted; deciding is not.** `services.match_discovery_picks`
+  runs after every full sync (from `main.py`'s post-sync hook — *outside* the
+  `sync_locked` guard, since it reads the global pool against picks that may live on an
+  older league row, and never from `sync.py`, which must stay on the FPL-canonical side)
+  and writes `discovery_match_suggestions` rows only. Three tiers — exact / strong
+  (token subset, which is how a typed "Nick Woltemade" reaches web_name "Woltemade") /
+  close (`difflib` ≥ 0.85, stdlib only). `players.full_name` (FPL's first + second name,
+  written by `sync_players`) exists for this; `players.name` is only `web_name`.
+  Normalisation is a **token-wise** local copy of `import_projections._norm` — lowercase
+  → translit → NFKD, in that order, because ø/ı have no NFKD decomposition; a test
+  asserts the *tier*, since a broken table still scrapes past the fuzzy threshold.
+  Rejected suggestions are **kept, not deleted** — that (plus `UNIQUE(draft_pick_id,
+  player_id)`) is what stops the nightly run re-proposing a dismissal. Admin confirms or
+  rejects on `/admin/corrections`; confirm calls `link_discovery_pick` **first**, so a
+  refused link leaves the suggestion pending rather than recording a decision that never
+  happened.
 - **Main draft:** Lottery mechanics are OUT of the app — the commissioner sets
   the round-1 order (`POST /admin/.../draft/order`, stored in `draft_lottery`).
   Rounds 2+ = reverse standings. Keepers are FREE: a manager makes 15−keepers

@@ -5,7 +5,10 @@ synced/normalized rows. Shared by the JSON API (api.py) and the homepage
 (main.py) so both render the same data.
 """
 
+import difflib
 import os
+import re
+import unicodedata
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -5973,6 +5976,256 @@ def unlink_discovery_pick(
             "changed": True}
 
 
+# ---- discovery pick match SUGGESTIONS (never links) ----
+#
+# Its own copy of the normalisation, not an import. scripts/import_projections.py's
+# `_norm` is the model but strips every non-letter, which collapses "Nick Woltemade"
+# to one token and makes subset matching impossible; and history_import._norm carries
+# a comment expressly forbidding unification. Three small functions that agree by
+# design beat one shared one that has to serve three different jobs.
+_MATCH_TRANSLIT = str.maketrans({"ø": "o", "đ": "d", "ı": "i", "ł": "l",
+                                 "æ": "ae", "ß": "ss", "þ": "th"})
+
+
+def _match_norm(s: str) -> str:
+    """Lowercase FIRST, transliterate SECOND, NFKD THIRD — the order is load-bearing.
+    The translation table has lowercase keys only, so an uppercase Ø would slip past
+    it; and ø/ı have NO NFKD decomposition, so a bare ascii-ignore pass DELETES them
+    and 'Ødegaard' becomes 'degaard'. Same trap `_TRANSLIT` exists for in
+    scripts/import_projections.py, pinned there by test_projections.py."""
+    s = (s or "").lower().translate(_MATCH_TRANSLIT)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z]", "", s)
+
+
+def _match_tokens(s: str) -> set:
+    """The same normalisation applied per WORD, so name order and extra given names
+    don't matter. Splitting before normalising is what `_match_norm` alone can't do:
+    it strips the separators, so everything becomes one token."""
+    return {t for t in (_match_norm(p) for p in re.split(r"[^\w]+", s or "")) if t}
+
+
+def _score_match(label: str, full_name: str | None, web_name: str | None):
+    """-> (score, method) for a free-text label against one player, or None.
+
+    Three tiers, most confident first. All of them only ever produce a SUGGESTION —
+    scoring 1.0 does not authorise a link, because two people share a name and a
+    wrong link is invisible downstream.
+    """
+    lab_n, lab_t = _match_norm(label), _match_tokens(label)
+    if not lab_n:
+        return None
+    names = [n for n in (full_name, web_name) if n]
+
+    for n in names:
+        if lab_n == _match_norm(n):
+            return (1.0, "exact")
+
+    # A subset either way covers the two common shapes at once: the manager typed
+    # more than FPL stores ("Nick Woltemade" vs web_name "Woltemade"), or fewer
+    # ("Woltemade" vs full_name "Nick Woltemade").
+    for n in names:
+        toks = _match_tokens(n)
+        if toks and lab_t and (lab_t <= toks or toks <= lab_t):
+            return (0.9, "strong")
+
+    best = 0.0
+    for n in names:
+        best = max(best, difflib.SequenceMatcher(None, lab_n, _match_norm(n)).ratio())
+    if best >= 0.85:
+        return (round(best, 3), "close")
+    return None
+
+
+def match_discovery_picks(db: Session) -> dict:
+    """Propose players for every unlinked discovery pick. Returns counts for logging.
+
+    **Never links anything.** It only ever writes `discovery_match_suggestions` rows
+    with status 'pending'; `DraftPick.player_id` is written by `link_discovery_pick`
+    and nothing else, on an explicit admin action. That separation is the entire
+    design — see `link_discovery_pick` for why a name match cannot be trusted to
+    act on its own.
+
+    Runs daily off the back of a full sync, because the pool it matches against grows
+    all season as players join the Premier League: a September pick usually has no
+    `players` row at all until January, so the same pick has to be re-examined against
+    fresh data rather than judged once and forgotten.
+
+    Idempotent. A pair already `confirmed` or `rejected` is left strictly alone — a
+    rejection is the commissioner saying "not this one", and re-proposing it every
+    night would make the dashboard useless.
+
+    Reads and writes league-custom tables, so it lives here and is called from the
+    post-sync hook in main.py — never from inside sync.py, which must stay on the
+    FPL-canonical side of the two-truths boundary.
+    """
+    from models import DiscoveryMatchSuggestion
+
+    picks = (
+        db.query(DraftPick)
+        .filter(DraftPick.draft_type == "discovery",
+                DraftPick.player_id.is_(None),
+                DraftPick.player_label.isnot(None),
+                # Defensive: the DraftPick CHECK is deliberately narrow (see the
+                # model), so live rows are not provably one-of.
+                DraftPick.team_id.is_(None))
+        .all()
+    )
+    if not picks:
+        return {"picks": 0, "candidates": 0, "created": 0, "updated": 0, "skipped": 0}
+
+    players = db.query(Player).all()
+    # (pick_id, player_id) -> row, so an existing decision is visible before writing.
+    existing = {
+        (s.draft_pick_id, s.player_id): s
+        for s in db.query(DiscoveryMatchSuggestion)
+    }
+
+    created = updated = skipped = 0
+    for pick in picks:
+        for p in players:
+            hit = _score_match(pick.player_label, p.full_name, p.name)
+            if not hit:
+                continue
+            score, method = hit
+            prior = existing.get((pick.id, p.id))
+            if prior is not None:
+                if prior.status != "pending":
+                    skipped += 1          # confirmed or rejected: the human decided
+                    continue
+                if (prior.score, prior.method) != (score, method):
+                    prior.score, prior.method = score, method
+                    updated += 1
+                continue
+            db.add(DiscoveryMatchSuggestion(
+                draft_pick_id=pick.id, player_id=p.id,
+                score=score, method=method, status="pending",
+            ))
+            created += 1
+    db.commit()
+    return {"picks": len(picks), "candidates": len(players),
+            "created": created, "updated": updated, "skipped": skipped}
+
+
+def _suggestion_or_404(db: Session, suggestion_id: str):
+    from models import DiscoveryMatchSuggestion
+
+    row = db.get(DiscoveryMatchSuggestion, suggestion_id)
+    if row is None:
+        raise RuleViolation("suggestion not found")
+    return row
+
+
+def confirm_discovery_suggestion(
+    db: Session, league: League, suggestion_id: str
+) -> dict:
+    """Accept a proposed match: link the pick, then mark the suggestion confirmed.
+
+    Linking first is deliberate — `link_discovery_pick` enforces every rule (already
+    linked, player linked elsewhere, goalie-team pick) and raises, so a refused link
+    leaves the suggestion `pending` rather than recording a decision that didn't
+    happen.
+    """
+    row = _suggestion_or_404(db, suggestion_id)
+    pick = db.get(DraftPick, row.draft_pick_id)
+    if pick is None:
+        raise RuleViolation("the pick this suggestion belongs to is gone")
+    player = db.get(Player, row.player_id)
+    if player is None or player.fpl_id is None:
+        # link_discovery_pick resolves by fpl_id, and a departed player has none.
+        raise RuleViolation("that player has no current FPL id to link by")
+
+    out = link_discovery_pick(
+        db, league, season_year=pick.season_year,
+        pick_number=pick.pick_number, player_fpl_id=player.fpl_id,
+    )
+    previous = _previous(row, ["status", "score", "method"])
+    row.status = "confirmed"
+    record_audit(
+        db, league, action="discovery.suggestion.confirm",
+        summary=(f"Confirmed {pick.season_year} discovery pick #{pick.pick_number} "
+                 f"({pick.player_label or '—'}) = {player.name} "
+                 f"[{row.method} {row.score}]"),
+        manager_ids=[pick.manager_id] if pick.manager_id else None,
+        details={"suggestion_id": str(row.id), "player_fpl_id": player.fpl_id,
+                 "previous": previous},
+    )
+    db.commit()
+    return {**out, "status": "confirmed"}
+
+
+def reject_discovery_suggestion(
+    db: Session, league: League, suggestion_id: str
+) -> dict:
+    """Dismiss a proposed match. The row is KEPT, not deleted — that is what stops
+    tonight's matcher proposing it all over again."""
+    row = _suggestion_or_404(db, suggestion_id)
+    pick = db.get(DraftPick, row.draft_pick_id)
+    player = db.get(Player, row.player_id)
+    previous = _previous(row, ["status", "score", "method"])
+    row.status = "rejected"
+    record_audit(
+        db, league, action="discovery.suggestion.reject",
+        summary=(f"Rejected {player.name if player else '?'} for "
+                 f"{pick.season_year if pick else '?'} discovery pick "
+                 f"#{pick.pick_number if pick else '?'} "
+                 f"({pick.player_label if pick else '—'})"),
+        manager_ids=[pick.manager_id] if pick and pick.manager_id else None,
+        details={"suggestion_id": str(row.id), "previous": previous},
+    )
+    db.commit()
+    return {"suggestion_id": str(row.id), "status": "rejected"}
+
+
+def unlinked_discovery_picks(db: Session, league: League) -> list[dict]:
+    """Every unlinked discovery pick with its pending suggestions, newest season
+    first. Feeds the /admin/corrections dashboard and the data_health count."""
+    from models import DiscoveryMatchSuggestion
+
+    picks = (
+        db.query(DraftPick)
+        .filter(DraftPick.draft_type == "discovery",
+                DraftPick.player_id.is_(None),
+                DraftPick.player_label.isnot(None),
+                DraftPick.team_id.is_(None))
+        .order_by(DraftPick.season_year.desc(), DraftPick.pick_number)
+        .all()
+    )
+    if not picks:
+        return []
+
+    # Managers span league rows (a pick predates a rollover), so no league filter.
+    names = {m.id: m.display for m in db.query(Manager)}
+    pool = {p.id: p for p in db.query(Player)}
+    by_pick: dict = {}
+    for s in (
+        db.query(DiscoveryMatchSuggestion)
+        .filter(DiscoveryMatchSuggestion.status == "pending")
+        .order_by(DiscoveryMatchSuggestion.score.desc())
+    ):
+        by_pick.setdefault(s.draft_pick_id, []).append(s)
+
+    out = []
+    for pick in picks:
+        suggestions = []
+        for s in by_pick.get(pick.id, []):
+            p = pool.get(s.player_id)
+            if p is None:
+                continue
+            suggestions.append({
+                "id": str(s.id), "player": p.name, "full_name": p.full_name,
+                "team": p.current_team, "position": p.position,
+                "fpl_id": p.fpl_id, "score": s.score, "method": s.method,
+            })
+        out.append({
+            "pick_id": str(pick.id), "season_year": pick.season_year,
+            "pick_number": pick.pick_number, "round": pick.round,
+            "label": pick.player_label, "owner": names.get(pick.manager_id),
+            "suggestions": suggestions,
+        })
+    return out
+
+
 def next_open_pick(board: list[dict]) -> dict | None:
     """The on-the-clock slot: first board pick with no player recorded yet."""
     return next((b for b in board if not b.get("player")), None)
@@ -6138,6 +6391,7 @@ def corrections_data(db: Session, league: League) -> dict:
         # within a season already ordered newest-first.
         "trades": [row for season in get_trades(db) for row in season["trades"]],
         "discovery": _discovery_by_season(db, league),
+        "unlinked_discovery": unlinked_discovery_picks(db, league),
         "picks": picks,
         "managers": [
             {"name": m.display, "fpl": m.fpl_manager_id}
@@ -6380,6 +6634,17 @@ def data_health(db: Session, league: League) -> list[dict]:
         unseeded -= gk_ids
     add("rostered players have a keeper seed", not unseeded,
         f"{len(unseeded)} without a seed" if unseeded else "ok")
+
+    # An unlinked discovery pick isn't broken — it's the normal state until the player
+    # joins the PL — so this is visibility, not a failure. It goes red only when there
+    # is something to DO: candidates are waiting for a decision. Without it the
+    # dashboard is a page nobody thinks to open.
+    unlinked = unlinked_discovery_picks(db, league)
+    pending = sum(len(u["suggestions"]) for u in unlinked)
+    add("discovery picks linked to players", not pending,
+        f"{len(unlinked)} unlinked, {pending} suggestion(s) awaiting review"
+        if pending else
+        (f"{len(unlinked)} unlinked, none matched yet" if unlinked else "ok"))
 
     if goalie_teams_on(league.goalie_team_mode):
         upcoming = (league.season_year or 0) + 1

@@ -419,9 +419,8 @@ Four consequences to handle beyond the roster view:
 ### Discovery-drafted players get a 3-year waiver clock instead of 4
 
 **Priority:** `P2` — next bites at the September discovery draft, not this one.
-**Status:** `done 2026-08-18` (Item 4a — the structural fix). Item 4b, the
-sync-driven match SUGGESTIONS + unmatched-picks dashboard, is still to do and
-builds on `services.link_discovery_pick` from this change.
+**Status:** `done 2026-08-18` — Item 4a (the structural fix) and Item 4b (the match
+suggestion pipeline + dashboard) are both complete.
 
 **What was built.**
 
@@ -479,6 +478,58 @@ precedence on both paths, the drop gate, the trade chain, `submit_keepers`' on-r
 override and its GKP refusal, `set_keeper_override`, the full link/unlink surface, the
 draft_type-scoped taken overlay, and the privacy split. `test_discovery_keeper_slot.py`
 and `test_keeper_privacy.py` pass unchanged.
+
+### Item 4b — sync-driven match suggestions + dashboard (done 2026-08-18)
+
+Linking was manual and therefore wasn't going to happen: months after draft night,
+somebody has to find one player in an ~800-row pool from a label they no longer
+remember the spelling of. So the daily sync now proposes; the human still decides.
+
+- **`players.full_name`** (migration `b2c3d4e5f6a7`) — FPL's `first_name + " " +
+  second_name`, written by `sync_players` phase 2 where the element dict is already in
+  scope. `players.name` is only `web_name`, the short form, and first/second names were
+  being discarded. Nullable, no backfill: there is nothing to backfill *from*, and the
+  value arrives on the next full sync, which runs daily year-round because
+  `sync_players` is ungated by season freeze. Canonical data written by sync — the
+  legal side of the two-truths boundary.
+- **`discovery_match_suggestions`** (migration `c3d4e5f6a7b8`) — `UNIQUE(draft_pick_id,
+  player_id)` makes the nightly run upsert instead of accumulating, and because a
+  **rejected row is kept rather than deleted**, a dismissal is never re-proposed.
+  `ON DELETE CASCADE` on the pick is the only cascade in the schema, deliberately: a
+  suggestion is wholly derived and regenerable, and without it `delete_draft_pick` —
+  written long before this table — would start failing on an FK it can't know about.
+  Not `commissioner_alerts`: that's dead code with no status column or FKs, so it
+  can't express "rejected, don't ask again", which is the whole requirement.
+- **`services.match_discovery_picks`** — three tiers: exact (normalized label equals
+  full_name or web_name), strong (token subset either way — how a typed "Nick
+  Woltemade" reaches web_name "Woltemade"), close (`difflib` ≥ 0.85). Stdlib only; the
+  repo is deliberately dependency-austere. Normalisation is a **token-wise local copy**
+  of `import_projections._norm` (lowercase → translit → NFKD, order load-bearing), not
+  an import: that one strips every non-letter, collapsing a name to a single token, and
+  `history_import._norm` carries a comment forbidding unification.
+  **It never writes `DraftPick.player_id`** — a 1.0 score still only suggests.
+- **Wire-up** — called from `main.py`'s post-sync hook under `plan == "full"` but
+  *outside* the `sync_locked` guard: that guard is about the current league's roster
+  data being final, while this reads the global pool (just refreshed) against picks
+  that may live on an older league row. The offseason, when everything is frozen, is
+  exactly when September's picks start arriving in the PL. Not called from `sync.py`,
+  which must stay on the canonical side of the boundary.
+- **Dashboard** — "Unmatched discovery picks" on `/admin/corrections`: per pick the
+  label/season/owner, ranked pending candidates with Confirm/Reject, a manual link by
+  FPL id, a "Run matching now" button, and a name lookup that goes through
+  `search_players` so it's accent-insensitive ("Sesko" finds "Šeško", which a
+  browser-side `<datalist>` filter would not — see the open datalist item). Confirm
+  calls `link_discovery_pick` **first**, so a refused link leaves the suggestion
+  pending rather than recording a decision that didn't happen. `data_health` gains a
+  line that goes red only when candidates are actually awaiting review.
+
+**Tests.** `tests/test_discovery_matching.py` (23 cases) + 2 in
+`test_player_identity.py`. Mutation-tested: auto-linking, dropping the translit table,
+forgetting prior decisions, and removing the token-subset tier each fail the intended
+tests. One test was **strengthened after a mutation failed to bite** — asserting only
+that an accented name was *suggested* passes even with translit broken, because
+'degaard' still scrapes past the 0.85 fuzzy threshold; it now asserts the match
+**tier**, which is what actually proves normalisation ran.
 
 <details>
 <summary>Original investigation (2026-08-15)</summary>
