@@ -4889,16 +4889,36 @@ def pick_ownership(
     changed hands. Built from the imported baseline (future_picks) + recorded
     pick trades (trades table), applied in order (latest reassignment wins).
     Shared by the draft board and the future-picks grid so they never disagree.
+
+    Reads across EVERY league row, not just `league`. A pick trade is stored where
+    it happened and a FuturePick is season-agnostic, so neither moves when a draft
+    is migrated onto the season it describes — and while this was league-scoped, the
+    migrated 2026 board found 0 reassignments instead of 28 and flagged all 28
+    completed picks as `reassigned`, i.e. "the order moved under a pick already
+    made". The owners displayed were still right (get_draft_board takes those from
+    the stored DraftPick.manager_id), so this was noise rather than corruption — but
+    noise on exactly the warning that exists to catch corruption. Had the migration
+    happened mid-draft, the unmade traded slots would have shown the wrong owner for
+    real.
+
+    Keyed on PERSON NAME throughout, which is what makes crossing rows safe:
+    `managers` has one row per manager per season, so the names map has to span every
+    row too. The `league` parameter is kept for signature stability and is unused.
     """
     from models import FuturePick
 
-    person_by_id = {
-        m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)
-    }
+    person_by_id = {m.id: m.display for m in db.query(Manager)}
     reassigned: dict = {}
-    # baseline (imported net ownership from the sheet)
-    for fp in db.query(FuturePick).filter_by(
-        league_id=league.id, season_year=season_year, draft_type=draft_type
+    # Baseline (imported net ownership from the sheet), oldest league row first so a
+    # newer row's entry for the same (round, original_owner) wins — the same rule
+    # get_future_picks used to apply by merging per-row calls in that order.
+    for fp, _sy in (
+        db.query(FuturePick, League.season_year)
+        .join(League, League.id == FuturePick.league_id)
+        .filter(FuturePick.season_year == season_year,
+                FuturePick.draft_type == draft_type)
+        .order_by(League.season_year.asc())
+        .all()
     ):
         reassigned[(fp.round, fp.original_owner)] = fp.owner
     # then live pick trades, in entry order (latest wins). Ordered on created_at:
@@ -4906,7 +4926,7 @@ def pick_ownership(
     # actually "whichever id sorted higher" the moment a pick changed hands twice.
     for t in (
         db.query(Trade)
-        .filter(Trade.league_id == league.id, Trade.pick_round.isnot(None),
+        .filter(Trade.pick_round.isnot(None),
                 Trade.pick_season_year == season_year, Trade.pick_draft_type == draft_type)
         .order_by(Trade.created_at, Trade.id)
         .all()
@@ -5508,12 +5528,12 @@ def get_future_picks(db: Session, league: League) -> list[dict]:
     rows even once the season-alignment migration lands. So this scans every
     league row for FuturePick/pick-Trade rows, not just the current one.
 
-    pick_ownership itself STAYS league-scoped (it's the draft board's single
-    source of truth) — called once per (league row, year) pair, iterating rows
-    ASCENDING by season_year so a newer row's entry for the same
-    (round, original_owner) wins. The same future year can legitimately have
-    rows on more than one league row (e.g. entered before a rollover, then again
-    after), and person names are the stable key across them.
+    `pick_ownership` is itself cross-row now, so one call answers each year — this
+    used to merge a call per league row, ascending by season_year, to let a newer
+    row's entry win for the same (round, original_owner). That precedence moved
+    inside pick_ownership rather than being lost. The same future year can
+    legitimately have rows on more than one league row (entered before a rollover,
+    then again after), and person names are the stable key across them.
     """
     from models import FuturePick
 
@@ -5535,9 +5555,7 @@ def get_future_picks(db: Session, league: League) -> list[dict]:
     for y in sorted(years):
         entry = {"year": y}
         for dt in ("main", "discovery"):
-            merged: dict = {}
-            for lg in leagues:
-                merged.update(pick_ownership(db, lg, y, dt))
+            merged = pick_ownership(db, league, y, dt)
             entry[dt] = [
                 {"round": rnd, "original_owner": orig, "owner": owner}
                 for (rnd, orig), owner in sorted(merged.items(), key=lambda kv: (kv[0][0], kv[0][1]))

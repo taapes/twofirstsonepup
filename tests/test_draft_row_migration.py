@@ -712,3 +712,39 @@ def test_a_free_text_main_pick_renders_its_label(test_session):
     board = services.get_draft_board(test_session, new, YEAR)
     assert board[0]["player"] == "Ruben Dias"
     assert services.next_open_pick(board)["pick"] != 1, "a made pick is not on the clock"
+
+
+def test_pick_trades_survive_the_move_though_the_trade_rows_do_not(test_session):
+    """A pick trade is stored where it happened and never moves, but it is an INPUT
+    to the board, not only a record. While `pick_ownership` was league-scoped the
+    migrated board found zero reassignments and flagged every completed pick as
+    `reassigned` — "the order moved under a pick already made" — which is noise on
+    precisely the warning that exists to catch corruption.
+
+    Worse in the case this fixture pins: an UNMADE traded slot showed its original
+    owner. 2026 got away with it because none of its seven unmade slots had been
+    traded; a draft migrated mid-way would not.
+    """
+    from models import Trade
+
+    old, old_m, new, _new_m = _prod_shape(test_session)
+    # B traded their round-2 pick to C, recorded on the old row before the rollover.
+    test_session.add(Trade(
+        league_id=old.id, from_manager=old_m["B"].id, to_manager=old_m["C"].id,
+        pick_round=2, pick_season_year=YEAR, pick_draft_type="main",
+        pick_original_manager=old_m["B"].id,
+    ))
+    test_session.commit()
+    before = services.pick_ownership(test_session, old, YEAR, "main")
+    assert before == {(2, "B"): "C"}
+
+    _move(test_session, old, new)
+
+    after = services.pick_ownership(test_session, new, YEAR, "main")
+    assert after == {(2, "B"): "C"}, "the trade must still be visible from the new row"
+
+    board = services.get_draft_board(test_session, new, YEAR)
+    slot = next(b for b in board if b["round"] == 2 and b["original_owner"] == "B")
+    assert slot["owner"] == "C", "an unmade traded slot must show its new owner"
+    assert slot["traded"] is True
+    assert not any(b["reassigned"] for b in board), "no spurious reassigned flags"

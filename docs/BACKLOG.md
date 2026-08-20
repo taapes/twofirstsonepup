@@ -1169,34 +1169,44 @@ health check that fails when any current manager lacks one.
 
 ### Pick trades are invisible to the migrated 2026 board
 
-**Priority:** `P2` — the completed board reads correctly; this affects the seven
-unmade slots and a wall of spurious warnings.
-**Status:** `open` — **awaiting a decision**. Surfaced 2026-08-19 immediately after
-`scripts/migrate_2026_draft.py --apply`.
+**Priority:** `P3` — **downgraded from P2 on inspection.** First filed as "the unmade
+slots show the wrong owner"; checking the actual data showed that was wrong (see
+below), and the real impact was cosmetic.
+**Status:** `done 2026-08-19`.
 
-The migration deliberately does not move `Trade` rows ("a trade is a record of when
-something happened"). But 18 of them are PICK trades, and `services.pick_ownership`
-is league-scoped: it returns 28 reassignments on the 25/26 row and **0** on the 26/27
-row. So the migrated board computes every slot's owner as if no pick had ever been
-traded.
+**What it was.** The migration deliberately leaves `Trade` rows where they happened,
+and `FuturePick` rows are season-agnostic, so neither moved onto the 26/27 row. But
+`services.pick_ownership` — the draft board's single source of truth for who owns each
+slot — filtered both by `league_id`. On the migrated board it therefore found **0**
+reassignments where the 25/26 row had 28.
 
-Completed picks still display the right manager — `get_draft_board` takes the owner
-from the stored `DraftPick.manager_id` for a slot that has been picked, precisely so a
-later order change can't re-attribute it. The visible damage is narrower: the **seven
-unmade slots** (84, 85, 94-97, 100) show their original owner rather than whoever
-traded for them, and **28 slots carry a `reassigned` flag** — "the order moved under a
-pick that was already made" — which is now noise rather than signal.
+**What that actually broke, precisely.** Less than first claimed:
 
-The tension is that a pick trade is not only a historical record; it is an INPUT to
-the board. Three options, in preference order:
+- All 94 completed picks displayed the CORRECT owner. `get_draft_board` takes the
+  owner of an already-picked slot from the stored `DraftPick.manager_id`, exactly so a
+  later order change can't re-attribute a completed selection.
+- All seven unmade slots (84, 85, 94-97, 100) were also correct — **by luck**. They
+  belong to Gaby, Steve, Tucker, Kevin F and John and none had been traded. The
+  original filing asserted these were wrong; they were not.
+- The real symptom was **28 completed slots carrying a `reassigned` flag** — "the
+  order moved under a pick that was already made". That flag exists to surface
+  genuine corruption, and it was firing on all 28 traded picks because the *computed*
+  side had lost the trades. Noise on the one warning that must not be noisy.
+- `/picks` was unaffected: `get_future_picks` already scanned every league row.
 
-1. **Make `pick_ownership` read pick trades across league rows**, the way `get_trades`
-   already does after the Item 2 work. Keeps trades where they happened and fixes the
-   board. Note `_trade_season_year` already attributes a trade to a season on read, so
-   the machinery exists.
-2. Move only the pick-trade `Trade` rows in the migration. Contradicts the stated rule
-   and would change how `_trade_season_year` files them.
-3. Accept it. 2026 will never be drafted again, and the completed board is correct.
+**The fix.** `pick_ownership` now reads `FuturePick` and pick-`Trade` rows across every
+league row, keyed on person name (which is what makes crossing rows safe — `managers`
+has one row per manager per season, so its names map spans every row too). Baseline
+rows are applied oldest-league-first so a newer row still wins for the same
+`(round, original_owner)`; that precedence moved out of `get_future_picks`, which used
+to merge one call per league row and now makes a single call.
+
+Verified against production: 28 reassignments visible from the 26/27 row, **0
+spurious flags**, `/picks` unchanged. Mutation-tested.
+
+**The case that would have been real.** A draft migrated MID-WAY, with unmade slots
+that had been traded — those would have shown the wrong owner, not just a bad flag.
+2026 escaped that only because none of its unmade slots were traded. Pinned by a test.
 
 ---
 
