@@ -615,7 +615,7 @@ board-derivation change. Not a Haiku/Sonnet item.
 **Backlog entries:** "Post-GW38 activity should belong to the following season" (the
 migration half) and "2026 draft board inaccessible after rollover" (closed by this).
 **Decisions (2026-08-18):** split from the provisional-row architecture (Item 5b,
-parked as a planning session). **FuturePick rows and pick-trade Trade rows do NOT
+then parked as a planning session; retired 2026-08-20). **FuturePick rows and pick-trade Trade rows do NOT
 move — future picks are season-agnostic by design**, a standing ~5-year outlook on
 pick ownership that never migrates between league rows (Item 2 already reads them
 cross-league). Seed reconciliation is **report-only**: discrepancies are listed and
@@ -738,10 +738,16 @@ reconciliation report.
 
 ---
 
-## Item 5b — Provisional-row architecture for post-GW38 season alignment (PARKED planning session)
+## Item 5b — Provisional-row architecture for post-GW38 season alignment (RETIRED 2026-08-20)
 
-**Priority:** parked — nothing forces this before GW38 2027 (~May 2027). Run it as
-a planning session in spring 2027.
+**Priority:** **retired — do not run this session.** Full reasoning in
+`docs/BACKLOG.md` under "What to do next". In short: its payoff was removing the
+draft-row migration, that migration is now scripted, tested and health-checked, the two
+bugs it would have prevented are fixed in the read path instead, and the build lands on
+`verify_league_feed`'s recycled-league guard — which a provisional row (managers carried,
+no FPL id yet) is precisely the wrong shape for. Revisit only on a named trigger: a fifth
+league-scoped table taking post-GW38 writes, or the migration's manager remap breaking.
+The prompt below is kept as the design brief if that trigger ever fires.
 **Recommended model:** Opus 5, producing a written design — **no code in that
 session**.
 **Backlog entry:** "Post-GW38 activity should belong to the following season" (the
@@ -1242,8 +1248,8 @@ that ALSO has goalie teams on -> refused. Update the backlog entry. Full suite,
 
 ## Deferred — no session prompt
 
-- **Item 5b** (provisional-row architecture): parked above as a planning session
-  for ~spring 2027.
+- **Item 5b** (provisional-row architecture): **retired 2026-08-20** (was parked for
+  ~spring 2027); prompt kept above as a design brief, revisit-on-trigger only.
 - **v2 in-app league / goalie teams** (`v2/in-app-league` branch): blocked on
   merging main's pl_teams/keeper/trade schema work before the scoring-source fix;
   revisit only when v2 is picked back up.

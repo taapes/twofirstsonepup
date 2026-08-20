@@ -15,38 +15,74 @@ for work that is *known but not done*.
 
 ## What to do next
 
-Re-triaged **2026-08-18**, post-draft and post-rollover. The 2026-08-15 pre-draft P0s
-are all discharged (draft ran 08-16, rollover ran 08-17). Every open item now has an
-execution plan + a copy-paste session prompt with a recommended model in
-**`docs/SESSION_PLANS.md`** — run them in file order:
+Re-triaged **2026-08-20**. Items 1-5a are all discharged; the draft ran 08-16, the
+rollover 08-17, and the 2026 draft was migrated onto the 26/27 row on 08-19. Execution
+plans + copy-paste session prompts live in **`docs/SESSION_PLANS.md`**.
 
-1. ~~**Item 1** — in-progress squad view~~ — **done 2026-08-18** (`5a202be`)
-2. ~~**Item 2** — trades/transactions/picks cross-season + Jan-31 attribution +
-   filters~~ — **done 2026-08-18** (`5a202be`)
-3. ~~**Item 3** — history page cross-season~~ — **done 2026-08-18** (`e986a13`)
-4. **Item 4a/4b** — 4a (discovery pick links + the "discovery" keeper clock) is
-   **done 2026-08-18** (`b94979a`); **4b** — sync-driven match suggestions + admin
-   dashboard — still to do, before the September discovery draft — Opus 5
-5. **Item 5a** — migrate the 2026 draft onto the 26/27 row (snapshot + Neon-branch
-   rehearsal mandated) — Opus 5
-6. **Item 6** — IL ownership design session (before the season's first IL case) —
-   Opus 5
+**Done**
+1. ~~**Item 1** — in-progress squad view~~ (`5a202be`)
+2. ~~**Item 2** — trades/transactions/picks cross-season + Jan-31 attribution~~ (`5a202be`)
+3. ~~**Item 3** — history page cross-season~~ (`e986a13`)
+4. ~~**Item 4a** — discovery pick links + the "discovery" keeper clock~~ (`b94979a`);
+   ~~**Item 4b** — sync-driven match suggestions + admin dashboard~~ (`ae36d74`)
+5. ~~**Item 5a** — migrate the 2026 draft onto the 26/27 row~~ (`e4b3c90`, applied to
+   production 2026-08-19; follow-ups `4f7a4b9`, `bf6eb65`)
+   - plus, unplanned and forced by 5a: the `P0` entry-id finding (`d6f5ac6`), the
+     rollover hardening (`3f1f5dc`) and the two bugs its Neon rehearsal caught
+     (`aab467f`, `529a144`)
+
+**Next, in order**
+6. **Item 6** — IL ownership design session, before the season's first IL case — Opus 5
 7. **Item 7** — keeper years survive a drop (rules decided: frozen while unowned;
    preseason FA carries; only a draft resets) — Opus 5
-8. **Items 8–16** — small fixes and tooling, any idle session — Haiku/Sonnet
+8. **Items 8-16** — small fixes and tooling, any idle session — Haiku/Sonnet
 
-**Next up: Item 4b.** Items 1–4a are done; 5a (draft-row migration) is the next
-substantial one.
+**Open, added during the 5a work and not yet in `SESSION_PLANS.md`:**
+- **Three test files can commit to the production database** (`P3`) —
+  `test_audit.py` / `test_demo.py` / `test_sync_freeze.py` resolve their session from
+  `DATABASE_URL`. Deliberate (they test code that commits internally) but unguarded,
+  and the reason every regression summary here says "green excluding those three".
+  Confirmed to have actually written to prod on 2026-08-18.
+- **Audit for the silent-inert pattern** (`P2`, suggested 2026-08-20). Two features
+  turned out to have never run, found two days apart and sharing a shape: a guard
+  returning quietly on empty input, downstream of something that never produced the
+  input (`advance_season`'s carries; `snapshot_player_pool`). Both were invisible
+  because the empty case is legitimate elsewhere. Worth sweeping for others, and for
+  `data_health` checks that assert the input EXISTS rather than that the guard held.
+- **The FPL sync leg of the rollover is unrehearsed.** The 2026-08-20 Neon rehearsal
+  fabricated the new league row and stubbed `sync_all`, so the mapping page has never
+  met a real `sync_league_and_managers`. Needs a throwaway FPL draft league id.
 
-Added 2026-08-18, not yet in `SESSION_PLANS.md`: **three test files can commit to the
-production database** (`P3`, under Bugs) — `test_audit.py` / `test_demo.py` /
-`test_sync_freeze.py` resolve their session from `DATABASE_URL`. Deliberate (they test
-code that commits internally), but unguarded. It is also the reason every regression
-summary here says "green excluding those three files".
+Parked: **v2 in-app league** — `blocked`. Retired as moot 2026-08-18: the 25/26
+G. Jesus / Trossard / Kudus data corrections.
 
-Parked: **Item 5b** (provisional-row season alignment — planning session, spring
-2027); **v2 in-app league** — `blocked`. Retired as moot 2026-08-18: the 25/26
-G. Jesus / Trossard / Kudus data corrections (see the annotated entries below).
+**Retired 2026-08-20: Item 5b** (provisional-row season alignment), previously parked
+for spring 2027. Its stated payoff was "remove the draft-row migration entirely", and
+that migration now exists and is good — dry-run default, one transaction, every
+unique-constraint collision checked before any write, safe to re-run, 29 tests — so the
+recurring cost it would buy back is running one script once each August, which
+`/admin/health` already refuses to let anyone forget (it asserts this season's draft is
+on this season's row and names the script). The two subtle bugs 5b would also have
+prevented were fixed in the READ path, not in the script (`_prior_season_league` for the
+round-2+ order; `effective_keeper_selections` judging ownership on the prior-season row),
+so they hold wherever the rows are stored — 5b would no longer buy correctness, only
+tidiness. Against that, it lands on the riskiest surfaces in the app: nullable
+`fpl_league_id` + a partial unique index, `current_league`, login/identity resolution and
+`sync._resolve_league` — and above all `verify_league_feed`, whose "a row with no managers
+accepts anything" rule is the live guard against the August 2026 recycled-league incident.
+A provisional row is exactly the shape that guard was not designed for: it HAS managers
+(carried at rollover) but no real FPL id yet. It also inverts a deliberate decision, since
+the draft runs pre-rollover on purpose (`scripts/preflight_draft.py:53` encodes "rollover
+NOT done" as a *pass*). Coverage is not the argument either way: the four post-GW38
+writers 5b lists are exactly the four the script moves, and `FuturePick` / `Trade` are
+season-agnostic by design.
+**Revisit only on a named trigger**, not on a date: a FIFTH league-scoped table starts
+taking post-GW38 writes, or the script's remap-by-`fpl_manager_id` assumption breaks
+again — noting that one already bit us (`d6f5ac6`) and the answer was pairing by person,
+not provisional rows.
+**Not retired with it:** "2026 draft board inaccessible after rollover" (below) is a
+much smaller, still-worth-doing season-scoped read route, and is independent of 5b
+despite being easy to confuse with it.
 
 ---
 
@@ -871,9 +907,11 @@ events actually asked for.
 
 ### Post-GW38 activity should belong to the following season
 
-**Priority:** `P2` — the largest item here; do it with the 2026-row migration.
-**Status:** `open` — the MIGRATION half is built and BLOCKED; the provisional-row
-architecture remains deferred.
+**Priority:** `P2` for the migration half (done); the architecture half is retired.
+**Status:** `closed` — the MIGRATION half shipped (`e4b3c90`) and was applied to
+production 2026-08-19. The provisional-row architecture half (Item 5b) was **retired
+2026-08-20** — see the reasoning under "What to do next"; it is revisit-on-trigger, not
+scheduled.
 
 **Migration half — built 2026-08-18, blocked on identity.**
 `scripts/migrate_2026_draft.py` (dry-run default, `--apply`, one transaction) moves
@@ -884,8 +922,9 @@ with all unique-constraint collisions checked BEFORE any write. `FuturePick` and
 standing multi-year outlook read cross-league by `/picks`), and a trade is a record of
 when something happened — `get_trades` already attributes it to a season on READ, so
 moving the rows would make storage and display disagree. Keeper seeds are REPORT-ONLY.
-**It currently aborts on production** — see "FPL entry ids are NOT stable across
-seasons" below; nothing has been written.
+It initially **aborted on production** — see "FPL entry ids are NOT stable across
+seasons" below — and was applied 2026-08-19 once the manager bridge paired by person
+rather than by entry id (`4f7a4b9`), with `bf6eb65` following.
 
 Two silent failures found and fixed while building it, both of which would have made
 the migrated board *look* fine:
