@@ -804,7 +804,18 @@ def snapshot_player_pool(db: Session, league: League) -> int:
     ids. Capturing early would record last season's ids as this season's draft-day
     pool, and flag_ineligible would then flag most of the real pool as
     'added after the draft'.
+
+    PRE-EXISTING BUG, found 2026-08-20 by the rollover rehearsal: this function has
+    never imported `PlayerPoolSnapshot`. The name is imported function-locally in
+    `flag_ineligible` and `advance_season`, neither of which is in scope here, so
+    every call raised NameError. Its only caller is the last statement of the
+    rollover route, so the failure looked like a 500 at the very end of a rollover
+    that had otherwise succeeded — and the consequence was silent: no pool was ever
+    captured, and `flag_ineligible` returns 0 on an empty snapshot by design, so the
+    ineligible-player rule has never fired for any season.
     """
+    from models import PlayerPoolSnapshot
+
     have = {
         fid for (fid,) in db.query(PlayerPoolSnapshot.fpl_id).filter_by(
             league_id=league.id

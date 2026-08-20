@@ -1167,6 +1167,35 @@ health check that fails when any current manager lacks one.
 
 ---
 
+### `snapshot_player_pool` has never run — the ineligible-player rule never fired
+
+**Priority:** `P2` — a documented league rule that has silently never worked.
+**Status:** `done 2026-08-20`. Found by the rollover rehearsal on a Neon branch.
+
+`services.snapshot_player_pool` never imported `PlayerPoolSnapshot`. The name is
+imported function-locally in `flag_ineligible` and in `advance_season`, neither of
+which is in scope there, so **every call raised `NameError`**. Pre-existing and older
+than any of the 2026 rollover work.
+
+The failure was silent rather than loud in its consequence. Its only caller is the
+LAST statement of the rollover route, so it looked like a 500 at the very end of an
+otherwise-successful rollover — and downstream, `flag_ineligible` returns 0 on an
+empty snapshot *by design* ("No-op if no snapshot was taken"), so nothing ever
+complained. Confirmed against real data: `player_pool_snapshot` was **0 rows for
+every season**, and `player_ineligibility` likewise.
+
+So the rule CLAUDE.md describes — "a non-DEF added to FPL after the draft is flagged
+ineligible" — has never fired, for any season. One-line fix; the rehearsal then
+captured 595 rows. Pinned by a test, and mutation-tested.
+
+**Worth noting for the next audit:** this is the second silent-inert feature found in
+two days (the other being the rollover carries). Both had the same shape — a guard
+that returns quietly on an empty input, downstream of something that never produced
+the input. A `data_health` check that a CURRENT season has a pool snapshot would have
+surfaced it; consider adding one.
+
+---
+
 ### Pick trades are invisible to the migrated 2026 board
 
 **Priority:** `P3` — **downgraded from P2 on inspection.** First filed as "the unmade
