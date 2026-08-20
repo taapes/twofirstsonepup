@@ -561,33 +561,136 @@ def _carry_club_seed(db: Session, new_league: League, manager, team_id, remainin
     ))
 
 
-def advance_season(db: Session, old_league: League, new_league: League) -> dict:
+def suggest_manager_pairing(db: Session, old_league: League, new_league: League) -> dict:
+    """{new_manager_id: old_manager_id or None} — a BEST GUESS from the team names.
+
+    FPL reissues `entry_id` between seasons (see the module note on advance_season),
+    and team names change too, so nothing pairs the two rows automatically. This
+    narrows the commissioner's job rather than doing it: on the real 25/26 -> 26/27
+    data it resolves six of ten ("Fighting Franckes", "Pep's Scraps", "Sid Hefty
+    +III" -> "Sid Hefty", the emoji run, "Booyaka", "João") and leaves four blank.
+
+    Greedy over the best-scoring pairs so one strong match can't be stolen by a
+    weaker one elsewhere. Reuses the discovery matcher's normalisation
+    (`_match_norm` / `_match_tokens`) rather than adding a third one.
+
+    NEVER applied automatically — same rule as the discovery pick matcher, for the
+    same reason: a wrong pairing hands one manager another's whole season.
+    """
+    old_mgrs = db.query(Manager).filter_by(league_id=old_league.id).all()
+    new_mgrs = db.query(Manager).filter_by(league_id=new_league.id).all()
+
+    def _raw(s):
+        # Emoji and punctuation survive here but not `_match_norm`, which keeps only
+        # a-z. A team called "🐶☕️🤴" normalises to the empty string, so the
+        # alphabetic path can't see it at all — yet it is literally a substring of
+        # next season's "Culver City HS🐶☕️🤴", which is about as strong a signal as
+        # this function ever gets.
+        return "".join((s or "").split()).casefold()
+
+    scored = []
+    for nm in new_mgrs:
+        for om in old_mgrs:
+            a, b = _match_norm(nm.name), _match_norm(om.name)
+            ra, rb = _raw(nm.name), _raw(om.name)
+            score = 0.0
+
+            if ra and rb and (ra in rb or rb in ra) and min(len(ra), len(rb)) >= 2:
+                score = 1.2
+            else:
+                # Tokens of 1-2 characters are dropped: "de", "le", "fc", "the" and a
+                # possessive "s" are shared by unrelated names and were enough on
+                # their own to match "Le Roi De Coupe" to "Smashers de Puppies".
+                ta = {t for t in _match_tokens(nm.name) if len(t) > 2}
+                tb = {t for t in _match_tokens(om.name) if len(t) > 2}
+                shared = ta & tb
+                if shared:
+                    score = len(shared) / max(len(ta | tb), 1) + 0.5
+                elif a and b:
+                    # Pure string similarity, with NO shared word, is weak evidence
+                    # and needs a high bar. Measured on this year's real renames, the
+                    # four genuinely unmatchable pairs score 0.20-0.48 (the worst
+                    # being "Smashers de Puppies" vs "Le Roi De Coupe" at 0.483),
+                    # while both true positives also share a substantive token and so
+                    # are already caught above. So this only fires on a near-identical
+                    # string — a typo'd rename — and otherwise leaves the row blank.
+                    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+                    score = ratio if ratio >= 0.75 else 0.0
+            if score >= 0.45:
+                scored.append((score, nm.id, om.id))
+
+    scored.sort(key=lambda t: -t[0])
+    out = {nm.id: None for nm in new_mgrs}
+    taken = set()
+    for _score, new_id, old_id in scored:
+        if out[new_id] is None and old_id not in taken:
+            out[new_id] = old_id
+            taken.add(old_id)
+    return out
+
+
+def advance_season(
+    db: Session, old_league: League, new_league: League, *,
+    pairing: dict | None = None, force: bool = False,
+) -> dict:
     """Roll the league over to a new season (Preseason). The new league row must
-    already be synced (the route runs sync for the new FPL id first). Carries forward,
-    matched by the stable FPL entry_id (managers.fpl_manager_id):
+    already be synced (the route runs sync for the new FPL id first). Carries forward:
       1. identity — display_name + password_hash (fills blanks on the new rows),
       2. keeper state — for players kept for the new season, a KeeperSeed on the new
          league with years_remaining decremented by 1 (so the clock ticks),
       3. the draft-day player-pool snapshot for the new league,
     then flips `is_current` to the new league and sets it to the preseason phase.
-    Idempotent: safe to re-run."""
+    Idempotent: safe to re-run.
+
+    `pairing` is {new_manager_id: old_manager_id}, supplied by the commissioner via
+    the rollover mapping page. **This used to be derived here from
+    `managers.fpl_manager_id`, and that is not a stable identity.** At the 26/27
+    rollover FPL reissued every entry id (25/26: 5520-268927; 26/27: a contiguous
+    58528-58537 block, overlap ZERO), so all three carries matched nothing, and each
+    one `continue`d on the miss: ten NULL display names, ten NULL password hashes —
+    every login broken — and zero keeper seeds against 152 on the old row. The
+    function returned `managers_carried=0, keepers_seeded=0` and audited it; nothing
+    failed and nobody looked.
+
+    So an incomplete pairing is now a `RuleViolation` naming every unpaired manager
+    on both sides. `force=True` is the escape hatch for a season where the roster
+    genuinely changed — surfaced in the UI as a checkbox next to those names, never
+    a silent default.
+
+    `pairing=None` falls back to entry-id matching, which keeps every existing
+    programmatic caller working — but it is now VALIDATED rather than trusted, so the
+    silent-no-op path no longer exists.
+    """
     from models import PlayerPoolSnapshot
 
     if old_league.id == new_league.id:
         raise RuleViolation("new season must be a different league")
 
-    old_mgrs = {
-        m.fpl_manager_id: m
-        for m in db.query(Manager).filter_by(league_id=old_league.id)
-    }
-    new_mgrs = {
-        m.fpl_manager_id: m
-        for m in db.query(Manager).filter_by(league_id=new_league.id)
-    }
+    old_rows = db.query(Manager).filter_by(league_id=old_league.id).all()
+    new_rows = db.query(Manager).filter_by(league_id=new_league.id).all()
+    if pairing is None:
+        by_entry = {m.fpl_manager_id: m.id for m in old_rows}
+        pairing = {nm.id: by_entry.get(nm.fpl_manager_id) for nm in new_rows}
+
+    old_by_id = {m.id: m for m in old_rows}
+    paired_old = {oid for oid in pairing.values() if oid is not None}
+    unpaired_new = [nm.display for nm in new_rows if not pairing.get(nm.id)]
+    unpaired_old = [om.display for om in old_rows if om.id not in paired_old]
+    if (unpaired_new or unpaired_old) and not force:
+        raise RuleViolation(
+            "manager pairing is incomplete, so identity and keeper clocks would be "
+            "silently dropped. "
+            + (f"No counterpart for new: {', '.join(sorted(unpaired_new))}. "
+               if unpaired_new else "")
+            + (f"Unmatched from last season: {', '.join(sorted(unpaired_old))}. "
+               if unpaired_old else "")
+            + "Confirm the mapping, or tick 'a manager joined or left' to proceed."
+        )
+
     # 1. identity carry (only fill blanks, so re-running can't clobber)
     carried = 0
-    for entry_id, nm in new_mgrs.items():
-        om = old_mgrs.get(entry_id)
+    for nm in new_rows:
+        om = old_by_id.get(pairing.get(nm.id))
         if not om:
             continue
         if om.display_name and not nm.display_name:
@@ -595,6 +698,13 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
         if om.password_hash and not nm.password_hash:
             nm.password_hash = om.password_hash
         carried += 1
+    # The keeper carry below walks the OLD row's selections, so it needs the reverse
+    # direction to find each seller's new row.
+    new_mgrs = {
+        om.fpl_manager_id: db.get(Manager, nid)
+        for nid, oid in pairing.items()
+        if oid is not None and (om := old_by_id.get(oid)) is not None
+    }
 
     # 2. keeper carry (decrement remaining for players kept for the new season)
     status = _derive_keeper_status(db, old_league)
@@ -663,15 +773,24 @@ def advance_season(db: Session, old_league: League, new_league: League) -> dict:
     new_league.phase_set_at = _dt.datetime.now(_dt.timezone.utc)
     record_audit(db, new_league, action="season.rollover",
                  summary=(f"Rolled over to {new_league.season_year}: carried "
-                          f"{carried} identities, seeded {seeded} keepers"),
+                          f"{carried} identities, seeded {seeded} keepers"
+                          + (f" [FORCED, unpaired: "
+                             f"{', '.join(sorted(unpaired_new + unpaired_old))}]"
+                             if (unpaired_new or unpaired_old) else "")),
                  details={"new_season": new_league.season_year, "managers_carried": carried,
-                          "keepers_seeded": seeded, "pool_snapshot": snapped})
+                          "keepers_seeded": seeded, "pool_snapshot": snapped,
+                          "forced": bool(unpaired_new or unpaired_old),
+                          "unpaired_new": unpaired_new, "unpaired_old": unpaired_old})
     db.commit()
     return {
         "new_season": new_league.season_year,
         "managers_carried": carried,
         "keepers_seeded": seeded,
         "pool_snapshot": snapped,
+        # Returned so the route can SHOW them. The old version returned counts too;
+        # the information was never the problem, surfacing it was.
+        "unpaired_new": unpaired_new,
+        "unpaired_old": unpaired_old,
     }
 
 
@@ -6680,6 +6799,56 @@ def data_health(db: Session, league: League) -> list[dict]:
     missing_person = [m.name for m in mgrs if not m.display_name]
     add("all managers have a person name", not missing_person,
         ", ".join(missing_person) if missing_person else "ok")
+
+    # ---- rollover assertions ------------------------------------------------
+    # Everything below would have caught the 26/27 rollover breakage on day one.
+    # advance_season pairs managers on fpl_manager_id, FPL reissued every id, and
+    # each carry `continue`s on a miss — so identity, logins and keeper clocks were
+    # all silently dropped while the rollover reported success. See the P0 backlog
+    # entry. These are the observable consequences, checked directly.
+
+    # A NULL password_hash is the "first-time set" state, which is legitimate for a
+    # genuinely new manager but not for ten of them at once.
+    no_pw = [m.display for m in mgrs if not m.password_hash]
+    add("managers can log in", not no_pw,
+        f"{len(no_pw)} with no password set: " + ", ".join(sorted(no_pw))
+        if no_pw else "ok")
+
+    prior = _prior_season_league(db, league, league.season_year or 0)
+    if prior.id != league.id:
+        # Keeper clocks: a season whose predecessor had submitted keepers must have
+        # carried seeds. 0-against-152 is what the failed carry actually looked like.
+        prior_sel = db.query(KeeperSelection).filter_by(
+            league_id=prior.id, season_year=league.season_year
+        ).count()
+        seeds = db.query(KeeperSeed).filter_by(league_id=league.id).count()
+        if prior_sel:
+            add("keeper clocks carried from last season", seeds > 0,
+                f"{seeds} seed(s) for {prior_sel} selection(s) submitted on "
+                f"{prior.season_year}"
+                + ("" if seeds else " — the rollover carry did not run"))
+
+        # Draft history: if last season's row holds keeper selections for THIS
+        # season, a draft happened for it, and its picks belong on this row.
+        if prior_sel:
+            here = db.query(DraftPick).filter_by(
+                league_id=league.id, season_year=_draft_year_for(league)
+            ).count()
+            there = db.query(DraftPick).filter_by(
+                league_id=prior.id, season_year=_draft_year_for(league)
+            ).count()
+            add("this season's draft is on this season's row", here > 0 or not there,
+                f"{here} here, {there} still on {prior.season_year}"
+                + (" — run scripts/migrate_2026_draft.py" if there and not here else ""))
+
+    # The cron reporting green while syncing nothing: every sub-task skips a frozen
+    # league and the skip sets ok=True. If THIS league isn't frozen but the last
+    # league sync skipped one that was, the sync is pointed at the wrong season.
+    if last is not None and last.ok and not league.sync_locked:
+        if "frozen" in (last.notes or "").lower():
+            add("sync is targeting this season", False,
+                f"last league sync skipped a frozen season ({last.notes}) — "
+                "sync_all is resolving a different league than the current one")
 
     sc = db.query(Standing).filter_by(league_id=league.id).count()
     add("standings row per manager", sc == len(mgrs), f"{sc}/{len(mgrs)}")

@@ -101,6 +101,14 @@ no display names, no password hashes (all logins broken) and no keeper seeds car
 Nothing warned, because each bridge `continue`s on a miss. `display_name` is the only
 identity the league itself owns; prefer it for cross-row work, and treat an
 entry-id bridge as best-effort. See the `P0` backlog entry.
+**The rollover no longer guesses.** `advance_season` takes an explicit
+`pairing={new_manager_id: old_manager_id}` and RAISES on an incomplete one (naming
+both sides; `force=True` is the "someone joined or left" hatch, audited as `[FORCED]`).
+`/admin/season/advance` syncs the new league then stops at `/admin/season/mapping`,
+where the commissioner confirms who is who — `is_current` doesn't move until they do,
+so abandoning a rollover halfway is safe. `services.suggest_manager_pairing` pre-fills
+a guess from team names (6/10 on real data, **0 wrong**, pinned by a test); it is never
+applied on its own, same rule as the discovery matcher.
 
 League logic must never corrupt synced canonical data. Custom state lives in its
 own tables alongside, not by mutating FPL-sourced rows.
@@ -548,6 +556,14 @@ draft board search all managers see, with a test enforcing it.
 {a full sync today?, a PL fixture live now?, a GW deadline today?}. The cron
 (`.github/workflows/cron.yml`) fires often within a window; the endpoint no-ops when
 nothing's live. `?force=1` forces a full sync.
+**Which league gets synced comes from `leagues.is_current`, not the env.**
+`sync_all()` used to read `FPL_DRAFT_LEAGUE_ID` directly, so after a rollover it kept
+targeting the OUTGOING (now `sync_locked`) league — every sub-task took the frozen-skip
+branch, which sets `log.ok = True`, and the cron reported green while syncing nothing
+for a day. `sync._current_league_id()` now resolves the current row first and logs a
+`resolve_league` SyncLog row naming the league it chose; the env is a bootstrap for a
+database with no league rows and nothing else. **Don't reintroduce an env read here** —
+flipping `is_current` is meant to be the only step a rollover needs.
 
 **Ineligible players:** a non-DEF added to FPL after the draft (i.e. not in the
 season's `player_pool_snapshot`, captured at rollover) is flagged in

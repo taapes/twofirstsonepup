@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Rollover — confirm managers{% endblock %}
+{% block content %}
+<h1>Rollover step 2: who is who <span class="tag">commissioner</span></h1>
+<p class="sub">The {{ new_season }}/{{ (new_season + 1) % 100 }} league has been synced
+  and its ten teams exist. Nothing has been carried across yet and
+  <strong>{{ old_season }}/{{ (old_season + 1) % 100 }} is still the current season</strong>,
+  so you can leave this page and come back — the site keeps working either way.</p>
+
+<div class="card" style="padding:12px;margin-bottom:12px">
+  <p class="sub" style="margin-top:0"><strong>Why this step exists.</strong> FPL issues
+    every manager a brand-new entry id for a new season, and team names change too, so
+    there is no reliable way to work out automatically which new team belongs to which
+    person. At the 26/27 rollover the old code guessed on entry id, matched nothing,
+    and silently carried nothing: every login broke and every keeper clock was lost.
+    The guesses below are a starting point, not an answer — check each one.</p>
+</div>
+
+<form method="post" action="/admin/season/mapping"
+      onsubmit="return confirm('Carry logins and keeper clocks using this mapping, and make {{ new_season }}/{{ (new_season + 1) % 100 }} the current season?')">
+  <input type="hidden" name="new_fpl" value="{{ new_fpl }}">
+  <div class="card" style="padding:10px;overflow-x:auto">
+    <table class="stats">
+      <thead><tr>
+        <th>{{ new_season }}/{{ (new_season + 1) % 100 }} team</th>
+        <th>is which person?</th>
+      </tr></thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>{{ r.team }}</td>
+          <td>
+            <select name="pair[{{ r.id }}]" style="min-width:220px">
+              <option value="">— not carried over —</option>
+              {% for m in old_managers %}
+              <option value="{{ m.id }}" {% if m.id == r.suggested %}selected{% endif %}>
+                {{ m.person }} &mdash; {{ m.team }}
+              </option>
+              {% endfor %}
+            </select>
+            {% if not r.suggested %}<span class="sub">no guess — please set</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if unmatched %}
+  <p class="sub">{{ unmatched }} team{{ '' if unmatched == 1 else 's' }} could not be
+    guessed from the name. Set {{ 'it' if unmatched == 1 else 'them' }} above.</p>
+  {% endif %}
+
+  <p style="margin-top:12px">
+    <label><input type="checkbox" name="force" value="1">
+      A manager joined or left the league this season</label><br>
+    <span class="sub">Leave this unticked unless the roster genuinely changed. Without
+      it, an incomplete mapping is refused rather than silently dropping somebody's
+      login and keeper clocks — which is the failure this page exists to prevent.</span>
+  </p>
+
+  <button type="submit">Carry forward &amp; make {{ new_season }}/{{ (new_season + 1) % 100 }} current</button>
+</form>
+{% endblock %}

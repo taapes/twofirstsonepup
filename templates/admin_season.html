@@ -3,10 +3,25 @@
 {% block content %}
 <h1>Season Rollover <span class="tag">commissioner</span></h1>
 <p class="sub">Advance to a new season once the new FPL <strong>draft league</strong> exists.
-  This syncs the new league (teams, standings, schedule), carries forward each manager's
-  login + keeper clock (matched by FPL entry id, years − 1 for kept players), snapshots
-  the player pool for the ineligible-player rule, and makes the new season current
-  (Pre-season). The previous season stays intact and browsable.</p>
+  This runs in <strong>two steps</strong>: first it syncs the new league (teams,
+  standings, schedule), then it asks you to confirm which new team is which person.
+  Only after you confirm does it carry logins and keeper clocks forward (years − 1 for
+  kept players), snapshot the player pool for the ineligible-player rule, and make the
+  new season current. The previous season stays current — and the site keeps
+  working — right up until that confirmation, so stopping halfway is safe.</p>
+<p class="sub">The mapping step is not busywork: FPL issues every manager a new entry
+  id each season and team names change, so nothing can pair them reliably. Guessing it
+  is what broke the 26/27 rollover — every login and every keeper clock was lost
+  silently.</p>
+
+{% if request.query_params.get('carried') %}
+<div class="card" style="padding:10px;margin-bottom:12px">
+  <strong>Rollover complete.</strong>
+  Carried {{ request.query_params.get('carried') }} manager identities and seeded
+  {{ request.query_params.get('seeded') }} keeper clocks.
+  <a href="/admin/health">Check /admin/health</a> before the draft.
+</div>
+{% endif %}
 
 {% if current %}
 <div class="card" style="padding:12px;max-width:560px">

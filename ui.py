@@ -766,14 +766,104 @@ def admin_season_advance(
     new_league = services.resolve_league(db, new_id)
     if not new_league:
         return _err("new league did not sync (check the id)", status_code=502)
-    # 2. carry forward + flip current + preseason (unfreezes the new league)
+    # STOP HERE. Everything that follows needs to know which new manager is which
+    # person, and nothing can work that out reliably: FPL reissues entry ids between
+    # seasons and the team names change too. Deriving it silently is exactly what
+    # broke the 26/27 rollover. Hand off to the mapping page.
+    #
+    # This intermediate state is safe and resumable: the new row exists but
+    # `is_current` is still on the OLD row, so the site keeps working and abandoning
+    # the rollover here changes nothing.
+    return RedirectResponse(
+        f"/admin/season/mapping?new={new_id}", status_code=303
+    )
+
+
+@router.get("/admin/season/mapping", response_class=HTMLResponse)
+def admin_season_mapping(
+    request: Request, db: Session = Depends(get_db), new: str = "",
+):
+    """Step 2 of the rollover: confirm which new manager is which person.
+
+    Pre-filled with `services.suggest_manager_pairing`, which is a guess and is never
+    applied on its own — the commissioner confirms every row.
+    """
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/season", status_code=303)
+    new_league = services.resolve_league(db, new.strip()) if new.strip() else None
+    if not new_league:
+        return _err("unknown new-season league id; start the rollover again")
+    old_league = services.current_league(db)
+    if not old_league or old_league.id == new_league.id:
+        return _err("that league is already current")
+
+    from models import Manager as _M
+
+    suggested = services.suggest_manager_pairing(db, old_league, new_league)
+    old_mgrs = db.query(_M).filter_by(league_id=old_league.id).order_by(_M.name).all()
+    new_mgrs = db.query(_M).filter_by(league_id=new_league.id).order_by(_M.name).all()
+    return templates.TemplateResponse("admin_season_mapping.html", {
+        "request": request, "league": old_league, "is_admin": True,
+        "new_fpl": new_league.fpl_league_id,
+        "new_season": new_league.season_year,
+        "old_season": old_league.season_year,
+        "old_managers": [
+            {"id": str(m.id), "team": m.name, "person": m.display} for m in old_mgrs
+        ],
+        "rows": [
+            {"id": str(m.id), "team": m.name,
+             "suggested": str(suggested.get(m.id)) if suggested.get(m.id) else ""}
+            for m in new_mgrs
+        ],
+        "unmatched": sum(1 for m in new_mgrs if not suggested.get(m.id)),
+    })
+
+
+@router.post("/admin/season/mapping")
+async def admin_season_mapping_confirm(
+    request: Request, db: Session = Depends(get_db),
+):
+    """Apply the confirmed mapping, then finish the rollover."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/season", status_code=303)
+    form = await request.form()
+    new_id = (form.get("new_fpl") or "").strip()
+    force = bool(form.get("force"))
+    new_league = services.resolve_league(db, new_id) if new_id else None
+    if not new_league:
+        return _err("unknown new-season league id; start the rollover again")
+    old_league = services.current_league(db)
+    if not old_league or old_league.id == new_league.id:
+        return _err("that league is already current")
+
+    # pair[<new manager uuid>] = <old manager uuid or "">
+    pairing = {}
+    for key, value in form.multi_items():
+        if key.startswith("pair[") and key.endswith("]"):
+            pairing[key[5:-1]] = (value or "").strip() or None
+    dupes = [v for v in set(filter(None, pairing.values()))
+             if list(pairing.values()).count(v) > 1]
+    if dupes:
+        return _err("each person may be mapped to only one new team")
+
+    import asyncio
+    import sync as _sync
+    from models import Manager as _M
+
+    by_uuid = {str(m.id): m.id for m in db.query(_M)}
+    resolved = {
+        by_uuid[k]: (by_uuid.get(v) if v else None)
+        for k, v in pairing.items() if k in by_uuid
+    }
     try:
-        services.advance_season(db, old_league, new_league)
+        out = services.advance_season(
+            db, old_league, new_league, pairing=resolved, force=force
+        )
     except RuleViolation as e:
         return _err(e)
-    # 3. NOW a full sync: the first un-gated sync_players run rekeys the pool on
-    #    `code`, writes player_season for the new league, and resolves rosters
-    #    against the new season's element ids.
+    # NOW a full sync: the first un-gated sync_players run rekeys the pool on `code`,
+    # writes player_season for the new league, and resolves rosters against the new
+    # season's element ids.
     try:
         asyncio.run(_sync.sync_all(fpl_league_id=new_id))
     except Exception as e:
@@ -782,10 +872,14 @@ def admin_season_advance(
             "Run POST /admin/sync?force=1 before using the site.",
             status_code=502,
         )
-    # 4. capture the draft-day pool from the REKEYED players table (see
-    #    services.snapshot_player_pool for why this can't live in advance_season).
+    # capture the draft-day pool from the REKEYED players table (see
+    # services.snapshot_player_pool for why this can't live in advance_season).
     services.snapshot_player_pool(db, new_league)
-    return RedirectResponse("/admin/season", status_code=303)
+    return RedirectResponse(
+        f"/admin/season?carried={out['managers_carried']}"
+        f"&seeded={out['keepers_seeded']}",
+        status_code=303,
+    )
 
 
 @router.post("/admin/lock")

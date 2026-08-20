@@ -1113,9 +1113,11 @@ query result shapes are identical.
 
 ### FPL entry ids are NOT stable across seasons — identity carry silently did nothing
 
-**Priority:** `P0` — every manager's login is broken and every keeper clock on the
-26/27 row is missing. It also BLOCKS the 2026-draft row migration.
-**Status:** `open`. Found 2026-08-18 by `scripts/migrate_2026_draft.py`'s dry run,
+**Priority:** `P0`
+**Status:** `done 2026-08-19`. Production repaired
+(`scripts/repair_rollover_identity.py`: 10 display names, 10 password hashes, 49
+keeper seeds), and the rollover rebuilt so it cannot recur — see "Rollover hardening"
+immediately below. Found 2026-08-18 by `scripts/migrate_2026_draft.py`'s dry run,
 which aborted rather than move anything.
 
 **The finding.** `managers.fpl_manager_id` (FPL's `entry_id`) is documented throughout
@@ -1162,6 +1164,102 @@ admin surface or a one-off script before anything else can proceed.
 nothing across a rollover boundary rather than failing. `display_name` is the only
 identity the league actually owns; consider making it the bridge everywhere, with a
 health check that fails when any current manager lacks one.
+
+---
+
+### Pick trades are invisible to the migrated 2026 board
+
+**Priority:** `P2` — the completed board reads correctly; this affects the seven
+unmade slots and a wall of spurious warnings.
+**Status:** `open` — **awaiting a decision**. Surfaced 2026-08-19 immediately after
+`scripts/migrate_2026_draft.py --apply`.
+
+The migration deliberately does not move `Trade` rows ("a trade is a record of when
+something happened"). But 18 of them are PICK trades, and `services.pick_ownership`
+is league-scoped: it returns 28 reassignments on the 25/26 row and **0** on the 26/27
+row. So the migrated board computes every slot's owner as if no pick had ever been
+traded.
+
+Completed picks still display the right manager — `get_draft_board` takes the owner
+from the stored `DraftPick.manager_id` for a slot that has been picked, precisely so a
+later order change can't re-attribute it. The visible damage is narrower: the **seven
+unmade slots** (84, 85, 94-97, 100) show their original owner rather than whoever
+traded for them, and **28 slots carry a `reassigned` flag** — "the order moved under a
+pick that was already made" — which is now noise rather than signal.
+
+The tension is that a pick trade is not only a historical record; it is an INPUT to
+the board. Three options, in preference order:
+
+1. **Make `pick_ownership` read pick trades across league rows**, the way `get_trades`
+   already does after the Item 2 work. Keeps trades where they happened and fixes the
+   board. Note `_trade_season_year` already attributes a trade to a season on read, so
+   the machinery exists.
+2. Move only the pick-trade `Trade` rows in the migration. Contradicts the stated rule
+   and would change how `_trade_season_year` files them.
+3. Accept it. 2026 will never be drafted again, and the completed board is correct.
+
+---
+
+### Rollover hardening — three changes so the 26/27 failure can't recur
+
+**Priority:** `P1` — built 2026-08-19, before the 2027 rollover.
+**Status:** `done 2026-08-19`.
+
+The 26/27 rollover broke three things and none of them announced itself; it was found
+a day later, by accident, while building an unrelated migration. Each change below
+turns one of those silences into a noise.
+
+**1. The sync league comes from the database, not the env.** `sync_all()` resolved
+the season from `FPL_DRAFT_LEAGUE_ID` directly, while every other read path had long
+preferred `leagues.is_current`. After a rollover the env still named the OUTGOING,
+now-frozen league, so every sub-task took the frozen-skip branch — and that branch
+sets `log.ok = True`. The cron ran a full day of green runs syncing nothing
+(2026-08-19 06:48: six sub-tasks, all "season 2025 is frozen; skipped", all ok).
+`sync._current_league_id()` now resolves `is_current` first and records which league
+it targeted in a `resolve_league` SyncLog row; the env survives only to bootstrap a
+database with no league rows. Flipping `is_current` — which `advance_season` already
+does — is now the only thing a rollover needs.
+
+**2. `advance_season` is given the manager pairing, and refuses a bad one.** It used
+to derive the pairing from `fpl_manager_id` and `continue` on a miss, so a total
+mismatch was indistinguishable from a clean run. New signature takes
+`pairing={new_manager_id: old_manager_id}` and raises `RuleViolation` naming every
+unpaired manager on BOTH sides, unless `force=True` (the explicit "a manager joined
+or left" escape hatch, recorded in the audit summary as `[FORCED, unpaired: ...]`).
+`pairing=None` still auto-pairs on entry id for programmatic callers — but that path
+is now validated rather than trusted, so the silent no-op no longer exists.
+
+**3. The rollover is two steps, with a mandatory mapping confirmation.**
+`POST /admin/season/advance` now syncs the new league and its managers, then stops at
+`GET /admin/season/mapping`. Nothing is carried and `is_current` does not move until
+the commissioner confirms who is who, so **abandoning the rollover mid-way is safe** —
+the old row stays current and the site keeps working.
+`services.suggest_manager_pairing` pre-fills a best guess by team-name similarity,
+reusing the discovery matcher's `_match_norm`/`_match_tokens` rather than adding a
+third normaliser. Measured against the real 25/26 -> 26/27 names it gets **6 of 10
+right, 4 blank, 0 wrong** — and a test pins WRONG=0, because a confident wrong pairing
+is the failure mode of the whole page (it is the one a commissioner tabs past) while a
+blank costs ten seconds. Two tuning decisions came from that data: tokens of 1-2
+characters are ignored (a shared "de" alone matched "Le Roi De Coupe" to "Smashers de
+Puppies"), and a pure fuzzy match needs ratio >= 0.75 (the four genuinely unmatchable
+pairs score 0.20-0.48, and both true positives already share a substantive token).
+Raw-string containment is checked first, because an emoji-only team name normalises to
+nothing at all yet is a literal substring of its successor.
+
+**4. Rollover assertions on `/admin/health`.** Deliberately checking the observable
+CONSEQUENCES, not the carry — a check reading the same field the broken code reads
+would have been just as silent. Managers can log in (NULL password hashes); keeper
+clocks carried when last season had submitted keepers (this is the 0-against-152
+check); this season's draft is on this season's row (catches the un-migrated state and
+names the script); and the last league sync wasn't a frozen-skip while this season is
+live (catches the cron pointing at the wrong league).
+
+Tests: `tests/test_sync_league_resolution.py` (5), `tests/test_rollover_health.py`
+(12), `tests/test_rollover_mapping.py` (13). All the guards mutation-tested.
+
+**Deliberately not done:** the provisional-row / season-alignment architecture
+(the "Post-GW38 activity" entry). It would remove the draft-row migration entirely but
+is the most expensive item on the list, and that migration is now scripted and tested.
 
 ---
 

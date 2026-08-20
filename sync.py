@@ -911,8 +911,43 @@ async def sync_trades(fpl_league_id: str | None = None):
 
 
 # ---------- orchestrator ----------
+def _current_league_id() -> tuple[str | None, str]:
+    """(fpl_league_id, how) for the season sync should target — the DATABASE first,
+    the env only as a bootstrap.
+
+    `leagues.is_current` is the app's source of truth for the active season
+    (`services.current_league` has always preferred it); `sync_all` was the one path
+    that didn't, and took `FPL_DRAFT_LEAGUE_ID` directly. After a rollover that env
+    still names the OUTGOING league, which is now `sync_locked` — so every sub-task
+    took the frozen-skip branch, and that branch sets `log.ok = True`. The 26/27
+    rollover ran a full day of green cron runs syncing nothing before anyone noticed.
+
+    Resolving from the row removes the manual step entirely: flipping `is_current`
+    (which `advance_season` already does) is now the only thing a rollover needs.
+    The env remains for a database with no league rows yet, which is the only case
+    that can't answer the question itself.
+    """
+    with SessionLocal() as session:
+        row = session.query(League).filter_by(is_current=True).one_or_none()
+        if row is not None:
+            return row.fpl_league_id, "is_current"
+    return LEAGUE_ID, "env FPL_DRAFT_LEAGUE_ID (no current league row)"
+
+
 async def sync_all(fpl_league_id: str | None = None):
-    fpl_league_id = fpl_league_id or LEAGUE_ID
+    how = "caller"
+    if fpl_league_id is None:
+        fpl_league_id, how = _current_league_id()
+    if how != "caller":
+        # Recorded so "which league did the cron actually sync?" is answerable from
+        # the log rather than by inferring it from what didn't change.
+        with SessionLocal() as session:
+            session.add(SyncLog(
+                kind="resolve_league", ok=True,
+                finished_at=datetime.datetime.now(datetime.timezone.utc),
+                notes=f"targeting league {fpl_league_id} via {how}",
+            ))
+            session.commit()
     await sync_players()
     await sync_league_and_managers(fpl_league_id=fpl_league_id)  # also standings + matches
     await sync_gameweek_dates(fpl_league_id=fpl_league_id)
