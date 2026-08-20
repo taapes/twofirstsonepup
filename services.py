@@ -4044,22 +4044,39 @@ def _prior_season_league(db: Session, league: League, season_year: int) -> Leagu
 
 
 def _manager_bridge(db: Session, src: League, dst: League) -> dict:
-    """{src manager uuid: dst manager uuid}, matched on the stable FPL entry id.
+    """{src manager uuid: dst manager uuid} — the same PERSON on two league rows.
 
-    `managers` has one row per manager PER SEASON, so any answer computed on one
-    league row has to be translated before it can be compared against ids on another.
-    Empty (and the caller skips the translation) when both are the same row.
+    `managers` has one row per manager per season, so any answer computed on one row
+    has to be translated before it can be compared against ids on another. Empty
+    (and the caller skips the translation) when both are the same row.
+
+    **`display_name` first, `fpl_manager_id` only as a fallback.** The entry id is
+    NOT stable across seasons — FPL reissued all ten at the 26/27 rollover, overlap
+    zero. An entry-id-only bridge therefore returns an EMPTY map across exactly the
+    boundary it exists to cross, and every caller then silently sees nothing: it made
+    `effective_keeper_selections` drop all 50 migrated selections (ten full 15-slot
+    boards with kept players draftable) and `_reverse_standings_managers` return an
+    empty order (a 10-slot board instead of 150). The fallback still covers a row
+    whose person names aren't filled in yet, where the entry id is all there is.
     """
     if src.id == dst.id:
         return {}
-    dst_by_fpl = {
-        m.fpl_manager_id: m.id for m in db.query(Manager).filter_by(league_id=dst.id)
+    dst_rows = db.query(Manager).filter_by(league_id=dst.id).all()
+    by_person = {
+        (m.display_name or "").strip().casefold(): m.id
+        for m in dst_rows if (m.display_name or "").strip()
     }
-    return {
-        m.id: dst_by_fpl[m.fpl_manager_id]
-        for m in db.query(Manager).filter_by(league_id=src.id)
-        if m.fpl_manager_id in dst_by_fpl
-    }
+    by_fpl = {m.fpl_manager_id: m.id for m in dst_rows}
+
+    out = {}
+    for m in db.query(Manager).filter_by(league_id=src.id):
+        person = (m.display_name or "").strip().casefold()
+        target = by_person.get(person) if person else None
+        if target is None:
+            target = by_fpl.get(m.fpl_manager_id)
+        if target is not None:
+            out[m.id] = target
+    return out
 
 
 def _reverse_standings_managers(
@@ -4080,15 +4097,27 @@ def _reverse_standings_managers(
     order from last season's row has to be mapped back onto this row's manager uuids
     or every id would be a stranger to the board.
     """
-    by_fpl = {
-        m.fpl_manager_id: m
-        for m in db.query(Manager).filter_by(league_id=league.id)
+    src = standings_league or league
+    here = {m.id: m for m in db.query(Manager).filter_by(league_id=league.id)}
+    # `get_standings` yields the SOURCE row's entry ids, so when the order comes off
+    # another row it has to be translated through _manager_bridge (person name first
+    # — entry ids are reissued between seasons, and keying on them here returned an
+    # EMPTY order, which silently collapsed the migrated 2026 board from 150 slots to
+    # the 10 the lottery alone produced).
+    src_by_fpl = {
+        m.fpl_manager_id: m.id for m in db.query(Manager).filter_by(league_id=src.id)
     }
-    ordered = [
-        by_fpl[row["fpl"]]
-        for row in get_standings(db, standings_league or league)   # best first, adjusted
-        if row.get("fpl") in by_fpl
-    ]
+    bridge = _manager_bridge(db, src, league)
+
+    ordered = []
+    for row in get_standings(db, src):                # best first, adjusted
+        src_id = src_by_fpl.get(row.get("fpl"))
+        if src_id is None:
+            continue
+        target_id = bridge.get(src_id, src_id)        # identity when same row
+        m = here.get(target_id)
+        if m is not None:
+            ordered.append(m)
     return list(reversed(ordered))                    # worst first
 
 
@@ -5332,10 +5361,17 @@ def get_draft_board(
             # `next_open_pick` treats a falsy `player` as "still on the clock", so a
             # goalie-team pick MUST render a label here — otherwise the club is
             # recorded, the slot still looks empty, and the draft never completes.
+            # `player_label` is the last fallback, not an afterthought: three real
+            # 2026 main-draft picks (Ruben Dias, Alex Scott, Braithwaite) carry a
+            # free-text label and no player_id, and without this they render as EMPTY
+            # SLOTS on a completed board. The discovery board has always preferred the
+            # label for the same reason. It also matters live — see the note above:
+            # `next_open_pick` reads a falsy player as "still on the clock", so a
+            # recorded-but-blank pick would put the draft back on a slot already used.
             "player": (
                 tnames.get(dp.team_id) if dp and dp.team_id
-                else pnames.get(dp.player_id) if dp and dp.player_id
-                else None
+                else (pnames.get(dp.player_id) if dp and dp.player_id else None)
+                or (dp.player_label if dp else None)
             ),
             "is_goalie_team": bool(dp and dp.team_id),
         })

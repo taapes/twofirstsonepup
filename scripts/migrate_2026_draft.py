@@ -115,28 +115,13 @@ def resolve_rows(db, year=YEAR):
     return source, target
 
 
-def manager_remap(db, source, target, referenced_ids, match="entry"):
-    """old manager uuid -> new manager uuid, bridged on a stable identity.
+def _pairing_index(db, source, target, match):
+    """(old managers by id, target managers by identity key, key fn, label fn).
 
-    `managers` has one row per manager PER SEASON, so every moved row's manager FK
-    points at a 25/26 row that means the same person as a 26/27 row. Anything without
-    a counterpart aborts: silently leaving the old FK would point a 26/27 pick at a
-    manager on another league row, which every reader would render as a stranger.
-
-    `match="entry"` uses `fpl_manager_id`, which the codebase treats as the stable
-    identity. **It is not.** Verified against production on 2026-08-18: the 25/26 row
-    holds entry ids 5520-268927 and the 26/27 row holds 58528-58537, a contiguous
-    freshly-issued block, with ZERO overlap — FPL issued every manager a new entry for
-    the new season. That is also why `advance_season`'s identity and keeper carries
-    both silently did nothing (they match on the same field), leaving the 26/27 row
-    with no display names, no password hashes and no keeper seeds.
-
-    `match="display"` uses `display_name`, the league-CUSTOM person name, which is the
-    only identity the app owns rather than borrows. It requires the commissioner to
-    have set those names on the target row first — which is a prerequisite for
-    restoring logins anyway, and is not something this script should guess at: the FPL
-    team names changed too ("Le Roi De Coupe" -> ?), so several of the ten are not
-    mechanically derivable.
+    Shared by `manager_remap` and `reconcile_seeds` so the two cannot pair managers
+    by different rules — which is exactly what went wrong: reconcile_seeds kept its
+    own fpl_manager_id lookup after the entry ids turned out to be reissued, and
+    reported all 49 correctly-carried seeds as orphans.
     """
     old_by_id = {m.id: m for m in db.query(Manager).filter_by(league_id=source.id)}
     target_mgrs = db.query(Manager).filter_by(league_id=target.id).all()
@@ -162,6 +147,33 @@ def manager_remap(db, source, target, referenced_ids, match="entry"):
         if k in new_by_key:
             raise Abort(f"target row has two managers with the same {match} key {k!r}")
         new_by_key[k] = m
+    return old_by_id, new_by_key, key, label
+
+
+def manager_remap(db, source, target, referenced_ids, match="entry"):
+    """old manager uuid -> new manager uuid, bridged on a stable identity.
+
+    `managers` has one row per manager PER SEASON, so every moved row's manager FK
+    points at a 25/26 row that means the same person as a 26/27 row. Anything without
+    a counterpart aborts: silently leaving the old FK would point a 26/27 pick at a
+    manager on another league row, which every reader would render as a stranger.
+
+    `match="entry"` uses `fpl_manager_id`, which the codebase treats as the stable
+    identity. **It is not.** Verified against production on 2026-08-18: the 25/26 row
+    holds entry ids 5520-268927 and the 26/27 row holds 58528-58537, a contiguous
+    freshly-issued block, with ZERO overlap — FPL issued every manager a new entry for
+    the new season. That is also why `advance_season`'s identity and keeper carries
+    both silently did nothing (they match on the same field), leaving the 26/27 row
+    with no display names, no password hashes and no keeper seeds.
+
+    `match="display"` uses `display_name`, the league-CUSTOM person name, which is the
+    only identity the app owns rather than borrows. It requires the commissioner to
+    have set those names on the target row first — which is a prerequisite for
+    restoring logins anyway, and is not something this script should guess at: the FPL
+    team names changed too ("Le Roi De Coupe" -> ?), so several of the ten are not
+    mechanically derivable.
+    """
+    old_by_id, new_by_key, key, label = _pairing_index(db, source, target, match)
 
     remap, missing = {}, []
     for mid in referenced_ids:
@@ -290,7 +302,7 @@ def check_collisions(db, target, batches, remap, year=YEAR):
 
 
 # ---- keeper seed reconciliation (report only) -------------------------------
-def reconcile_seeds(db, source, target, year=YEAR):
+def reconcile_seeds(db, source, target, year=YEAR, match="entry"):
     """Did `advance_season`'s keeper carry actually happen? Report, never fix.
 
     The expectation: for every keeper SELECTION for `year` (the players actually
@@ -299,10 +311,10 @@ def reconcile_seeds(db, source, target, year=YEAR):
     clock ticking. A source seed whose player was NOT kept is expected to have no
     counterpart and is not a finding.
     """
-    old_by_id = {m.id: m for m in db.query(Manager).filter_by(league_id=source.id)}
-    new_by_fpl = {
-        m.fpl_manager_id: m for m in db.query(Manager).filter_by(league_id=target.id)
-    }
+    # Pairs managers by the SAME rule the move does. It used to keep its own
+    # fpl_manager_id lookup, which silently paired nothing once FPL reissued the entry
+    # ids — every correctly-carried seed was then reported as an orphan.
+    old_by_id, new_by_key, key, _label = _pairing_index(db, source, target, match)
     src_seeds = {
         (s.manager_id, s.player_id): s
         for s in db.query(KeeperSeed).filter_by(league_id=source.id)
@@ -313,24 +325,39 @@ def reconcile_seeds(db, source, target, year=YEAR):
     for s in db.query(KeeperSeed).filter_by(league_id=target.id):
         if s.player_id is None:
             continue
-        key = (s.manager_id, s.player_id)
-        if key in tgt_seeds:
-            dupes.append(key)
-        tgt_seeds[key] = s
+        seed_key = (s.manager_id, s.player_id)
+        if seed_key in tgt_seeds:
+            dupes.append(seed_key)
+        tgt_seeds[seed_key] = s
 
-    missing, mismatched, orphaned = [], [], []
+    # A selection whose player the manager no longer holds is NOT expected to have a
+    # carried seed: advance_season deliberately writes nothing rather than invent a
+    # clock for a player he traded away. Reporting it as "missing" every run is a
+    # false alarm, and a report that cries wolf is one nobody reads.
+    import services  # local: keeps this script importable without a DB configured
+    held = services._derive_keeper_status(db, source)
+
+    missing, mismatched, orphaned, not_expected = [], [], [], []
     expected_keys = set()
     for ks in db.query(KeeperSelection).filter_by(league_id=source.id, season_year=year):
         if ks.player_id is None:      # a kept goalie team carries on its own clock
             continue
+        if held.get(ks.manager_id, {}).get(ks.player_id) is None:
+            om0 = old_by_id.get(ks.manager_id)
+            not_expected.append(
+                f"{om0.display if om0 else ks.manager_id} / player {ks.player_id}: "
+                "no longer held (traded away), so no seed is due")
+            continue
         om = old_by_id.get(ks.manager_id)
-        nm = new_by_fpl.get(om.fpl_manager_id) if om else None
+        nm = new_by_key.get(key(om)) if om else None
         if nm is None:
             continue
         who = om.display if om else str(ks.manager_id)
-        key = (nm.id, ks.player_id)
-        expected_keys.add(key)
-        tgt = tgt_seeds.get(key)
+        # NOT `key` — that name is the pairing FUNCTION above, and rebinding it here
+        # made the second loop iteration call a tuple.
+        pair_key = (nm.id, ks.player_id)
+        expected_keys.add(pair_key)
+        tgt = tgt_seeds.get(pair_key)
         if tgt is None:
             missing.append(f"{who} / player {ks.player_id}: no carried seed on target")
             continue
@@ -342,9 +369,11 @@ def reconcile_seeds(db, source, target, year=YEAR):
                 f"(source {src.years_remaining} - 1)"
             )
 
-    for key in tgt_seeds:
-        if key not in expected_keys:
-            orphaned.append(f"manager {key[0]} / player {key[1]}: seed with no {year} selection")
+    for seed_key in tgt_seeds:
+        if seed_key not in expected_keys:
+            orphaned.append(
+                f"manager {seed_key[0]} / player {seed_key[1]}: "
+                f"seed with no {year} selection")
 
     return {
         "source_seeds": len(src_seeds),
@@ -353,6 +382,7 @@ def reconcile_seeds(db, source, target, year=YEAR):
         "missing": missing,
         "mismatched": mismatched,
         "orphaned": orphaned,
+        "not_expected": not_expected,
         "duplicated": [f"manager {a} / player {b}" for a, b in dupes],
     }
 
@@ -417,13 +447,18 @@ def main() -> int:
         check_collisions(db, target, batches, remap, year)
         print("collision check: clear\n")
 
-        rec = reconcile_seeds(db, source, target, year)
+        rec = reconcile_seeds(db, source, target, year, match=args.match)
         print(f"keeper seed reconciliation (REPORT ONLY — nothing is written):")
         print(f"    seeds on source        {rec['source_seeds']}")
         print(f"    seeds on target        {rec['target_seeds']}")
         print(f"    expected carried seeds {rec['expected']}  "
               f"(one per {year} keeper selection)")
         drift = False
+        if rec["not_expected"]:
+            print(f"    not due ({len(rec['not_expected'])}, traded away after "
+                  "submitting — this is correct, not drift):")
+            for line in rec["not_expected"]:
+                print(f"        {line}")
         for label in ("missing", "mismatched", "duplicated", "orphaned"):
             rows = rec[label]
             if not rows:

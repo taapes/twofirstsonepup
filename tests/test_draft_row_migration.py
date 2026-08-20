@@ -134,6 +134,23 @@ def _select(session, lg, mgr, player, *, year=YEAR):
     session.commit()
 
 
+def _hold(session, lg, mgr, player):
+    """Roster a player all season, so _derive_keeper_status says the manager really
+    holds him. A keeper selection for a player with no roster history reads as
+    "traded away", which is a different case entirely."""
+    from models import Gameweek as _GW
+    gws = {g.number: g for g in session.query(_GW).filter_by(league_id=lg.id)}
+    for n in range(1, 39):
+        g = gws.get(n)
+        if g is None:
+            g = _GW(number=n, league_id=lg.id)
+            session.add(g)
+            session.flush()
+            gws[n] = g
+        session.add(Roster(manager_id=mgr.id, player_id=player.id, gameweek_id=g.id))
+    session.commit()
+
+
 def _move(session, old, new, year=YEAR):
     """The script's move logic, exactly as --apply runs it."""
     batches = collect(session, old, year)
@@ -336,6 +353,7 @@ def test_resolve_refuses_a_non_current_target(test_session):
 def test_seed_reconciliation_reports_a_missing_carry_without_writing(test_session):
     old, old_m, new, _new_m = _prod_shape(test_session)
     kept = _player(test_session, old, "Kept")
+    _hold(test_session, old, old_m["A"], kept)
     _select(test_session, old, old_m["A"], kept)
     test_session.add(KeeperSeed(league_id=old.id, manager_id=old_m["A"].id,
                                 player_id=kept.id, years_remaining=3))
@@ -353,6 +371,7 @@ def test_seed_reconciliation_reports_a_missing_carry_without_writing(test_sessio
 def test_seed_reconciliation_reports_a_clock_that_did_not_tick(test_session):
     old, old_m, new, new_m = _prod_shape(test_session)
     kept = _player(test_session, old, "Kept")
+    _hold(test_session, old, old_m["A"], kept)
     _select(test_session, old, old_m["A"], kept)
     test_session.add(KeeperSeed(league_id=old.id, manager_id=old_m["A"].id,
                                 player_id=kept.id, years_remaining=3))
@@ -369,6 +388,7 @@ def test_seed_reconciliation_reports_a_clock_that_did_not_tick(test_session):
 def test_a_correct_carry_reports_no_drift(test_session):
     old, old_m, new, new_m = _prod_shape(test_session)
     kept = _player(test_session, old, "Kept")
+    _hold(test_session, old, old_m["A"], kept)
     _select(test_session, old, old_m["A"], kept)
     test_session.add(KeeperSeed(league_id=old.id, manager_id=old_m["A"].id,
                                 player_id=kept.id, years_remaining=3))
@@ -575,3 +595,120 @@ def test_display_matching_refuses_while_names_are_blank(test_session):
 
     with pytest.raises(Abort, match="needs a display_name"):
         manager_remap(test_session, old, new, set(), match="display")
+
+
+def test_seed_reconciliation_pairs_managers_the_same_way_the_move_does(test_session):
+    """It kept its OWN fpl_manager_id lookup after the move learned not to. Against
+    production that paired nothing, so all 49 correctly-carried seeds were reported as
+    orphans and the expected count came out 0 — a report that would have sent someone
+    hand-editing keeper clocks that were already right."""
+    old = _league(test_session, season_year=YEAR - 1, fpl=1754, locked=True)
+    old_m = _managers(test_session, old, with_standings=["A", "B", "C"])
+    new = _league(test_session, season_year=YEAR, fpl=11818, is_current=True)
+    new_m = {}
+    for i, name in enumerate(PEOPLE, start=1):        # reissued entry ids, as in prod
+        m = Manager(league_id=new.id, fpl_manager_id=str(58528 + i),
+                    name=f"{name} New FC", display_name=name)
+        test_session.add(m)
+        test_session.flush()
+        new_m[name] = m
+    test_session.commit()
+
+    kept = _player(test_session, old, "Kept")
+    _hold(test_session, old, old_m["A"], kept)
+    _select(test_session, old, old_m["A"], kept)
+    test_session.add(KeeperSeed(league_id=old.id, manager_id=old_m["A"].id,
+                                player_id=kept.id, years_remaining=3))
+    test_session.add(KeeperSeed(league_id=new.id, manager_id=new_m["A"].id,
+                                player_id=kept.id, years_remaining=2))   # correct carry
+    test_session.commit()
+
+    entry = reconcile_seeds(test_session, old, new, YEAR, match="entry")
+    assert entry["expected"] == 0 and len(entry["orphaned"]) == 1, \
+        "entry matching cannot pair these rows — the premise of the bug"
+
+    disp = reconcile_seeds(test_session, old, new, YEAR, match="display")
+    assert disp["expected"] == 1
+    assert (disp["missing"], disp["mismatched"], disp["orphaned"]) == ([], [], [])
+
+
+def test_a_traded_away_selection_is_reported_as_not_due_not_missing(test_session):
+    """advance_season deliberately writes no seed for a player its manager traded
+    away after submitting. Calling that 'missing' every run is a false alarm, and a
+    report that cries wolf is one nobody reads — production has exactly one."""
+    old, old_m, new, _new_m = _prod_shape(test_session)
+    gone = _player(test_session, old, "Gone")
+    _hold(test_session, old, old_m["B"], gone)      # rostered by B, selected by A
+    _select(test_session, old, old_m["A"], gone)
+
+    rec = reconcile_seeds(test_session, old, new, YEAR)
+    assert rec["missing"] == [], "a traded-away player is not a missing carry"
+    assert len(rec["not_expected"]) == 1
+    assert "no longer held" in rec["not_expected"][0]
+
+
+def test_the_bridge_survives_reissued_entry_ids(test_session):
+    """The bug this session shipped and then hit in production. Both the ownership
+    bridge and the round-2+ order keyed on `fpl_manager_id` — the very field proven
+    unstable hours earlier. Across a real rollover the bridge returned an EMPTY map,
+    so `effective_keeper_selections` dropped all 50 migrated selections (ten full
+    15-slot boards, kept players draftable) and `_reverse_standings_managers`
+    returned nothing (a 10-slot board instead of 101).
+
+    The fixtures above all use MATCHING entry ids, which is why they passed. This one
+    reissues them the way FPL did.
+    """
+    old = _league(test_session, season_year=YEAR - 1, fpl=1754, locked=True)
+    old_m = {}
+    for i, name in enumerate(PEOPLE, start=1):
+        m = Manager(league_id=old.id, fpl_manager_id=str(i), name=f"{name} Old FC",
+                    display_name=name)
+        test_session.add(m)
+        test_session.flush()
+        test_session.add(Standing(league_id=old.id, manager_id=m.id, rank=i,
+                                  total=100 - i, points_for=1000 - i))
+        old_m[name] = m
+    new = _league(test_session, season_year=YEAR, fpl=11818, is_current=True)
+    new_m = {}
+    for i, name in enumerate(PEOPLE, start=1):
+        m = Manager(league_id=new.id, fpl_manager_id=str(58528 + i),
+                    name=f"{name} New FC", display_name=name)
+        test_session.add(m)
+        test_session.flush()
+        new_m[name] = m
+    test_session.commit()
+
+    bridge = services._manager_bridge(test_session, old, new)
+    assert len(bridge) == 3, "person names must bridge what entry ids no longer can"
+    assert bridge[old_m["C"].id] == new_m["C"].id
+
+    # order comes off the OLD row's standings but must name the NEW row's managers
+    order = services._reverse_standings_managers(test_session, new, old)
+    assert [m.display for m in order] == ["C", "B", "A"]
+    assert all(m.league_id == new.id for m in order)
+
+    # and a migrated selection still counts, so the board shrinks
+    kept = _player(test_session, old, "Kept")
+    _hold(test_session, old, old_m["A"], kept)
+    test_session.add(KeeperSelection(league_id=new.id, manager_id=new_m["A"].id,
+                                     player_id=kept.id, season_year=YEAR))
+    test_session.commit()
+    counted = services.effective_keeper_selections(test_session, new, YEAR)
+    assert [s.player_id for s in counted] == [kept.id]
+
+
+def test_a_free_text_main_pick_renders_its_label(test_session):
+    """Three real 2026 picks carry a label and no player_id, and rendered as EMPTY
+    slots on a completed board. `next_open_pick` also treats a falsy player as 'on
+    the clock', so live it would hand out a slot that was already used."""
+    old, old_m, new, _new_m = _prod_shape(test_session)
+    test_session.add(DraftPick(league_id=old.id, season_year=YEAR, draft_type="main",
+                               round=1, pick_number=1, manager_id=old_m["C"].id,
+                               player_id=None, player_label="Ruben Dias",
+                               source="draft"))
+    test_session.commit()
+    _move(test_session, old, new)
+
+    board = services.get_draft_board(test_session, new, YEAR)
+    assert board[0]["player"] == "Ruben Dias"
+    assert services.next_open_pick(board)["pick"] != 1, "a made pick is not on the clock"
