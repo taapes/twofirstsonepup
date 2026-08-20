@@ -865,7 +865,14 @@ async def admin_season_mapping_confirm(
     # writes player_season for the new league, and resolves rosters against the new
     # season's element ids.
     try:
-        asyncio.run(_sync.sync_all(fpl_league_id=new_id))
+        # `await`, NOT asyncio.run — this route is async (it awaits request.form()),
+        # and asyncio.run() inside a running event loop raises RuntimeError every
+        # time. Caught by the rehearsal on a Neon branch: the rollover committed and
+        # then ALWAYS returned 502 "post-rollover sync failed", so the new season
+        # went current with no rosters or player_season until someone ran
+        # /admin/sync?force=1 by hand. The sibling /admin/season/advance route is a
+        # plain `def` and keeps asyncio.run correctly.
+        await _sync.sync_all(fpl_league_id=new_id)
     except Exception as e:
         return _err(
             f"rollover completed but the post-rollover sync failed: {e}. "

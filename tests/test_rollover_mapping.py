@@ -323,3 +323,66 @@ def test_the_suggestion_is_never_confidently_wrong_on_real_data(test_session):
 
     assert wrong == [], "a confident wrong pairing is worse than a blank"
     assert correct >= 6, f"only {correct}/10 suggested; the page stops earning its keep"
+
+
+# ---- caught by the Neon-branch rehearsal, 2026-08-20 -------------------------
+
+def test_the_confirm_route_awaits_the_post_rollover_sync(test_session, monkeypatch):
+    """`admin_season_mapping_confirm` is `async def` (it awaits request.form()), and
+    calling `asyncio.run()` inside a running event loop raises RuntimeError EVERY
+    time. So the rollover committed and then always returned 502 "post-rollover sync
+    failed", leaving the new season current with no rosters or player_season until
+    someone ran /admin/sync?force=1 by hand.
+
+    Unit tests could not catch this — it needs a real ASGI event loop, which is why
+    it survived until the rehearsal. Hence a route-level test.
+    """
+    import sync
+    from fastapi.testclient import TestClient
+    from main import app
+
+    old, om, new, nm = _reissued(test_session)
+
+    called = []
+
+    async def _fake_sync_all(fpl_league_id=None, **kw):
+        called.append(fpl_league_id)
+
+    monkeypatch.setattr(sync, "sync_all", _fake_sync_all)
+    monkeypatch.setenv("ADMIN_PASSWORD", "pw")
+
+    c = TestClient(app, follow_redirects=False)
+    c.post("/admin/login", data={"password": "pw"})
+    r = c.post("/admin/season/mapping", data={
+        "new_fpl": new.fpl_league_id,
+        f"pair[{nm['Scott'].id}]": str(om["Scott"].id),
+        f"pair[{nm['Kevin F'].id}]": str(om["Kevin F"].id),
+    })
+
+    assert r.status_code == 303, f"expected a redirect, got {r.status_code}: {r.text[:200]}"
+    assert "carried=2" in (r.headers.get("location") or "")
+    assert called == [new.fpl_league_id], "the post-rollover sync must actually run"
+
+
+def test_snapshot_player_pool_actually_captures_a_pool(test_session):
+    """It never imported `PlayerPoolSnapshot` — the name is imported function-locally
+    in flag_ineligible and advance_season, neither in scope here — so every call
+    raised NameError. Pre-existing and older than the rollover work.
+
+    The failure was silent rather than loud: no pool was captured for any season, and
+    flag_ineligible returns 0 on an empty snapshot BY DESIGN, so the
+    ineligible-player rule has never fired. Confirmed against real data — 0 snapshot
+    rows for every season.
+    """
+    from models import PlayerPoolSnapshot
+
+    lg = _league(test_session, season_year=2026, fpl=1, is_current=True)
+    _mgr(test_session, lg, entry=1, team="T", person="A")
+    _player(test_session, lg, "Someone")
+    _player(test_session, lg, "Somebody Else")
+
+    n = services.snapshot_player_pool(test_session, lg)
+    assert n == 2, "no pool captured"
+    assert test_session.query(PlayerPoolSnapshot).filter_by(league_id=lg.id).count() == 2
+    # idempotent — a second run adds nothing
+    assert services.snapshot_player_pool(test_session, lg) == 0
