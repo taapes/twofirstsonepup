@@ -800,7 +800,24 @@ open questions the commissioner must decide before implementation.
 
 ---
 
-## Item 6 — IL ownership done right (design session)
+## Item 6 — IL ownership done right (design session) — **DONE 2026-08-20**
+
+**Outcome:** design agreed and written to **`docs/DESIGN_IL_OWNERSHIP.md`**. No code
+written, as intended. The build is split into **Item 6b** and **Item 6c** below;
+`6c` depends on `6b`. Six league rules were settled by the commissioner in that
+session (additive ownership; IL capped at one but the international list **uncapped**;
+the roster is always 15 so a player can never be dropped without a replacement; the
+returning player may displace **anyone**; an absence still open after GW38 must be
+resolved down to 15, by Releasing the absentee or Returning him and **naming who
+leaves**; a must-return alert keyed on minutes, with fines left to the existing manual
+ledger; no validation of international absences)
+— they are recorded in §2 of the design doc and are not open for re-litigation.
+An earlier rule requiring the *replacement's tracked slot* to be released was
+**withdrawn 2026-08-20** as too hard to automate — FPL records no paired add/drop. The
+manager naming the departing player is what replaced it (§4.4/§5).
+The session also found four things the naive design gets wrong (fold order, the
+`status == 'active'` predicate, cessation at season end, the wrongly-capped
+international list) and two live bugs; all are in the doc.
 
 **Priority:** before this season's first IL case — the 26/27 season is starting, IL
 self-service is live on My Team, and the last two IL cases each required live
@@ -880,6 +897,230 @@ THE DESIGN MUST ANSWER:
 END WITH: (a) the open questions the commissioner must decide, if any; (b) a
 build-session prompt appended to docs/SESSION_PLANS.md as "Item 6b", in the same
 format as the other items, with a recommended model.
+```
+
+---
+
+## Item 6b — Absence ownership: one predicate, one fold — **BUILT 2026-08-20**
+
+**Outcome:** built in the same session as the design, uncommitted for review. 760 passed
+/ 0 skipped; the 2 failures are the known `P3` prod-DB test files (`test_sync_freeze`
+fails on a clean tree too, `test_demo` only because production hasn't had migration
+`d4e5f6a7b8c9` applied). Every guard mutation-tested, including fold order.
+Deviations from the plan below, both deliberate: the admin **historical IL backfill** had
+to be exempted from the new roster-ownership guard (`require_roster=False`) — that route
+exists precisely because the snapshot shows the replacement, so guarding it refuses every
+case it was built for; and `unresolved_absences` treats **phase `offseason`** as season
+over, not just `current_gameweek >= 38`, because `current_gameweek` returns None when
+deadline dates are missing and the guard would have been silently inert.
+
+
+**Priority:** before this season's first IL case. This is the half that retires the
+three carve-outs; until it lands, the next absence is another live debugging session.
+**Recommended model:** Opus 5 — a change to the single most load-bearing read path in
+the app (`_owner_maps` feeds rosters, My Team, the Players tab, the keepers page and
+draft slot math), with two orderings that are wrong in the obvious direction.
+**Design doc:** `docs/DESIGN_IL_OWNERSHIP.md` — read it in full first; §4 is the build.
+**Backlog entry:** "Review IL-driven keeper restoration end to end".
+**Decisions:** all seven league rules in §2 of the design doc are settled — do not
+re-open them. In particular the international list is **uncapped**, ownership is
+**additive** (effective squad = 15 + ≤1 IL + N intl), and an absence open after GW38
+must be resolved back to 15.
+
+**Plan.** Extract `_absence_held` as the single "who holds him now" predicate and fold
+it into `_owner_maps` **before** the trade fold, then switch `services.py:3248` to the
+same helper so candidacy and ownership cannot disagree. Add the season-end resolution:
+an absence open after GW38 must balance the squad back to 15, so the existing Return
+button must ask which player leaves and store it in a new `released_player_id`, folded
+as the one subtraction (§4.4). Then the supporting corrections in §10: lift the international cap
+(guard + docstring + the `{% elif %}` in the template), close the `place_on_il` write
+path, block `advance_season` on open absences, fold `manager_assets` and `player_portal`
+onto the overlay, and add the `data_health` checks. `_absence_cover` stays exactly as it
+is — it answers a different question and anti-tanking must not change.
+
+**Session prompt:**
+
+```text
+Read CLAUDE.md in full (the two-truths boundary, the trades overlay, the IL and
+anti-tanking bullets), then docs/DESIGN_IL_OWNERSHIP.md in full. That design is
+agreed; implement §4 and §10 of it. Do NOT redesign, and do NOT re-open the seven
+league rules in §2 — they were decided by the commissioner. Item 6c (the
+return-required alert) is a SEPARATE later session: do not build it here. §5 of the doc
+records a WITHDRAWN rule (deriving slot succession) — do not build that either.
+
+Line numbers in the doc may have drifted — search by symbol name.
+
+THE CORE CHANGE. Extract a helper `_absence_held(db, league, last_n)` returning
+{(manager_id, player_id)} for players a manager still holds through an injury-list or
+international-list entry. Predicate: held iff status == 'active', OR (status ==
+'returned' AND last_n <= end_gw). 'waived' is never held past end_gw; NULL status is
+not held. Then:
+
+1. Fold it into services._owner_maps BEFORE the existing trade fold, not after. The
+   trade fold is guarded `if owner.get(t.player_id) == t.from_manager`; an absent
+   player has no snapshot owner, so folding absences second makes a trade of an
+   absent player permanently unappliable and pins /admin/health's "site trades
+   applied" check red forever. Guard the absence fold with `if pid not in owner` so a
+   mis-entered absence can never steal a rostered player, and order the query by
+   (start_gw, id) — player_ownership is called twice in one player_portal request and
+   a nondeterministic winner makes two panels on one page disagree. Comment both, the
+   way the trade guard above is commented.
+2. Replace the `il` half of the candidacy union in _derive_keeper_status (the
+   `final_candidates |= {...covered...}` line) with the SAME helper. This is not
+   cosmetic: it is what stops candidacy and ownership forking on a season-end return,
+   and it fixes a live bug where a player dropped and claimed by ANOTHER manager
+   becomes a keeper candidate for both (reconcile_absences keys on (manager, player),
+   so the original entry never auto-closes).
+3. Season-end resolution (§4.4), the ONE subtraction in this design. An absence still
+   open after GW38 must resolve the squad back to 15, and the end-of-season prompt on
+   My Team already exists ("Season over — add this player back or Release them"). Its
+   Release button already resolves correctly (the absentee goes to nobody, the frozen 15
+   stands). Its RETURN button does not: it leaves the manager holding 16. Fix that
+   branch — Return must also ask which of the frozen 15 leaves, and store it.
+
+   Storage is a nullable released_player_id FK on InjuryList / InternationalList, NOT a
+   roster_releases table: there is at most one release per absence resolution and it
+   belongs on the row that caused it. Set it in return_from_il / return_from_intl; fold
+   it into _owner_maps as a subtraction AFTER the additive fold. It is required only at
+   season end — mid-season the manager swaps in FPL and the sync sees it, so the column
+   stays NULL and cessation is right.
+
+   It is MANAGER-DESIGNATED, never derived. Do not try to infer who should leave; §5 of
+   the doc records why that rule was withdrawn.
+
+   Enforce it where it would be cashed in: submit_keepers refuses for a manager with an
+   unresolved post-GW38 absence (manager-scoped, not a global lock — it should stop only
+   the person who owes a decision). Add a data_health check listing them.
+
+   Still NOT built: a roster_releases table, a release reason, releasing a player outside
+   an absence resolution, an admin-only release form, or any automatic choice of who
+   leaves.
+
+LEAVE _absence_cover EXACTLY AS IT IS. It answers a different question ("was he
+excused that gameweek") and is shared with anti-tanking; the two must keep reading the
+same rows but they legitimately differ in predicate. Do not merge them.
+
+THEN the supporting corrections (§10 of the doc):
+ - Lift the international-list cap: drop the one-active-entry guard in
+   place_on_intl, fix the models.py docstring that claims one per manager, and move
+   the "Send a player to international duty" form in templates/my_team.html off its
+   {% elif %} so it renders alongside an existing absence. KEEP place_on_il's cap.
+ - place_on_il must require the injured player to be on the manager's effective
+   roster, and must refuse injured == replacement (place_on_intl already does).
+ - advance_season must refuse while any absence entry is active, in the same
+   fail-loudly shape as its pairing check, with the same force=True hatch. The
+   absence overlay is NOT self-retiring the way the trade overlay is — say so in a
+   comment.
+ - manager_assets: route players through _effective_roster_pids instead of joining
+   Roster raw. player_portal: replace its hand-rolled copy of effective_owner with a
+   call to effective_owner.
+ - New data_health checks: an active entry whose player is rostered by someone else;
+   one player named by two managers' entries; NULL-status entries.
+
+EVERY reader left reading raw Roster must carry a comment saying why, in the style of
+the existing "Deliberately raw Roster, NOT the trade overlay" comment on the 15-man
+check. The absence of such comments is what let three carve-outs accumulate. §9 of the
+doc is the audit — reconcile it against the tree and fix any drift.
+
+TESTS. tests/test_trade_overlay.py is the template: a test per reader. Cover at
+minimum — the fold order (a trade of an absent player applies, and the health check
+goes green); candidacy vs ownership agreeing when end_gw >= last_n (the existing
+test_a_returned_il_entry_does_not_grant_candidacy_on_its_own uses end_gw=15 and does
+NOT cover this); a player dropped and claimed by another manager is a candidate for
+exactly one of them; season-end Release leaves 15 and season-end Return-plus-named-drop
+also leaves 15, while an unresolved absence blocks submit_keepers for THAT manager only;
+MULTIPLE simultaneous international
+absences for one manager (every existing fixture has at most one); place_on_il's
+one-active-entry guard; and that get_transactions, anti-tanking and the 15-man check
+are all unchanged. Mutation-test the two guards and the fold order.
+
+ACCEPTANCE: the full DB-backed regression, green with 0 skipped (command in the header
+of this file). A run reporting "310 skipped" means TEST_DATABASE_URL never reached
+pytest — that is a FAIL. Update docs/BACKLOG.md and the spec corrections in §13 of the
+design doc (requirements.md, CLAUDE.md, the models.py docstring, and the "15-man" copy
+in three templates). Do not commit; end with a summary.
+```
+
+---
+
+## Item 6c — The return-required alert — **BUILT 2026-08-21**
+
+**Outcome:** built the day after 6b, uncommitted alongside it. Migration
+`e5f6a7b8c9d0` adds `last_played_gw` to both absence tables (chained off 6b's
+`d4e5f6a7b8c9`). `services.record_absentee_minutes(db, league, live_stats, gw_number)`
+persists it — called from `sync.sync_gameweek_points` with the `elements` map already
+fetched, no new HTTP call. `services._return_required_entries` is the shared predicate
+consumed by both `flagged_actions` (homepage nag) and a new `/admin/health` check ("no
+absentee playing while still parked"). One deviation from the plan: the
+minutes-persistence logic was pulled out of `sync.py` into the services function above
+specifically so it's unit-testable without an HTTP call or the configured database —
+`sync.py` now has a (non-circular) `import services`. Tests appended to
+`tests/test_absence_ownership.py` (17 new cases: `record_absentee_minutes` behaviour,
+the min-stay gate, the uncapped-international case, and `reconcile_absences` — which had
+no test at all before this). Every mutation named in the build prompt bites, plus two
+more found while writing the tests (the closed-entry guard, the IL-only eligibility
+gate).
+
+**Priority:** after 6b, before the AFCON window (Dec/Jan) — that is when several
+absences per manager become likely and a parked returnee is easiest to miss.
+**Recommended model:** Sonnet 5 — this is now a small, well-specified change. It was an
+Opus item when it also carried slot succession; that half was withdrawn.
+**Design doc:** `docs/DESIGN_IL_OWNERSHIP.md` §6 (and §5 for what was cut).
+**Depends on:** Item 6b, loosely — the alert reads absence rows, which 6b does not
+change, so it can be built independently if 6b slips.
+**Decisions:** rule 6 in §2 of the design doc. **Alert-only enforcement, confirmed.**
+Enforcement cannot be technical — the action happens in the FPL app, so there is no
+request of ours to block. Fines stay on the existing manual ledger
+(`services.add_fine`, `/admin/standings`); do NOT wire an automatic fine.
+
+**Plan.** Persist the absent player's minutes — already fetched and discarded in
+`sync_gameweek_points` — and flag when he has played but is still off the manager's
+roster, suppressed for the IL until the minimum stay has elapsed.
+
+**Session prompt:**
+
+```text
+Read CLAUDE.md in full, then docs/DESIGN_IL_OWNERSHIP.md §6. Do not re-open the league
+rules in §2. Note that §5 records a withdrawn rule (slot succession) — do NOT build it.
+
+THE RULE. A player back from injury or international duty must be re-added to the
+manager's roster immediately. The site alerts when he isn't: the absent player has
+logged MINUTES for his club and is still off the manager's roster. For the IL this is
+suppressed until il_return_eligible_gw has passed — the 4-GW minimum stay holds even if
+he recovers sooner. The international list has no minimum stay, so it alerts as soon as
+he plays.
+
+THE DATA IS ALREADY THERE AND THROWN AWAY. sync_gameweek_points fetches
+/event/{gw}/live, whose elements map carries minutes for EVERY player in the game, but
+it only persists minutes for the players in each manager's picks. An absent player is on
+nobody's roster, so his minutes are discarded. Read them out of the payload already in
+hand — no new HTTP call — and persist the fact on the absence row. `last_played_gw` is
+the smallest thing that works and is the only new stored field in this design.
+
+DO NOT widen GameweekPoints.player_points to include absent players.
+rules.zero_minute_count iterates that list and it must keep meaning "FPL's lineup", not
+"our notion of the squad" — widening it would silently change the anti-tanking rule.
+That rule is load-bearing and its excusal logic is subtle; leave it alone.
+
+SURFACING. Use the channels that already exist: flagged_actions (already the "you owe
+the league an action" nag on the homepage) and a data_health check. Name the manager,
+the player, and how many gameweeks he has been playing while parked. Do NOT create an
+automatic fine — nothing else in the app converts a flag into money except last place,
+and an automatic one would misfire on sync timing. The commissioner fines by hand via
+services.add_fine on /admin/standings if they want to.
+
+Both lists are covered, and the international list may have SEVERAL active entries for
+one manager (it is uncapped as of 6b) — so this is a per-entry alert, not per-manager.
+
+TESTS. Fires on minutes with the player still off-roster; suppressed for an IL inside
+the minimum stay and fires once past it; fires for an international absence immediately;
+clears when the player is re-added; several simultaneous international absences each
+alert independently. Also pin that reconcile_absences still auto-closes an entry on
+re-add — there is no test for that function at all today.
+
+ACCEPTANCE: the full DB-backed regression, green with 0 skipped (command in the header
+of this file); "310 skipped" is a FAIL. Mutation-test the min-stay suppression. Update
+docs/BACKLOG.md and CLAUDE.md. Do not commit; end with a summary.
 ```
 
 ---

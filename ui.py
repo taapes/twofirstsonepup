@@ -500,6 +500,7 @@ def il_place(
 def il_return(
     request: Request, db: Session = Depends(get_db),
     fpl_manager_id: str = Form(...), il_id: str = Form(...),
+    released_fpl_id: str = Form(""),
 ):
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "gw_logic_active"):
@@ -509,8 +510,12 @@ def il_return(
     if not _il_entry_or_403(db, league, fpl_manager_id, il_id):
         return _forbidden(request, "That injury-list entry isn't yours.")
     try:
+        # Only required at season end, when the frozen roster can't absorb the swap.
         services.return_from_il(
             db, league, il_id, services.current_gameweek(db, league) or SEASON_LAST_GW,
+            released_fpl_id=_safe_int(released_fpl_id, 1, 10_000_000,
+                                      field="released player")
+            if released_fpl_id.strip() else None,
         )
     except RuleViolation as e:
         return _err(e)
@@ -577,6 +582,7 @@ def intl_place(
 def intl_return(
     request: Request, db: Session = Depends(get_db),
     fpl_manager_id: str = Form(...), intl_id: str = Form(...),
+    released_fpl_id: str = Form(""),
 ):
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "gw_logic_active"):
@@ -588,6 +594,9 @@ def intl_return(
     try:
         services.return_from_intl(
             db, league, intl_id, services.current_gameweek(db, league) or SEASON_LAST_GW,
+            released_fpl_id=_safe_int(released_fpl_id, 1, 10_000_000,
+                                      field="released player")
+            if released_fpl_id.strip() else None,
         )
     except RuleViolation as e:
         return _err(e)
@@ -1535,14 +1544,16 @@ def admin_il_backfill(
     prior season with no IL records at all, per CLAUDE.md's documented caveat).
     Unlike the manager self-service /il/place, this takes an explicit start_gw
     and isn't gated on the in-season phase — a past season's fact doesn't wait
-    for gw_logic_active. Reuses services.place_on_il unchanged; it already
-    accepts an arbitrary start_gw."""
+    for gw_logic_active. Reuses services.place_on_il; it already accepts an arbitrary
+    start_gw, and `require_roster=False` waives the "is he actually yours" check that
+    manager self-service enforces — a historical placement is precisely the case the
+    roster cannot confirm, because the snapshot shows the replacement in his slot."""
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/keepers", status_code=303)
     league = _league_or_404(db)
     try:
         services.place_on_il(
-            db, league, fpl_manager_id=fpl_manager_id,
+            db, league, fpl_manager_id=fpl_manager_id, require_roster=False,
             injured_fpl_id=_safe_int(injured_fpl_id, 1, 10_000_000, field="injured player"),
             replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
             start_gw=_safe_int(start_gw, 1, SEASON_LAST_GW, field="start GW"),

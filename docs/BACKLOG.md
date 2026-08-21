@@ -32,7 +32,10 @@ plans + copy-paste session prompts live in **`docs/SESSION_PLANS.md`**.
      (`aab467f`, `529a144`)
 
 **Next, in order**
-6. **Item 6** — IL ownership design session, before the season's first IL case — Opus 5
+6. ~~**Item 6** — IL ownership design session~~ — **done 2026-08-20**, written to
+   `docs/DESIGN_IL_OWNERSHIP.md`. ~~**Item 6b** (the ownership fold) and **Item 6c**
+   (the must-return alert)~~ — **both BUILT 2026-08-20/21**, uncommitted; see the
+   backlog entry above and `docs/SESSION_PLANS.md`.
 7. **Item 7** — keeper years survive a drop (rules decided: frozen while unowned;
    preseason FA carries; only a draft resets) — Opus 5
 8. **Items 8-16** — small fixes and tooling, any idle session — Haiku/Sonnet
@@ -109,8 +112,81 @@ self-service is live, so the next mid-season IL case can arrive any week. The tw
 25/26 incidents below are retired as moot (frozen row, correct keepers carried); this
 entry is now purely forward-looking. Scoped as the Item 6 design session in
 `docs/SESSION_PLANS.md`.
-**Status:** `open`. Raised 2026-08-16 after two same-night incidents (Šeško/Scott,
-Kudus/Kevin T) turned out to be the same structural gap wearing two different masks.
+**Status:** `designed 2026-08-20; Item 6b + 6c BUILT 2026-08-20/21 (uncommitted)`.
+Raised 2026-08-16 after two same-night incidents (Šeško/Scott, Kudus/Kevin T) turned out
+to be the same structural gap wearing two different masks.
+
+**6b shipped the fold.** `services._absence_held` is now the single "who holds him now"
+predicate, folded into `_owner_maps` BEFORE the trade fold, and `_derive_keeper_status`'s
+candidacy union reads the same helper — so ownership and candidacy can no longer disagree.
+All three carve-outs are retired as *workarounds* (the two `is_discovery` ones remain, but
+only for the discovery draft's legitimate use). Also in 6b: the season-end resolution
+(`released_player_id`, migration `d4e5f6a7b8c9`), the uncapped international list,
+`place_on_il`'s ownership guard, the `advance_season` block, four new `data_health` checks,
+and `manager_assets` / `player_portal` moved onto the overlay. Tests:
+`tests/test_absence_ownership.py` (29), every guard mutation-tested.
+
+Two live bugs fixed on the way, neither of which was the reported problem: a player dropped
+and claimed by another manager appeared as a keeper candidate for **both** (the entry never
+auto-closes, because `reconcile_absences` keys on `(manager, player)`), and `manager_assets`
+— the trade-entry form — overlaid picks but not players, so a commissioner-traded player
+still showed on the seller's side.
+
+**6c shipped the must-return alert.** `sync.sync_gameweek_points` already fetched minutes
+for every player via `/event/{gw}/live` and discarded an absentee's; they're now persisted
+as `last_played_gw` (`services.record_absentee_minutes`, called from sync with the payload
+already in hand — no new HTTP call, migration `e5f6a7b8c9d0`). `services._return_required_entries`
+is the single predicate consumed by both `flagged_actions` (homepage nag) and a new
+`/admin/health` check, gated on `il_return_eligible_gw` for the IL and firing immediately for
+the international list. Alert-only, as decided — no automatic fine. Deviated from the
+original build prompt by extracting the minutes-persistence logic into a plain, testable
+services function rather than leaving it inline in `sync.py`; also wrote the first-ever test
+for `reconcile_absences`, which had none. Tests: 17 more added to
+`tests/test_absence_ownership.py` (46 total), full regression 777 passed / 0 skipped, only
+the two known `P3` failures.
+
+**One unrelated flake surfaced and was NOT fixed here** (out of scope for 6c): a full-suite
+run intermittently failed `test_the_suggestion_is_never_confidently_wrong_on_real_data`,
+traced to `suggest_manager_pairing`'s unordered manager queries plus a sort with no
+tie-break on ties. Recorded as its own entry under Bugs below.
+
+**The design is settled — see `docs/DESIGN_IL_OWNERSHIP.md`.** Everything below is the
+investigation record that produced it; the doc supersedes the three "what to decide"
+questions at the end of this entry. The build (**Item 6b**, the ownership fold, and
+**Item 6c**, the must-return alert — slot succession was withdrawn before either was
+built, see §5 of the design doc) is done; see `docs/SESSION_PLANS.md`.
+
+Six league rules were settled by the commissioner in that session, and four of them are
+NEW — they are not derivable from anything in this entry: ownership is **additive** (a
+manager holds 15 + ≤1 IL + N intl); the **international list is UNCAPPED** (the code caps
+it at one today, which is a live bug — `place_on_intl`'s guard and the `models.py`
+docstring both contradict the rule, while `CLAUDE.md` is already right); the replacement
+**a roster is always exactly 15** and a player can never be dropped without a
+replacement; a returning player **may displace anyone**; **an absence still open after
+GW38 must be resolved down to 15** — Release the absentee, or Return him and name who
+leaves (16 candidates is a real advantage, since the keeper cap is 5 either way); and he
+**must be re-added immediately**, alerted on the absent player logging minutes, with
+fines left to the existing manual ledger.
+
+A seventh rule — that the returning player must displace the *replacement's tracked
+slot* — was adopted and then **withdrawn on 2026-08-20** as too hard to automate: FPL
+records no paired add/drop, so a manager who swaps two same-position players in one
+gameweek produces a diff with no fact in it saying which arrival replaced which
+departure. What replaced it is the manager **naming** the departing player at season end
+— same outcome, no inference. Withdrawing it dissolved the succession hook and the
+`roster_releases` table; the subtraction survives as a single nullable
+`released_player_id` on the absence row. Do not re-propose the derivation without reading
+§5 of the design doc.
+
+Four things the obvious design gets wrong, all found in that session and all recorded in
+the doc: the absence fold must go **before** the trade fold or a trade of an absent
+player becomes permanently unappliable; `status == 'active'` is the wrong predicate and
+forks from `_absence_cover` on every season-end return; cessation alone cannot express
+the season-end return (it produces exactly the inverted result); and
+`tests/test_il_keeper_visibility.py:166` looks like it pins the forking case but uses
+`end_gw=15`, so it does not. Two live bugs were found alongside: a player dropped and
+claimed by another manager becomes a keeper candidate for **both**, and `manager_assets`
+(the trade-entry form) overlays picks but not players.
 
 **What actually happened tonight, precisely.**
 
@@ -627,6 +703,41 @@ availability (`tests/test_draft_availability.py:140-165`).
 *historical* goalkeeper injury-list backfill from a pre-goalie-team season, where
 individual keeper ownership was the rule. The check should consider the season being
 edited, not today's league row. Found while looking at the IL backfill form below.
+
+---
+
+### `suggest_manager_pairing`'s greedy match is order-dependent — an intermittent test flake
+
+**Priority:** `P3` — the suggestion is never applied automatically (see the rollover
+entry above), so a wrong guess costs a commissioner ten seconds of review, not a
+corrupted rollover. Promote if it starts failing CI regularly enough to erode trust in
+the suite.
+**Status:** `open`. Found 2026-08-21 as a one-off failure of
+`test_the_suggestion_is_never_confidently_wrong_on_real_data` in a full-suite run during
+Item 6c — reran clean 3/3 in isolation and clean on a second full-suite run, so it is
+real but rare. Unrelated to Item 6c; found only because the full regression happened to
+surface it that run.
+
+**Root cause.** `services.suggest_manager_pairing` (`services.py:580-581`) queries both
+manager lists with no `ORDER BY`:
+```python
+old_mgrs = db.query(Manager).filter_by(league_id=old_league.id).all()
+new_mgrs = db.query(Manager).filter_by(league_id=new_league.id).all()
+```
+Postgres makes no ordering guarantee for an unordered query, and `scored.sort(key=lambda
+t: -t[0])` is a stable sort on SCORE ONLY — a tie is resolved by insertion order, which
+comes straight from those two unordered queries. Two candidate pairs that score equally
+(the function's own docstring names one: "Smashers de Puppies" vs "Le Roi De Coupe" at
+0.483, right at a threshold) can therefore swap which one wins the greedy pick, depending
+on row order the query happens to return — which can vary run to run without any data
+change, especially after many `TRUNCATE ... RESTART IDENTITY CASCADE` cycles in the same
+test session reshuffle physical page layout.
+
+**Fix sketch.** Add a deterministic secondary sort key — e.g. `scored.sort(key=lambda t:
+(-t[0], t[1], t[2]))` — so ties resolve the same way every time regardless of query
+order. Verify against `REAL_2026` in `tests/test_rollover_mapping.py`, which already
+pins `wrong == []`; a deterministic tie-break should never turn a currently-correct
+run into a wrong one, only make the outcome reproducible.
 
 ---
 

@@ -232,7 +232,8 @@ Write tests for these. They are custom and non-obvious:
   be same position. Returns after GW38 or via waiver. **Manager self-service**
   (`POST /il/place|return|release`, gated by `can_act_as`; reuses `place_on_il`/
   `return_from_il`) on the My Team page, with an end-of-season "add back or release"
-  prompt; admin can still act for anyone.
+  prompt; admin can still act for anyone. See "Injury / International lists" below for
+  the ownership overlay, the season-end resolution, and the must-return alert.
 - **Anti-tanking:** Flag a manager when >=3 of their ROSTERED players (the whole
   15-man squad, not just the XI) record 0 minutes in each of >=3 CONSECUTIVE
   gameweeks. Across-gameweek rule, players may differ week to week. Thresholds
@@ -407,15 +408,49 @@ Write tests for these. They are custom and non-obvious:
   scores; 'Scores' nav link in-season.
 - **Waiver window:** `services.waiver_window` surfaces waivers-vs-free-agency on
   `/transactions` (informational; add/drops happen in FPL).
-- **Injury / International lists:** IL (same-position replacement, 4-GW min stay) and
-  the **international list** (AFCON/Asia Cup: same-position replacement, no min stay; one
-  replacement per absence; re-add when the nation is eliminated) both preserve keeper
-  eligibility — their gameweeks are folded into the "covered" set in
-  `_derive_keeper_status` so an absence never counts as a drop. Manager self-service on
-  My Team (`/il/*`, `/intl/*`). **Goalkeepers are out of scope on both lists once goalie
+- **Injury / International lists:** IL (same-position replacement, 4-GW min stay,
+  **capped at one per manager**) and the **international list** (AFCON/Asia Cup:
+  same-position replacement, no min stay, **UNCAPPED** — a manager may have several
+  players away at once, each with their own replacement, since the league can't control
+  call-ups; re-add when the nation is eliminated) both preserve keeper eligibility —
+  their gameweeks are folded into the "covered" set in `_derive_keeper_status`
+  (`_absence_cover`) so an absence never counts as a drop. Manager self-service on My
+  Team (`/il/*`, `/intl/*`). **Goalkeepers are out of scope on both lists once goalie
   teams are on** (`_refuse_goalkeeper_list_move`): the same-position rule is
   unsatisfiable, since the only keepers you own are your own club's — and an injured club
   keeper needs no action anyway, because his backup plays and scores in the same slot.
+  **Ownership is additive, not a swap** (`docs/DESIGN_IL_OWNERSHIP.md`): a manager holds
+  their FPL-synced roster PLUS everyone out on an absence, so a manager with someone on
+  the IL genuinely holds 16. `services._absence_held` is the single "who holds him now"
+  predicate — deliberately NOT `_absence_cover`, which is status-blind and would keep a
+  season-end `'returned'` entry "covered" forever, forking from ownership on the one case
+  that matters most (a manager submitting a keeper the site accepts, that
+  `effective_keeper_selections` then silently drops). Folded into `_owner_maps`
+  **before** the trade fold (folding it after makes a trade of an absent player
+  permanently unappliable) and guarded `if pid not in owner` so a mis-entered absence can
+  never steal a rostered player. `place_on_il`/`place_on_intl` require the player to
+  actually be on the manager's effective roster for the same reason — except the admin
+  historical backfill (`require_roster=False`), which exists precisely because the
+  snapshot shows the replacement, not the injured player. **Season-end resolution**: an
+  absence still open after GW38 must be resolved back to the roster size — Release the
+  absentee (`via="waiver"`, he goes to nobody), or Return him and **name who leaves**
+  (`released_player_id` on the absence row, folded as the one subtraction in
+  `_owner_maps`, applied only after `_owner_maps`' additive fold). This is
+  manager-designated, never derived: an earlier design tried to follow the replacement's
+  roster slot forward automatically and was withdrawn, because FPL records no paired
+  add/drop, so which arrival replaced which departure is genuinely unknowable from a
+  diffed snapshot — don't re-propose it. `submit_keepers` refuses for a manager with an
+  unresolved absence past GW38; `advance_season` refuses to roll over while one is open
+  (same `force=True` shape as its manager-pairing check). **Must-return alert**: once
+  eligible, the absent player logging real minutes for his club while still off the
+  roster is a violation — `sync.sync_gameweek_points` already fetches those minutes for
+  every player via `/event/{gw}/live` and used to discard an absentee's; they're now
+  persisted as `last_played_gw` (`services.record_absentee_minutes`), and
+  `services._return_required_entries` (surfaced on `flagged_actions` and
+  `/admin/health`) fires once `il_return_eligible_gw` has passed for the IL, immediately
+  for the international list. Alert-only — enforcement can't be technical, since the
+  action happens in the FPL app; fines are the existing manual ledger
+  (`services.add_fine`), never automatic.
 - **Draft (live ops):** boards auto-refresh on all devices (7s poll on `_board.html` /
   `_discovery_board.html`); a unique slot constraint + `record_pick` guard block
   concurrent overwrites. Managers keep an **autodraft queue** (`draft_queue`, `+Q` in

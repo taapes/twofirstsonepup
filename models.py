@@ -381,6 +381,18 @@ class InjuryList(Base):
         UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
     )
     status: Mapped[str | None] = mapped_column(String, nullable=True)  # active/returned/waived
+    # The player the manager gave up to bring the absentee back AFTER GW38, when the
+    # roster is frozen and the swap can't be made in FPL. Manager-designated, never
+    # derived (see docs/DESIGN_IL_OWNERSHIP.md §4.4/§5) and NULL on every other path:
+    # mid-season the sync sees the swap, and a waived absentee costs nobody.
+    released_player_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
+    )
+    # The most recent gameweek the absent player logged real minutes for his club,
+    # read out of the sync payload already fetched (see sync.sync_gameweek_points).
+    # Drives the must-return alert: he is playing again but still off the roster.
+    # See docs/DESIGN_IL_OWNERSHIP.md §6.
+    last_played_gw: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class InternationalList(Base):
@@ -389,8 +401,11 @@ class InternationalList(Base):
     eliminated. The same-position requirement DOES apply, same as the IL: this
     docstring used to claim otherwise while services.place_on_intl enforced it, and
     the code (and CLAUDE.md) were the ones telling the truth. Preserves keeper
-    eligibility while out (covered like the IL in the keeper-drop derivation). One
-    active entry per manager; one replacement for the whole absence.
+    eligibility while out (covered like the IL in the keeper-drop derivation).
+    UNCAPPED, unlike the IL: a manager may have as many players away as are actually
+    called up, each with its own replacement, because the league can't control call-ups
+    (decided 2026-08-20; this docstring and services.place_on_intl both used to claim one
+    per manager, and both were wrong). One replacement per absence.
 
     Goalkeepers are out of scope entirely once the goalie-team rule is on — you own
     every keeper at your club, so the only legal same-position replacement is one you
@@ -412,6 +427,13 @@ class InternationalList(Base):
     )
     tournament: Mapped[str | None] = mapped_column(String, nullable=True)  # AFCON / Asia Cup
     status: Mapped[str | None] = mapped_column(String, nullable=True)  # active/returned
+    # See InjuryList.released_player_id — same field, same rule.
+    released_player_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
+    )
+    # See InjuryList.last_played_gw — same field, same rule. No minimum stay here, so
+    # the must-return alert fires as soon as this is set, with no eligibility gate.
+    last_played_gw: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class KeeperException(Base):

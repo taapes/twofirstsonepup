@@ -3,7 +3,7 @@
 {% block content %}
 {% if not team %}
 <h1>My Team</h1>
-<div class="empty">No squad to show yet. Once the season's rosters sync, your 15-man
+<div class="empty">No squad to show yet. Once the season's rosters sync, your
   team and stats will appear here.</div>
 {% else %}
 <h1>{{ team.manager }} — My Team
@@ -36,10 +36,20 @@
       {% if il.can_return %}<span class="pill ok">eligible to return</span>{% else %}
         <span class="sub">can return at GW{{ il.return_gw }}</span>{% endif %}
       {% if can_edit_il %}
-      <div style="margin-top:6px;display:flex;gap:6px">
+      <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
         <form method="post" action="/il/return" style="display:inline">
           <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
           <input type="hidden" name="il_id" value="{{ il.id }}">
+          {# Season over: the roster is frozen, so returning him needs someone named to
+             make room. Mid-season the manager just does the swap in the FPL app. #}
+          {% if season_over %}
+          <label class="sub">who leaves:
+            <select name="released_fpl_id" required>
+              <option value="">choose…</option>
+              {% for p in team.players %}<option value="{{ p.fpl_id }}">{{ p.name }} · {{ p.position }}</option>{% endfor %}
+            </select>
+          </label>
+          {% endif %}
           <button type="submit" {% if not il.can_return %}disabled title="min 4-GW stay not met"{% endif %}>Return to roster</button>
         </form>
         <form method="post" action="/il/release" style="display:inline"
@@ -54,7 +64,8 @@
     {% endfor %}
     {% if season_over and can_edit_il %}
     <p class="sub" style="color:var(--warn);margin-top:8px">⚠ Season over — add this player
-      back to your roster (Return) or Release them.</p>
+      back to your roster (Return, naming who leaves to make room) or Release them.
+      You can't submit keepers until this is settled.</p>
     {% endif %}
     {% elif can_edit_il %}
     <p class="sub">No players on the injury list.</p>
@@ -102,13 +113,26 @@
     <form method="post" action="/intl/return" style="display:inline;margin-left:6px">
       <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
       <input type="hidden" name="intl_id" value="{{ il.id }}">
+      {% if season_over %}
+      <label class="sub">who leaves:
+        <select name="released_fpl_id" required>
+          <option value="">choose…</option>
+          {% for p in team.players %}<option value="{{ p.fpl_id }}">{{ p.name }} · {{ p.position }}</option>{% endfor %}
+        </select>
+      </label>
+      {% endif %}
       <button type="submit">Return to roster</button>
     </form>
     {% endif %}
   </div>
   {% endfor %}
-  {% elif can_edit_il %}
-  <p class="sub">No players away at a national-team cup.</p>
+  {% endif %}
+  {# The international list is UNCAPPED — a manager may have several players away at
+     once, each with its own replacement. This form used to sit on the elif branch of
+     the loop above, so it only rendered when nobody was away and a second call-up
+     could not be recorded at all. #}
+  {% if can_edit_il %}
+  {% if not team.status.international_list %}<p class="sub">No players away at a national-team cup.</p>{% endif %}
   <details style="margin-top:6px"><summary class="sub">Send a player to international duty</summary>
     <form method="post" action="/intl/place" onsubmit="return intlResolve(this)" style="margin-top:8px">
       <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">

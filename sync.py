@@ -29,6 +29,7 @@ from models import (
     SyncLog,
     Trade,
 )
+import services
 from rules import verify_league_feed
 from settings import API_BASE, LEAGUE_ID
 
@@ -755,6 +756,16 @@ async def sync_gameweek_points(gw_number: int | None = None, fpl_league_id: str 
 
             def _stat(fpl_id: int, key: str) -> int:
                 return (live_stats.get(str(fpl_id), {}).get("stats", {}) or {}).get(key, 0) or 0
+
+            # Feed the must-return alert (docs/DESIGN_IL_OWNERSHIP.md §6): `live_stats`
+            # already carries minutes for EVERY player in the game, not just the ones on
+            # a manager's roster, so an absent player's minutes are sitting in the same
+            # payload that just fetched everyone else's — they were simply never read.
+            # Deliberately NOT folded into player_points below: that list means "FPL's
+            # lineup" to rules.zero_minute_count, and widening it would silently change
+            # the anti-tanking rule. Split out as a plain function of (session, league,
+            # live_stats, gw_number) so it's testable without a live HTTP call.
+            services.record_absentee_minutes(session, league, live_stats, gw_number)
 
             for m in managers:
                 data = await _get_json(

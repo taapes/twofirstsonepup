@@ -49,6 +49,7 @@ from rules import (
     KEEPER_FRESH_DRAFT,
     KEEPER_FRESH_WAIVER,
     MIN_IL_STAY_GWS,
+    ROSTER_SIZE,
     PAYOUT_STRUCTURE,
     PHASE_IN_SEASON,
     PHASE_OFFSEASON,
@@ -685,6 +686,25 @@ def advance_season(
             + (f"Unmatched from last season: {', '.join(sorted(unpaired_old))}. "
                if unpaired_old else "")
             + "Confirm the mapping, or tick 'a manager joined or left' to proceed."
+        )
+
+    # The absence overlay is NOT self-retiring, unlike the trade overlay: nothing closes
+    # an entry when the player leaves the PL, is claimed by someone else, or the manager
+    # simply never clicks return. Roll over with one open and it sits on the frozen row
+    # asserting ownership forever, and the manager's last keeper selection was taken with
+    # sixteen candidates. Same fail-loudly shape as the pairing check above, same hatch.
+    open_absences = unresolved_absences(db, old_league)
+    if open_absences and not force:
+        who = ", ".join(sorted(
+            f"{(db.get(Manager, e.manager_id).display if db.get(Manager, e.manager_id) else '—')}"
+            f" ({db.get(Player, e.player_id).name if db.get(Player, e.player_id) else '—'})"
+            for e in open_absences
+        ))
+        raise RuleViolation(
+            "these managers still have someone on an absence list, so their squads "
+            f"aren't back to {ROSTER_SIZE} and their keeper selections were made with "
+            f"an extra candidate: {who}. Have them return or release on My Team, or "
+            "tick the override to proceed."
         )
 
     # 1. identity carry (only fill blanks, so re-running can't clobber)
@@ -1816,6 +1836,56 @@ def _refuse_goalkeeper_list_move(league: League, *players, what: str) -> None:
         )
 
 
+def unresolved_absences(db: Session, league: League, manager_id=None) -> list:
+    """Absence entries still 'active' once the season is over — the ones whose manager
+    owes a Return-or-Release decision.
+
+    An open absence past GW38 means the manager is carrying the absentee PLUS a full 15
+    into keeper selection, so they would choose five keepers from sixteen. Callers use
+    this to block that, and to nag. Returns [] before season end, when an open absence
+    is simply an absence.
+
+    "Season over" is the PHASE or the gameweek, not the gameweek alone. `current_gameweek`
+    derives from stored deadline dates and returns None when they are missing — on a
+    frozen or freshly-imported row, for instance — and a bare `>= SEASON_LAST_GW` test
+    would then quietly return [] and switch this guard off exactly where it matters most.
+    """
+    if (league.phase or "") != "offseason" and (
+        current_gameweek(db, league) or 0
+    ) < SEASON_LAST_GW:
+        return []
+    rows = [e for e in _absence_rows(db, league)
+            if (e.status or "").strip().lower() == "active"]
+    if manager_id is not None:
+        rows = [e for e in rows if e.manager_id == manager_id]
+    return rows
+
+
+def _refuse_absence_for_unheld_player(
+    db: Session, league: League, manager: Manager, player: Player, *, what: str
+) -> None:
+    """You can only put your OWN player on an absence list.
+
+    Placement resolves the player globally, so without this a manager could name anyone.
+    That was survivable while an absence only granted keeper candidacy; now that it
+    grants OWNERSHIP through the overlay (see _owner_maps), an unchecked placement would
+    let a manager claim any un-rostered player as theirs — including in draft slot math.
+
+    Judged on the EFFECTIVE roster, not the raw snapshot, so a player acquired by a
+    commissioner trade counts and a backfill entered after the manager already dropped
+    him in FPL still works. A league with no gameweeks yet (preseason) can't answer the
+    question, so it doesn't refuse.
+    """
+    gw = latest_gameweek(db, league)
+    if gw is None:
+        return
+    if player.id not in _effective_roster_pids(db, league, manager.id, gw.id):
+        raise RuleViolation(
+            f"{player.name} isn't on {manager.display}'s roster, so they can't go on "
+            f"the {what}"
+        )
+
+
 def place_on_il(
     db: Session,
     league: League,
@@ -1824,14 +1894,27 @@ def place_on_il(
     injured_fpl_id: int,
     replacement_fpl_id: int,
     start_gw: int,
+    require_roster: bool = True,
 ) -> dict:
     """Place a manager's injured player on the IL with a same-position replacement.
 
-    Enforces: one active IL player per manager; replacement same position.
+    Enforces: one active IL player per manager; replacement same position; the injured
+    player is actually the manager's.
+
+    `require_roster=False` is for the commissioner's HISTORICAL backfill only. That
+    route exists precisely because the roster CANNOT confirm the placement — the whole
+    reason a backfill is needed is that FPL's snapshot shows the replacement in the
+    injured player's slot, so the injured player is off the roster by definition. Asking
+    the roster there would refuse every case the route was built for. Manager
+    self-service keeps the check.
     """
     manager = _resolve_manager(db, league, fpl_manager_id)
     injured = _resolve_player(db, injured_fpl_id)
     replacement = _resolve_player(db, replacement_fpl_id)
+    if injured.id == replacement.id:
+        raise RuleViolation("replacement must be a different player")
+    if require_roster:
+        _refuse_absence_for_unheld_player(db, league, manager, injured, what="injury list")
 
     existing = (
         db.query(InjuryList)
@@ -1871,11 +1954,58 @@ def il_return_eligible_gw(start_gw: int) -> int:
     return min(start_gw + MIN_IL_STAY_GWS, SEASON_LAST_GW)
 
 
+def _resolve_absence_release(
+    db: Session, league: League, entry, return_gw: int, released_fpl_id: int | None
+):
+    """The player a manager gives up to bring an absentee back after GW38.
+
+    Mid-season this is nobody's business but FPL's: the manager makes the swap in the
+    app and the next sync shows it. After GW38 the roster is frozen and no further
+    snapshot arrives, so without this the manager would carry BOTH the absentee and a
+    full 15 into keeper selection — choosing five keepers from sixteen while everyone
+    else chooses from fifteen. `requirements.md` already required a post-GW38 return or
+    waiver; this is the return half of it.
+
+    Manager-designated, never inferred. FPL records no paired add/drop, so which arrival
+    replaced which departure is genuinely unknowable from the data — see
+    docs/DESIGN_IL_OWNERSHIP.md §5.
+    """
+    if return_gw < SEASON_LAST_GW:
+        if released_fpl_id is not None:
+            raise RuleViolation(
+                "a player is only released to make room at season end — mid-season, "
+                "make the swap in the FPL app and it will sync"
+            )
+        return None
+    if released_fpl_id is None:
+        raise RuleViolation(
+            "the season is over and your roster is frozen, so bringing this player "
+            "back needs someone to make room — choose who leaves, or Release instead"
+        )
+    released = _resolve_player(db, released_fpl_id)
+    if released.id == entry.player_id:
+        raise RuleViolation(
+            "that's the player you're bringing back — Release them instead if you "
+            "don't want them"
+        )
+    gw = latest_gameweek(db, league)
+    if gw is not None and released.id not in _effective_roster_pids(
+        db, league, entry.manager_id, gw.id
+    ):
+        raise RuleViolation(f"{released.name} isn't on your roster")
+    return released
+
+
 def return_from_il(
-    db: Session, league: League, il_id: str, return_gw: int, via: str = "manual"
+    db: Session, league: League, il_id: str, return_gw: int, via: str = "manual",
+    released_fpl_id: int | None = None,
 ) -> dict:
     """Return an active IL player. Enforces the minimum-stay rule (a return at or
     after the season's last GW is automatic). `via='waiver'` marks a waiver return.
+
+    A return at season end must also name the player who leaves to make room
+    (`released_fpl_id`) — see `_resolve_absence_release`. A waiver return never does:
+    the absentee himself is what leaves.
     """
     entry = db.get(InjuryList, il_id)
     if not entry:
@@ -1887,9 +2017,14 @@ def return_from_il(
             f"minimum {MIN_IL_STAY_GWS}-GW stay not met "
             f"(placed GW{entry.start_gw}, return GW{return_gw})"
         )
+    released = (
+        None if via == "waiver"
+        else _resolve_absence_release(db, league, entry, return_gw, released_fpl_id)
+    )
 
     entry.end_gw = return_gw
     entry.status = "waived" if via == "waiver" else "returned"
+    entry.released_player_id = released.id if released else None
     injured = db.get(Player, entry.player_id)
     replacement = db.get(Player, entry.replacement_id) if entry.replacement_id else None
     mgr = db.get(Manager, entry.manager_id)
@@ -1898,7 +2033,8 @@ def return_from_il(
                           f"{injured.name if injured else '—'} from IL "
                           f"(GW{return_gw}, {entry.status})"),
                  manager_ids=[entry.manager_id],
-                 details={"il_id": str(il_id), "return_gw": return_gw, "via": via})
+                 details={"il_id": str(il_id), "return_gw": return_gw, "via": via,
+                          "released": released.name if released else None})
     db.commit()
     db.refresh(entry)
     return _il_to_dict(entry, injured, replacement)
@@ -1919,17 +2055,24 @@ def place_on_intl(
     replacement = _resolve_player(db, replacement_fpl_id)
     if away.id == replacement.id:
         raise RuleViolation("replacement must be a different player")
+    _refuse_absence_for_unheld_player(db, league, manager, away, what="international list")
     _refuse_goalkeeper_list_move(league, away, replacement, what="international list")
     if not il_same_position(away.position, replacement.position):
         raise RuleViolation(
             f"replacement is {replacement.position}, must match the away "
             f"player's position {away.position}"
         )
-    existing = (
-        db.query(InternationalList).filter_by(manager_id=manager.id, status="active").first()
-    )
-    if existing:
-        raise RuleViolation("manager already has an active international-list player")
+    # NO one-active-entry cap, unlike the IL. A manager may have as many players away
+    # as are actually called up, each with its own replacement: the league cannot
+    # control call-ups, so a cap would arbitrarily punish whoever drafted African or
+    # Asian internationals. This function used to refuse a second entry, contradicting
+    # the rule (decided 2026-08-20; CLAUDE.md always said "one replacement per ABSENCE").
+    if (
+        db.query(InternationalList)
+        .filter_by(manager_id=manager.id, player_id=away.id, status="active")
+        .first()
+    ):
+        raise RuleViolation(f"{away.name} is already on the international list")
     entry = InternationalList(
         player_id=away.id, manager_id=manager.id, start_gw=start_gw,
         replacement_id=replacement.id, tournament=tournament or None, status="active",
@@ -1947,7 +2090,8 @@ def place_on_intl(
     return {"player": away.name, "replacement": replacement.name, "start_gw": start_gw}
 
 
-def return_from_intl(db: Session, league: League, intl_id: str, return_gw: int) -> dict:
+def return_from_intl(db: Session, league: League, intl_id: str, return_gw: int,
+                     released_fpl_id: int | None = None) -> dict:
     """Re-add a returning player (their nation was eliminated). No minimum stay — the
     replacement is dropped to make room (the manager picks the returner back up)."""
     from models import InternationalList
@@ -1957,8 +2101,12 @@ def return_from_intl(db: Session, league: League, intl_id: str, return_gw: int) 
         raise RuleViolation("international-list entry not found")
     if entry.status != "active":
         raise RuleViolation(f"international-list entry is already '{entry.status}'")
+    # Same season-end rule as the IL: after GW38 the roster is frozen, so bringing him
+    # back needs someone named to make room.
+    released = _resolve_absence_release(db, league, entry, return_gw, released_fpl_id)
     entry.end_gw = return_gw
     entry.status = "returned"
+    entry.released_player_id = released.id if released else None
     away = db.get(Player, entry.player_id)
     mgr = db.get(Manager, entry.manager_id)
     record_audit(db, league, action="intl.return",
@@ -1966,7 +2114,8 @@ def return_from_intl(db: Session, league: League, intl_id: str, return_gw: int) 
                           f"{away.name if away else '—'} from the international list "
                           f"(GW{return_gw})"),
                  manager_ids=[entry.manager_id],
-                 details={"intl_id": str(intl_id), "return_gw": return_gw})
+                 details={"intl_id": str(intl_id), "return_gw": return_gw,
+                          "released": released.name if released else None})
     db.commit()
     return {"returned_gw": return_gw}
 
@@ -2066,14 +2215,13 @@ def player_portal(
     forgets to pass it leaks nothing.
     """
     gw = latest_gameweek(db, league)
-    owner_by_pid: dict = {}
-    if gw:
-        for mid, pid in db.query(Roster.manager_id, Roster.player_id).filter_by(gameweek_id=gw.id):
-            owner_by_pid[pid] = mid
-        # Must move in step with _derive_keeper_status below: this row renders the
-        # owner and the keeper facts side by side, so overlaying only one of them
-        # shows the new owner with a blank keeper column.
-        owner_by_pid.update(player_ownership(db, league))
+    # effective_owner, not a local re-seed from Roster plus player_ownership on top:
+    # that is exactly what this function used to do, byte-for-byte the same as the
+    # helper but as a private copy that could drift from it. It must move in step with
+    # _derive_keeper_status below, because this row renders the owner and the keeper
+    # facts side by side and overlaying only one of them shows the new owner with a
+    # blank keeper column.
+    owner_by_pid: dict = effective_owner(db, league) if gw else {}
     # A SEPARATE overlay, deliberately not folded into owner_by_pid above: keeper
     # facts are a question about last season's tenure, and a player drafted thirty
     # seconds ago has none yet under his new manager — showing blank there is
@@ -2089,10 +2237,13 @@ def player_portal(
     ):
         display_owner_by_pid[pid] = mid
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    # The on_il BADGE, distinct from ownership above. Reads the same rows as the fold
+    # (_absence_rows) so the badge and the owner column can't tell different stories,
+    # but keeps its own "currently away" predicate — a returned-at-season-end absentee
+    # is still owned and no longer away.
     il_pids = {
-        e.player_id for e in
-        db.query(InjuryList).join(Manager, Manager.id == InjuryList.manager_id)
-        .filter(Manager.league_id == league.id, InjuryList.status == "active")
+        e.player_id for e in _absence_rows(db, league)
+        if (e.status or "").strip().lower() == "active"
     }
     inelig = _ineligible_fpl_ids(db, league)
     kstatus = _derive_keeper_status(db, league)
@@ -2208,15 +2359,66 @@ def reconcile_absences(db: Session, league: League) -> int:
     return closed
 
 
+def _return_required_entries(db: Session, league: League) -> list[dict]:
+    """Active absence entries where the player is playing again but still off the
+    manager's roster — the must-return alert (docs/DESIGN_IL_OWNERSHIP.md §6).
+
+    The trigger is `last_played_gw` (set by `sync.sync_gameweek_points` from data it
+    already fetches): once it's set, the absentee has logged real minutes for his club
+    since being parked. Only 'active' entries are considered — the moment a manager
+    genuinely re-adds him, `reconcile_absences` closes the entry on the same sync, so an
+    active entry with logged minutes really does mean he's still sitting there.
+
+    Gated, for the IL only, on `il_return_eligible_gw` having passed: the 4-GW minimum
+    stay holds even if he recovers sooner, so an early return-to-play is not yet a
+    violation. The international list has no minimum stay, so it fires as soon as he
+    plays. Shared by `flagged_actions` (the homepage nag) and `data_health`, so the two
+    can't disagree about who's overdue.
+    """
+    from models import InternationalList
+
+    cur = current_gameweek(db, league)
+    out: list[dict] = []
+    for model, kind in ((InjuryList, "Injury list"), (InternationalList, "International")):
+        for e, m, p in (
+            db.query(model, Manager, PlayerSeason)
+            .join(Manager, Manager.id == model.manager_id)
+            .join(PlayerSeason, PlayerSeason.player_id == model.player_id)
+            .filter(Manager.league_id == league.id, model.status == "active",
+                    model.last_played_gw.isnot(None), PlayerSeason.league_id == league.id)
+        ):
+            if model is InjuryList:
+                eligible = il_return_eligible_gw(e.start_gw)
+                if cur is None or cur < eligible:
+                    continue  # still inside the minimum stay — not yet a violation
+                overdue_gws = cur - eligible + 1
+            else:
+                overdue_gws = (cur - e.start_gw + 1) if cur is not None else None
+            out.append({
+                "kind": kind, "manager": m.display, "player": p.name,
+                "last_played_gw": e.last_played_gw, "overdue_gws": overdue_gws,
+            })
+    return out
+
+
 def flagged_actions(db: Session, league: League) -> list[dict]:
     """League attention items for the home page: IL/international players that must be
-    returned at season end, players on the IL 4+ GWs (eligible to return), and teams
-    flagged or at risk of an anti-tanking violation."""
+    returned at season end, players on the IL 4+ GWs (eligible to return), players
+    playing again but still parked, and teams flagged or at risk of an anti-tanking
+    violation."""
     from models import InternationalList
 
     cur = current_gameweek(db, league)
     season_over = cur is not None and cur >= SEASON_LAST_GW
     out: list[dict] = []
+
+    # Playing again but still off the roster — checked first, since it's the one that
+    # can fire mid-season and needs the most urgent attention.
+    for e in _return_required_entries(db, league):
+        gws = f" ({e['overdue_gws']} GW{'s' if e['overdue_gws'] != 1 else ''} overdue)"             if e["overdue_gws"] else ""
+        out.append({"category": e["kind"], "manager": e["manager"],
+                    "detail": f"{e['player']} is playing again (GW{e['last_played_gw']}) "
+                              f"but still parked{gws} — return them"})
 
     # IL: season-end return-or-release, and 4+ GW eligible-to-return
     for il, m, p in (
@@ -3105,21 +3307,121 @@ def _absence_cover(db: Session, league: League, last_n: int) -> dict:
     Both lists preserve keeper eligibility, and neither absence is the manager's doing,
     so this one definition serves every reader: the keeper-drop derivation (a covered
     gap is not a drop) and the anti-tanking count (a covered player's 0 minutes are not
-    held against you). They must agree on what "covered" means."""
+    held against you). They must agree on what "covered" means.
+
+    Deliberately STATUS-BLIND and range-based: a closed entry still explains the weeks
+    it spanned. That is what makes it the wrong question for ownership — see
+    `_absence_held`, which reads the same rows (`_absence_rows`) and must not be merged
+    with this."""
+    cover: dict = {}
+    for e in _absence_rows(db, league):
+        cover.setdefault((e.manager_id, e.player_id), set()).update(
+            range(e.start_gw, (e.end_gw or last_n) + 1)
+        )
+    return cover
+
+
+def _absence_rows(db: Session, league: League) -> list:
+    """Every injury-list and international-list row for this league, one query per table.
+
+    The single source both absence questions read, so they can never drift onto
+    different data. They are DIFFERENT QUESTIONS and legitimately differ in predicate:
+    `_absence_cover` asks "was he excused that gameweek" (range-based, status-blind),
+    `_absence_held` asks "does his manager still hold him" (status-aware). Sharing the
+    rows is the invariant; sharing the predicate would be wrong.
+    """
     from models import InternationalList
 
-    cover: dict = {}
+    out = []
     for model in (InjuryList, InternationalList):
-        for e in (
+        out.extend(
             db.query(model)
             .join(Manager, Manager.id == model.manager_id)
             .filter(Manager.league_id == league.id)
+            # Deterministic: two entries can name the same player, and _owner_maps
+            # resolves ties by first-wins. player_ownership is called more than once in
+            # a single request (player_portal, then again inside _derive_keeper_status),
+            # so an unordered query could make two panels on one page disagree.
+            .order_by(model.start_gw, model.id)
             .all()
+        )
+    return out
+
+
+def _absence_held(db: Session, league: League, last_n: int) -> tuple[list, list]:
+    """(held, released) — the ownership half of the absence rules.
+
+    LISTS, not sets, and ordered by (start_gw, id): `_owner_maps` resolves a contested
+    player first-wins, so set iteration order would make the winner vary between calls.
+
+    `held` is [(manager_id, player_id)] for absentees the manager still holds even
+    though the FPL roster shows their replacement instead. `released` is
+    {(manager_id, player_id)} for the players given up to bring an absentee back after
+    GW38 (see InjuryList.released_player_id).
+
+    HELD, and why the obvious predicate is wrong. `status == 'active'` alone forks from
+    `_absence_cover` on every season-end return, silently and permanently: cover folds
+    an open-ended entry through `last_n` and is status-blind, so a 'returned' entry with
+    `end_gw >= last_n` is still COVERED while a status test says not held. At GW38
+    `last_n` stops advancing, so the disagreement never expires — and it lands on the
+    worst pair, `submit_keepers` (validates against the coverage-based candidate set, so
+    it ACCEPTS the keeper) versus `effective_keeper_selections` (validates against
+    ownership, so it DROPS the selection). The manager submits a keeper the site accepts
+    and silently loses a draft slot. Hence: held while active, and still held after a
+    return that lands at or beyond the final gameweek in view.
+
+    'waived' is never held past `end_gw` — waiving IS the manager giving him up. A NULL
+    status is not held; `data_health` reports those rather than guessing.
+    """
+    from models import InternationalList  # noqa: F401  (via _absence_rows)
+
+    held, released = [], []
+    for e in _absence_rows(db, league):
+        status = (e.status or "").strip().lower()
+        if status == "active" or (
+            status == "returned" and e.end_gw is not None and last_n <= e.end_gw
         ):
-            cover.setdefault((e.manager_id, e.player_id), set()).update(
-                range(e.start_gw, (e.end_gw or last_n) + 1)
-            )
-    return cover
+            held.append((e.manager_id, e.player_id))
+        if e.released_player_id is not None:
+            released.append((e.manager_id, e.released_player_id))
+    return held, released
+
+
+def record_absentee_minutes(
+    db: Session, league: League, live_stats: dict, gw_number: int
+) -> None:
+    """Feed the must-return alert (docs/DESIGN_IL_OWNERSHIP.md §6): for every ACTIVE
+    absence in this league, if the absent player logged real minutes this gameweek,
+    record it as `last_played_gw`.
+
+    Called from `sync.sync_gameweek_points` with the `elements` map it already fetched
+    from `/event/{gw}/live` — that payload carries minutes for EVERY player in the
+    game, not just the ones on a manager's roster, so an absentee's minutes are sitting
+    in data already in hand. Split out as a plain function of a session, a league, and
+    a plain dict so it's testable without an HTTP call or a live gameweek — no `sync`
+    import needed here, and no test needs one either.
+
+    Deliberately does NOT touch `GameweekPoints.player_points`: that list means "FPL's
+    lineup" to `rules.zero_minute_count`, and folding absentees into it would silently
+    change what the anti-tanking rule excuses.
+
+    Commits. Called mid-sync, same as every other write in `sync.py`.
+    """
+    from models import InternationalList
+
+    def _minutes(fpl_id: int) -> int:
+        return (live_stats.get(str(fpl_id), {}).get("stats", {}) or {}).get("minutes", 0)
+
+    for model in (InjuryList, InternationalList):
+        for entry, player in (
+            db.query(model, Player)
+            .join(Manager, Manager.id == model.manager_id)
+            .join(Player, Player.id == model.player_id)
+            .filter(Manager.league_id == league.id, model.status == "active")
+        ):
+            if player.fpl_id is not None and _minutes(player.fpl_id) > 0:
+                entry.last_played_gw = gw_number
+    db.commit()
 
 
 def _roster_presence_and_il_coverage(db: Session, league: League, last_n: int) -> tuple:
@@ -3239,13 +3541,30 @@ def _derive_keeper_status(
 
     presence, il = _roster_presence_and_il_coverage(db, league, last_n)
 
-    # A candidate is either on the active roster at the final GW, OR still covered
-    # by an open-ended IL/international entry through the final GW — a player
-    # swapped out for an IL replacement and never returned is genuinely still
-    # theirs for keeper purposes, even though the FPL-synced roster shows the
-    # replacement in that slot at the final GW, not him.
+    # A candidate is either on the active roster at the final GW, OR still held through
+    # an IL/international entry — a player swapped out for a replacement and never
+    # returned is genuinely still theirs for keeper purposes, even though the
+    # FPL-synced roster shows the replacement in that slot at the final GW, not him.
+    #
+    # This asks _absence_held, the SAME predicate the ownership overlay uses, and not
+    # `il` (that is _absence_cover, the "was he excused" question). Asking cover here
+    # was the old behaviour and it forks from ownership on a season-end return: cover is
+    # status-blind, so a 'returned' entry keeps granting candidacy while the overlay has
+    # already let go. submit_keepers would accept a keeper that effective_keeper_selections
+    # then silently drops, costing the manager a draft slot.
+    absence_held, absence_released = _absence_held(db, league, last_n)
     final_candidates = {k for k, gws in presence.items() if last_n in gws}
-    final_candidates |= {k for k, covered in il.items() if last_n in covered}
+    # Filtered through the ownership map, not taken raw: _owner_maps only honours an
+    # absence when NOBODY rosters the player, and candidacy has to agree with it. An
+    # entry left open after the player was dropped and claimed by someone else would
+    # otherwise put him on both managers' keeper boards — he is genuinely the claimant's.
+    absence_owner = effective_owner(db, league)
+    final_candidates |= {
+        (mid, pid) for mid, pid in absence_held if absence_owner.get(pid) == mid
+    }
+    # ...minus anyone given up to bring an absentee back after GW38. He is still on the
+    # frozen snapshot, so without this he stays keepable by the manager who released him.
+    final_candidates -= set(absence_released)
     traded_in = {
         (t.to_manager, t.player_id)
         for t in db.query(Trade).filter_by(league_id=league.id)
@@ -3428,6 +3747,17 @@ def _derive_keeper_status(
     status: dict = {}
     for hist, pid in final_candidates:
         owner = moved.get(pid, hist)
+        # `moved` can say None — a player released to make room at season end belongs to
+        # nobody, and a None key here would create a phantom manager bucket that every
+        # caller of this dict would then have to know about.
+        #
+        # Deliberately redundant with the `-= absence_released` line above, and NOT dead
+        # code: the two fail differently. Drop the subtraction and this catches it; drop
+        # player_ownership's None-injection instead and the subtraction catches it, since
+        # `moved.get(pid, hist)` would then quietly answer `hist`. Removing either alone
+        # is invisible in the tests, which is exactly why both are here.
+        if owner is None:
+            continue
         acq, remaining = _status_for(hist, pid)
         # An overlaid player carries the sender's status wholesale, exactly as a
         # synced trade does above — the commissioner's own override for the new owner
@@ -3958,6 +4288,19 @@ def submit_keepers(
     one of the fourteen picks either way.
     """
     manager = _resolve_manager(db, league, fpl_manager_id)
+    # Manager-scoped on purpose, not a league-wide lock: only the person who owes a
+    # decision is stopped, and everyone else submits normally.
+    open_absences = unresolved_absences(db, league, manager.id)
+    if open_absences:
+        names = ", ".join(
+            (db.get(Player, e.player_id).name if db.get(Player, e.player_id) else "—")
+            for e in open_absences
+        )
+        raise RuleViolation(
+            f"the season is over and {names} is still on an absence list — return or "
+            f"release them on My Team first, so your squad is back to "
+            f"{ROSTER_SIZE}"
+        )
     status = _derive_keeper_status(db, league).get(manager.id, {})
     by_fpl = {p.fpl_id: p for p in db.query(Player)}
     # A commissioner seed is the override of record and outranks the discovery clock
@@ -4974,7 +5317,13 @@ def player_ownership(db: Session, league: League) -> dict:
     conditions-only edit move a player by coincidence.
     """
     base, owner = _owner_maps(db, league)
-    return {pid: mid for pid, mid in owner.items() if base.get(pid) != mid}
+    moved = {pid: mid for pid, mid in owner.items() if base.get(pid) != mid}
+    # A player the snapshot rosters but the overlays have RELEASED maps to None — the
+    # map has to be able to say "nobody", or _effective_roster_pids would re-add him
+    # from the snapshot and the season-end release would be invisible on every squad
+    # page. Callers must therefore treat a None value as "not this manager's".
+    moved.update({pid: None for pid in base if pid not in owner})
+    return moved
 
 
 def effective_owner(db: Session, league: League) -> dict:
@@ -4985,8 +5334,13 @@ def effective_owner(db: Session, league: League) -> dict:
 
 
 def _owner_maps(db: Session, league: League) -> tuple[dict, dict]:
-    """(snapshot owners, owners after site trades) — shared by the two readers above
-    so the seeding and the fold can't drift apart."""
+    """(snapshot owners, owners after absences and site trades) — shared by the two
+    readers above so the seeding and the folds can't drift apart.
+
+    Two overlays, in this order: absences (additive — an IL'd or internationally-absent
+    player is still held even though FPL shows his replacement), then commissioner
+    trades. See docs/DESIGN_IL_OWNERSHIP.md for why the order matters and why absence
+    ownership is derived on read rather than written to `rosters`."""
     gw = latest_gameweek(db, league)
     if gw is None:
         return {}, {}
@@ -4999,6 +5353,28 @@ def _owner_maps(db: Session, league: League) -> tuple[dict, dict]:
         )
     }
     base = dict(owner)
+
+    # Absences fold BEFORE trades, and the order is load-bearing. An absentee is off the
+    # FPL roster, so `owner.get(X)` is None; the trade guard below only fires when the
+    # map already says the sender holds him. Fold absences second and a trade of an
+    # absent player can NEVER apply — /admin/health's "site trades applied" check would
+    # go red permanently and the buyer would never inherit the keeper clock. Fold them
+    # first and the two compose with no special case.
+    held, released = _absence_held(db, league, gw.number)
+    for mid, pid in held:
+        # Only if nobody rosters him. A mis-entered absence must not be able to STEAL a
+        # rostered player from another manager — same fail-closed instinct as the trade
+        # guard below.
+        if pid not in owner:
+            owner[pid] = mid
+    # ...and the one subtraction: the player a manager gave up to bring an absentee back
+    # after GW38, when the roster is frozen and the swap can't be made in FPL. Applied
+    # only while he is still where the snapshot says, so a stale row can't strip a player
+    # someone else has since acquired.
+    for mid, pid in released:
+        if owner.get(pid) == mid:
+            del owner[pid]
+
     for t in (
         db.query(Trade)
         .filter(Trade.league_id == league.id,
@@ -6681,17 +7057,21 @@ def manager_assets(db: Session, league: League, fpl_manager_id: str) -> dict:
         # resolves against the global column. PlayerSeason's frozen id is a
         # DIFFERENT season's element id once this league is sync_locked, so using
         # it here submitted the right-looking checkbox with the wrong id underneath.
+        # Membership through _effective_roster_pids, NOT a join on Roster. This is the
+        # trade-entry form, and it already overlays PICKS via pick_ownership below — so
+        # the raw join meant a commissioner-traded player still appeared on the seller's
+        # side and was missing from the buyer's, on the very page used to enter trades.
+        # It also hid an absent player, who is often exactly the asset being shopped.
+        pids = _effective_roster_pids(db, league, m.id, gw.id)
         for ps, p in (
             db.query(PlayerSeason, Player)
-            .join(Roster, Roster.player_id == PlayerSeason.player_id)
             .join(Player, Player.id == PlayerSeason.player_id)
             .filter(
-                Roster.manager_id == m.id,
-                Roster.gameweek_id == gw.id,
+                PlayerSeason.player_id.in_(pids),
                 PlayerSeason.league_id == league.id,
             )
             .order_by(PlayerSeason.position, PlayerSeason.name)
-        ):
+        ) if pids else []:
             players.append({"fpl_id": p.fpl_id, "name": ps.name, "position": ps.position})
 
     upcoming = (league.season_year or 0) + 1
@@ -6929,8 +7309,66 @@ def data_health(db: Session, league: League) -> list[dict]:
     add("site trades applied", not unapplied,
         "; ".join(unapplied) if unapplied else "all applied")
 
+    # Absence-list integrity. The overlay grants real ownership off these rows, so a
+    # malformed one is no longer cosmetic — and none of these can be inferred away
+    # safely, which is why they are reported rather than auto-corrected.
+    pname = {p.id: p.name for p in db.query(Player)}
+    mname = {m.id: m.display for m in mgrs}
+    rows = _absence_rows(db, league)
+    active = [e for e in rows if (e.status or "").strip().lower() == "active"]
+
+    # NULL status folds nowhere (not held, not covered-as-closed) and silently drops the
+    # player out of his manager's squad.
+    nullst = [f"{mname.get(e.manager_id, '—')}/{pname.get(e.player_id, '—')}"
+              for e in rows if not (e.status or "").strip()]
+    add("absence rows have a status", not nullst,
+        "; ".join(sorted(nullst)) if nullst else "all set")
+
+    # Two managers naming the same absent player: the fold is first-wins, so one of them
+    # silently loses him.
+    seen: dict = {}
+    dupes = set()
+    for e in active:
+        if e.player_id in seen and seen[e.player_id] != e.manager_id:
+            dupes.add(pname.get(e.player_id, "—"))
+        seen.setdefault(e.player_id, e.manager_id)
+    add("no player on two absence lists", not dupes,
+        "; ".join(sorted(dupes)) if dupes else "none")
+
+    # An active entry whose player someone ELSE now rosters. The fold's "only if
+    # unowned" guard stops the theft, so the entry just sits there doing nothing —
+    # usually it means he was dropped and claimed and the entry was never closed.
+    owner_now = effective_owner(db, league) if gw is not None else {}
+    stale = [
+        f"{pname.get(e.player_id, '—')} (rostered by {mname.get(owner_now[e.player_id], '—')})"
+        for e in active
+        if owner_now.get(e.player_id) not in (None, e.manager_id)
+    ]
+    add("absent players aren't rostered elsewhere", not stale,
+        "; ".join(sorted(stale)) if stale else "none")
+
+    # Past GW38 an open entry means the manager never returned or released, so their
+    # squad is one over and their keeper choice was made from an extra candidate.
+    owed = [f"{mname.get(e.manager_id, '—')}/{pname.get(e.player_id, '—')}"
+            for e in unresolved_absences(db, league)]
+    add("absences resolved for the season", not owed,
+        "; ".join(sorted(owed)) if owed else "none open")
+
+    # Playing again but still parked — the must-return alert's own check, so a manager
+    # who never looks at the homepage nag still shows up here.
+    overdue = _return_required_entries(db, league)
+    add("no absentee playing while still parked", not overdue,
+        "; ".join(sorted(f"{e['manager']}/{e['player']}" for e in overdue))
+        if overdue else "none")
+
     # players on the latest roster with no keeper seed (they default to fresh)
     seeded = {pid for (pid,) in db.query(KeeperSeed.player_id).filter_by(league_id=league.id)}
+    # Deliberately RAW Roster, not the overlay — the audit in
+    # docs/DESIGN_IL_OWNERSHIP.md §9 flagged this one as raw with no recorded reason,
+    # so here it is. A seed is a fact about a player's history under the manager who
+    # actually rostered him, exactly like the keeper derivation's `presence`; asking the
+    # overlay would demand a seed from whoever holds him TODAY and let the real holder's
+    # missing seed go unreported.
     on_roster = (
         {pid for (pid,) in db.query(Roster.player_id).filter_by(gameweek_id=gw.id)}
         if gw is not None else set()
