@@ -105,12 +105,50 @@ def current_league(db: Session) -> League | None:
 
 
 def latest_gameweek(db: Session, league: League) -> Gameweek | None:
-    return (
+    """The gameweek every ownership/roster/keeper reader treats as "the final one in
+    view" -- capped at the date-derived CURRENT gameweek (see
+    _derived_current_gameweek) when that's lower than the highest existing row.
+
+    Regression for 2026-08-21, the 26/27 season's actual GW1: sync_gameweek_dates
+    pulls the WHOLE season's calendar from FPL's bootstrap-static feed and creates
+    all 38 Gameweek rows up front (needed for the waiver window and the "next 3
+    fixtures" display), so the naive "highest existing row" can name a gameweek
+    whose window hasn't even started -- with zero synced Roster rows. Every reader
+    of _owner_maps (get_rosters /my-team, player_portal, manager_assets, the draft
+    slot math, the keepers page) silently read an EMPTY snapshot at that phantom
+    gameweek: every squad, everywhere, showed blank. This held in every prior
+    season only because Gameweek rows were created ONE AT A TIME as each week's
+    sync ran, so "highest existing row" and "highest row with real data" were the
+    same number by construction; bulk-creating the calendar broke that coincidence
+    without anyone changing this function.
+
+    Uses _derived_current_gameweek, NOT the public current_gameweek() wrapper: the
+    demo sandbox's override (current_gameweek) would otherwise leak into every
+    ownership read in demo mode, for a feature (a mid-season Upcoming/Scores view
+    over a copied FINISHED season) that has nothing to do with this.
+
+    Falls through to the naive max when no date-derived value exists -- e.g. every
+    test fixture in this codebase, which creates a full 1..38 Gameweek scaffold with
+    no start_date at all, and relies on "the final GW in view" meaning 38 for
+    season-end keeper/ownership derivation. That contract is unchanged here.
+    """
+    naive = (
         db.query(Gameweek)
         .filter_by(league_id=league.id)
         .order_by(Gameweek.number.desc())
         .first()
     )
+    if naive is None:
+        return None
+    cur_number = _derived_current_gameweek(db, league)
+    if cur_number is not None and cur_number < naive.number:
+        return (
+            db.query(Gameweek)
+            .filter_by(league_id=league.id, number=cur_number)
+            .one_or_none()
+            or naive
+        )
+    return naive
 
 
 # ---- audit log ----

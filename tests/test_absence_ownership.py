@@ -717,7 +717,12 @@ def test_the_alert_disappears_once_reconciled(test_session):
     _start_gw(test_session, gws, eligible)
     assert services._return_required_entries(test_session, lg)  # fires first
 
-    _hold(test_session, a, out, gws, [LAST_GW])
+    # Re-add him at the gameweek _start_gw just made "current" -- latest_gameweek()
+    # is capped there (see its docstring), so that's the snapshot reconcile_absences
+    # actually reads. Re-adding at LAST_GW instead would silently miss the point:
+    # reconcile_absences would look at a DIFFERENT gameweek's roster than the one
+    # this test just made current, and never see the re-add at all.
+    _hold(test_session, a, out, gws, [eligible])
     services.reconcile_absences(test_session, lg)
 
     assert services._return_required_entries(test_session, lg) == []
