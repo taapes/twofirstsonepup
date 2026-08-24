@@ -323,3 +323,15 @@ def test_no_club_asset_with_the_rule_off(test_session):
     lg, mgrs, _clubs, gws = _seed(test_session, mode="off")
     _draft_club(test_session, lg, mgrs["A"], 3)
     assert services.manager_assets(test_session, lg, "1")["club"] is None
+
+
+# ---- season-year alignment (Item 8: self-healed rollover) ------------------
+def test_a_club_drafted_with_matching_season_year_resolves_to_owner(test_session):
+    """Regression: before the rollover, league.season_year (2025) lagged the draft's
+    season_year (2026), so goalie_team_owner filtered out all pre-rollover picks.
+    After the rollover, league.season_year=2026 matches DraftPick.season_year=2026,
+    and club ownership resolves correctly. This verifies the self-healing."""
+    lg, mgrs, clubs, gws = _seed(test_session, season=2026)
+    _draft_club(test_session, lg, mgrs["A"], 3, season=2026)
+    owner = services.goalie_team_owner(test_session, lg)
+    assert owner[clubs["ARS"].id] == "1"

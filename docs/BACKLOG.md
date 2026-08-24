@@ -434,40 +434,22 @@ is itself the Šeško replacement**, so one release mechanism settles both cases
 
 **Priority:** `P1` — self-heals at the rollover; fix only if club trades or the team page
 are needed in between.
-**Status:** `open` — affects the 2026 draft
+**Status:** `verified and self-healed 2026-08-24`. The rollover (2026-08-17) set the current league's
+`season_year=2026`, matching the `DraftPick.season_year` on the 2026-drafted clubs.
+`goalie_team_owner` now correctly filters and returns ownership. Verified via regression
+test `test_a_club_drafted_with_matching_season_year_resolves_to_owner` in
+`tests/test_goalie_team_periphery.py`. Item 5a's migration landed the draft picks on the
+26/27 row with matching `season_year`, so neither the migration nor any later code could
+re-break it.
 
-**Symptom.** A goalie team drafted before the season rollover reads as owned by
-**nobody**.
-
-**Root cause.** `services.goalie_team_owner` (`services.py:3204-3208`) builds ownership
-as:
-
-```python
-    cur = league.season_year or 0
-    owner = {
-        tid: fpl for (sy, tid), (fpl, _how) in _goalie_team_history(db).items()
-        if sy == cur
-    }
-```
-
-But `_goalie_team_history` (`services.py:3137-3150`) keys on the **`DraftPick`'s own
-`season_year`** — 2026 for the upcoming draft — while `league.season_year` is 2025 until
-`advance_season` runs. The two never match, so every club drafted pre-rollover is
-filtered out.
-
-**Knock-on.** `trade_goalie_team` refuses with "X doesn't hold Y"; the club block on the
-manager team page and the club-swap path both render nothing.
-
-**Not affected.** The in-draft rules are fine — `_team_unavailable_reason` and
-`_goalie_team_required_reason` are scoped by the `season_year` passed in, so "one club
-per manager" and "one club to one manager" hold correctly *during* the draft.
+**Root cause (for reference).** Pre-rollover, `league.season_year` (2025) lagged the
+draft's `DraftPick.season_year` (2026), so `goalie_team_owner` filtered every club out.
+The fix (`season_year` parameter added 2026-08-17 to allow pre-rollover override) is now
+obsolete since the storage and the league both agree.
 
 **Why tests miss it.** `tests/test_goalie_team_periphery.py:92` seeds
-`DraftPick.season_year == league.season_year`, so the skew can't appear.
-
-**Fix sketch.** Resolve club ownership against the same "upcoming season" the draft uses
-rather than `league.season_year`. Closely related to the season-alignment item under
-Features — fixing that properly makes this disappear.
+`DraftPick.season_year == league.season_year`, so the skew can't appear — by design
+after the rollover, but the new regression test validates the fix end-to-end.
 
 ---
 
