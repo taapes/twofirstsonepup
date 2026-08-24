@@ -202,13 +202,20 @@ def decide_sync(*, full_today: bool, live_fixture: bool, gw_starts_today: bool) 
 def fixture_status(fx) -> str:
     """A real-life PL fixture's state: 'not_started' | 'in_progress' | 'finished'.
 
-    `fx.finished` wins outright. Otherwise `fx.started` decides — a plain bool from
-    the classic FPL feed's own live state, not derived from `kickoff_time` (a
-    delayed or postponed match would make a kickoff-time heuristic wrong in either
-    direction). `started` is NULL for any row synced before this field existed;
-    treat that the same as False rather than raising, so a pre-migration fixture
-    just reads as not-yet-started instead of breaking every caller."""
-    if fx.finished:
+    `fx.finished_provisional` counts as finished, not just `fx.finished` — this is
+    load-bearing, not a stylistic choice. Confirmed against FPL's live classic feed
+    (2026-08-24): a match can sit at `finished=False, finished_provisional=True,
+    minutes=90` for HOURS after full time while FPL locks in bonus points/stats.
+    Waiting on `finished` alone left every just-played match reading as
+    "not started" (0 of N fixtures finished) for that whole window — exactly the
+    bug this fixed. `fx.started` (also from the live feed, not derived from
+    `kickoff_time`, so a delayed/postponed match doesn't get misread either
+    direction) decides "in progress" once neither finished flag is set yet.
+    `started`/`finished_provisional` are NULL for any row synced before these
+    fields existed; treat that the same as False rather than raising, so a
+    pre-migration fixture just reads as not-yet-started instead of breaking
+    every caller."""
+    if fx.finished or fx.finished_provisional:
         return "finished"
     if fx.started:
         return "in_progress"

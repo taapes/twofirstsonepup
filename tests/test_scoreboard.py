@@ -65,13 +65,25 @@ def _fixture(session, lg, fid, home, away, *, finished=False, started=None,
 # ---- rules.fixture_status ---------------------------------------------------
 
 class _Fx:
-    def __init__(self, finished=False, started=None):
+    def __init__(self, finished=False, started=None, finished_provisional=None):
         self.finished = finished
         self.started = started
+        self.finished_provisional = finished_provisional
 
 
 def test_fixture_status_finished_wins_outright():
     assert rules.fixture_status(_Fx(finished=True, started=True)) == "finished"
+
+
+def test_fixture_status_finished_provisional_also_counts_as_finished():
+    """The exact bug hit in production: FPL's classic feed can sit at
+    finished=False, finished_provisional=True, minutes=90 for HOURS after full
+    time while bonus points are locked in. Waiting on `finished` alone left
+    every just-played match reading as 'not started.' `finished_provisional`
+    must be enough on its own, `finished` unset entirely."""
+    assert rules.fixture_status(
+        _Fx(finished=False, started=True, finished_provisional=True)
+    ) == "finished"
 
 
 def test_fixture_status_in_progress_when_started_and_not_finished():
