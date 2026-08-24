@@ -95,6 +95,30 @@
         return true;
       }
     </script>
+    {% if dropped_players %}
+    {# For a player already dropped in FPL before the injury was ever recorded here --
+       he's off team.players by now, so the ordinary picker above can't name him.
+       dropped_players is scoped to players THIS manager held at some point this
+       season and nobody else holds now (services.dropped_players_for_manager). #}
+    <details style="margin-top:8px"><summary class="sub">He's already been dropped</summary>
+      <form method="post" action="/il/place" onsubmit="return ilResolve(this)" style="margin-top:8px">
+        <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
+        <label>Injured player (held earlier this season)<br>
+          <select name="injured_fpl_id" required style="width:100%" onchange="this.closest('form').querySelector('[name=start_gw]').value=this.options[this.selectedIndex].dataset.suggest||''">
+            <option value="">choose…</option>
+            {% for p in dropped_players %}<option value="{{ p.fpl_id }}" data-suggest="{{ p.suggested_start_gw }}">{{ p.label }}</option>{% endfor %}
+          </select></label>
+        <label style="display:block;margin-top:6px">Replacement (same position)<br>
+          <input list="ilPlayers" name="replacement_name" placeholder="search by name" autocomplete="off" style="width:100%" required>
+          <input type="hidden" name="replacement_fpl_id"></label>
+        <label style="display:block;margin-top:6px">Injured since GW<br>
+          <input type="number" name="start_gw" min="1" max="{{ current_gw or 1 }}" style="width:100px" required></label>
+        <button type="submit" style="margin-top:8px">Report injury</button>
+        <p class="sub">The 4-GW minimum stay counts from this gameweek, so it may already
+          have elapsed.</p>
+      </form>
+    </details>
+    {% endif %}
     {% else %}<p class="sub">No players on the injury list.</p>{% endif %}
   </div>
 </div>
@@ -161,6 +185,29 @@
       return true;
     }
   </script>
+  {% if dropped_players %}
+  {# Same shape as the IL's "he's already been dropped" section above, and the same
+     candidate list -- a manager reports which absence this player's is, the site
+     doesn't need to know in advance. #}
+  <details style="margin-top:6px"><summary class="sub">He's already been dropped</summary>
+    <form method="post" action="/intl/place" onsubmit="return intlResolve(this)" style="margin-top:8px">
+      <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
+      <label>Away player (held earlier this season)<br>
+        <select name="away_fpl_id" required style="width:100%" onchange="this.closest('form').querySelector('[name=start_gw]').value=this.options[this.selectedIndex].dataset.suggest||''">
+          <option value="">choose…</option>
+          {% for p in dropped_players %}<option value="{{ p.fpl_id }}" data-suggest="{{ p.suggested_start_gw }}">{{ p.label }}</option>{% endfor %}
+        </select></label>
+      <label style="display:block;margin-top:6px">Replacement (same position)<br>
+        <input list="intlPlayers" name="replacement_name" placeholder="search by name" autocomplete="off" style="width:100%" required>
+        <input type="hidden" name="replacement_fpl_id"></label>
+      <label style="display:block;margin-top:6px">Tournament
+        <input name="tournament" placeholder="AFCON" style="width:160px"></label>
+      <label style="display:block;margin-top:6px">Away since GW<br>
+        <input type="number" name="start_gw" min="1" max="{{ current_gw or 1 }}" style="width:100px" required></label>
+      <button type="submit" style="margin-top:8px">Report absence</button>
+    </form>
+  </details>
+  {% endif %}
   {% else %}<p class="sub">No players on international duty.</p>{% endif %}
 </div>
 {% endif %}

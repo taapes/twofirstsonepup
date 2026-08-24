@@ -32,10 +32,9 @@ plans + copy-paste session prompts live in **`docs/SESSION_PLANS.md`**.
      (`aab467f`, `529a144`)
 
 **Next, in order**
-6. ~~**Item 6** — IL ownership design session~~ — **done 2026-08-20**, written to
-   `docs/DESIGN_IL_OWNERSHIP.md`. ~~**Item 6b** (the ownership fold) and **Item 6c**
-   (the must-return alert)~~ — **both BUILT 2026-08-20/21**, uncommitted; see the
-   backlog entry above and `docs/SESSION_PLANS.md`.
+6. ~~**Item 6** — IL ownership design session, Item 6b (ownership fold), Item 6c
+   (must-return alert)~~ — **all done**, shipped 2026-08-20/21 (`37f7f2f`). See
+   `docs/DESIGN_IL_OWNERSHIP.md` and the backlog entry above.
 7. **Item 7** — keeper years survive a drop (rules decided: frozen while unowned;
    preseason FA carries; only a draft resets) — Opus 5
 8. **Items 8-16** — small fixes and tooling, any idle session — Haiku/Sonnet
@@ -46,12 +45,21 @@ plans + copy-paste session prompts live in **`docs/SESSION_PLANS.md`**.
   `DATABASE_URL`. Deliberate (they test code that commits internally) but unguarded,
   and the reason every regression summary here says "green excluding those three".
   Confirmed to have actually written to prod on 2026-08-18.
-- **Audit for the silent-inert pattern** (`P2`, suggested 2026-08-20). Two features
-  turned out to have never run, found two days apart and sharing a shape: a guard
-  returning quietly on empty input, downstream of something that never produced the
-  input (`advance_season`'s carries; `snapshot_player_pool`). Both were invisible
-  because the empty case is legitimate elsewhere. Worth sweeping for others, and for
-  `data_health` checks that assert the input EXISTS rather than that the guard held.
+- **Audit for the silent-inert pattern** (`P2`, suggested 2026-08-20). Now THREE
+  findings sharing a shape, the last one a live production outage: a guard or an
+  implicit invariant that held only because of how something else behaved, going quiet
+  the moment that something else changed, with the empty/wrong case looking legitimate
+  everywhere it was checked. `advance_season`'s carries and `snapshot_player_pool`
+  were guards returning quietly on empty input. `services.latest_gameweek` (fixed
+  `cf58a35`, 2026-08-21) was the same shape wearing a different costume: "highest
+  existing Gameweek row" silently meant "highest row with real data" for every prior
+  season, purely because rows were created one at a time in lockstep with syncs —
+  until `sync_gameweek_dates` started bulk-creating the whole season's calendar up
+  front, and the coincidence broke with no assertion anywhere to catch it. Every
+  manager's `/teams`, `/my-team`, Players tab and trade-entry form went blank the
+  instant the 26/27 season's phase flipped to `in_season`. Worth sweeping for others,
+  and for `data_health` checks that assert the input EXISTS / the invariant HOLDS
+  rather than that the guard behaved.
 - **The FPL sync leg of the rollover is unrehearsed.** The 2026-08-20 Neon rehearsal
   fabricated the new league row and stubbed `sync_all`, so the mapping page has never
   met a real `sync_league_and_managers`. Needs a throwaway FPL draft league id.
@@ -112,7 +120,8 @@ self-service is live, so the next mid-season IL case can arrive any week. The tw
 25/26 incidents below are retired as moot (frozen row, correct keepers carried); this
 entry is now purely forward-looking. Scoped as the Item 6 design session in
 `docs/SESSION_PLANS.md`.
-**Status:** `designed 2026-08-20; Item 6b + 6c BUILT 2026-08-20/21 (uncommitted)`.
+**Status:** `done`. Designed 2026-08-20; Item 6b + 6c built 2026-08-20/21 and shipped
+in `37f7f2f`.
 Raised 2026-08-16 after two same-night incidents (Šeško/Scott, Kudus/Kevin T) turned out
 to be the same structural gap wearing two different masks.
 
@@ -783,6 +792,62 @@ this backlog that says "green excluding these three files" is describing this.
 ---
 
 ## Features
+
+### Self-service historical IL/international placement for an already-dropped player
+
+**Priority:** `P1` — reported live, a common real-world scenario, not a one-off.
+**Status:** `done 2026-08-24`. A manager drafted Haji Wright, already injured,
+dropped him for Simms in FPL before ever recording the injury here — by which point
+the synced roster showed Simms, not Wright, and `place_on_il`'s self-service path
+refused (the on-roster guard Item 6b added specifically to stop a manager claiming an
+un-rostered player as theirs). The only existing fix was asking the commissioner to run
+the admin-only historical backfill.
+
+**Design decided with the commissioner:** (1) eligibility is restricted to the
+manager's OWN roster history this season — `services._validate_absence_eligibility`
+falls back from "on the current roster" to "was he EVER on it," via the same
+`presence` dict `_derive_keeper_status` already shares — never open to naming any
+player; (2) takes effect immediately, no approval queue, same as every other
+self-service IL/trade action — visibility is a new `data_health` check plus the audit
+log, not a gate; (3) a backdated `start_gw` recomputes anti-tanking/keeper-drop
+derivation naturally, even retroactively excusing an already-reviewed flag, exactly
+like any other IL entry — no special-casing.
+
+**Also decided during design, not asked as open questions:** refuse if a *different*
+manager genuinely holds the player now (`effective_owner` disagrees) rather than
+silently letting `_owner_maps`' own "only if unowned" fold guard no-op the claim — fail
+loud, not quiet; build the international list's identical gap symmetrically
+(`place_on_intl` shares the same eligibility function); suggest, don't demand,
+`start_gw` (defaults to the gameweek after he was last actually held,
+`dropped_players_for_manager`, editable); one boolean column
+(`InjuryList.self_reported` / `InternationalList.self_reported`), not a new
+`DiscoveryMatchSuggestion`-style queue table, since decision (2) means nothing is ever
+pending.
+
+**Research finding worth recording:** no existing feature in this codebase does
+"manager proposes, admin confirms" — the only propose/confirm/reject pattern
+(`discovery_match_suggestions`) is machine-proposed (a nightly matcher), never
+manager-proposed. `commissioner_alerts` is confirmed fully dead code (zero readers,
+zero writers) and was already rejected once, in that migration's own docstring, as a
+base for exactly this kind of queue (no status column, no FK to the subject).
+
+**Built:** migration `f6a7b8c9d0e1` (the `self_reported` column, both tables);
+`services._validate_absence_eligibility` (replaces the old hard `_refuse_...` guard,
+now returns whether the historical path was taken); `services.dropped_players_for_manager`
+(the picker + `start_gw` suggestion, filtered to exclude anyone currently held by
+someone else); a new `data_health` check ("self-reported IL/international
+placements"); `/il/place` and `/intl/place` both gained an optional `start_gw` form
+field (defaults to "now," as before, when omitted); a second `<details>` section on
+My Team, "He's already been dropped," reusing the same replacement-name datalist and
+resolver already on the page. Tests: `tests/test_il_historical_self_report.py` (13
+cases), both new guards mutation-tested in isolation. Full regression 790 passed / 0
+skipped, only the pre-existing `P3` `test_demo`/`test_sync_freeze` failures.
+
+**Deliberately NOT built** (see the still-open "IL backfill form must search by player
+name, not FPL id" entry above): the new picker is keyed on `fpl_id`, like every other
+self-service picker, not `players.code` — that only matters for a player who has since
+left the league entirely, which the motivating scenario (still injured, still in the
+PL) never hits. Fold it in if that item is ever picked up.
 
 ### Show the in-progress squad (keepers + picks so far) once the draft starts — and after it
 
@@ -1584,6 +1649,14 @@ for. Work needed:
 `ui.py:1277-1301` (`admin_il_backfill`) changes its form field names, and
 `tests/test_il_keeper_visibility.py:92-140` posts the current numeric fields, so it
 updates alongside.
+
+**A second picker now exists with the identical `fpl_id` limitation** (added
+2026-08-24, self-service historical IL/international placement —
+`services.dropped_players_for_manager` on `/my-team`). Deliberately NOT built on
+`players.code` when it was added: the motivating case (a still-injured, still-in-the-PL
+player) never hits the NULL-`fpl_id` edge case, and duplicating the code-keyed
+resolution path into `place_on_il`/`place_on_intl` for a scenario that hadn't come up
+would have been scope creep. If this item is ever picked up, fold that picker in too.
 
 ---
 

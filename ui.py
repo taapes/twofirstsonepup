@@ -452,11 +452,19 @@ def my_team_page(request: Request, db: Session = Depends(get_db)):
     else:
         team = services.get_my_team(db, league, fpl)
     cur = services.current_gameweek(db, league)
+    can_edit_il = bool(team) and (is_admin(request) or fpl == current_manager_id(request))
+    manager = services._resolve_manager(db, league, fpl) if can_edit_il else None
     return templates.TemplateResponse("my_team.html", {
         "request": request, "league": league, "team": team,
         # IL self-service controls (only when viewing your own team / admin)
-        "can_edit_il": bool(team) and (is_admin(request) or fpl == current_manager_id(request)),
+        "can_edit_il": can_edit_il,
         "players": services.list_players(db, league),
+        # Candidates for "he's already been dropped" -- a player this manager held
+        # at some point this season but no longer does, and nobody else does either.
+        "dropped_players": (
+            services.dropped_players_for_manager(db, league, manager)
+            if manager else []
+        ),
         "current_gw": cur,
         "season_last_gw": SEASON_LAST_GW,
         "season_over": cur is not None and cur >= SEASON_LAST_GW,
@@ -477,19 +485,23 @@ def _il_entry_or_403(db, league, fpl_manager_id: str, il_id: str):
 def il_place(
     request: Request, db: Session = Depends(get_db),
     fpl_manager_id: str = Form(...), injured_fpl_id: str = Form(...),
-    replacement_fpl_id: str = Form(...),
+    replacement_fpl_id: str = Form(...), start_gw: str = Form(""),
 ):
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "gw_logic_active"):
         return _locked_response("The injury list")
     if not can_act_as(request, fpl_manager_id):
         return _forbidden(request, "You can only manage your own team's injury list.")
+    cur = services.current_gameweek(db, league) or 1
     try:
         services.place_on_il(
             db, league, fpl_manager_id=fpl_manager_id,
             injured_fpl_id=_safe_int(injured_fpl_id, 1, 10_000_000, field="injured player"),
             replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
-            start_gw=services.current_gameweek(db, league) or 1,
+            # Only the "he's already been dropped" case supplies this -- when he's
+            # already on the roster, placement always starts now. Bounded at `cur`:
+            # an injury can't be claimed before it happens.
+            start_gw=_safe_int(start_gw, 1, cur, field="start GW") if start_gw.strip() else cur,
         )
     except RuleViolation as e:
         return _err(e)
@@ -559,18 +571,20 @@ def intl_place(
     request: Request, db: Session = Depends(get_db),
     fpl_manager_id: str = Form(...), away_fpl_id: str = Form(...),
     replacement_fpl_id: str = Form(...), tournament: str = Form(""),
+    start_gw: str = Form(""),
 ):
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "gw_logic_active"):
         return _locked_response("The international list")
     if not can_act_as(request, fpl_manager_id):
         return _forbidden(request, "You can only manage your own team's international list.")
+    cur = services.current_gameweek(db, league) or 1
     try:
         services.place_on_intl(
             db, league, fpl_manager_id=fpl_manager_id,
             away_fpl_id=_safe_int(away_fpl_id, 1, 10_000_000, field="away player"),
             replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
-            start_gw=services.current_gameweek(db, league) or 1,
+            start_gw=_safe_int(start_gw, 1, cur, field="start GW") if start_gw.strip() else cur,
             tournament=tournament or None,
         )
     except RuleViolation as e:

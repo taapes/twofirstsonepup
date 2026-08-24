@@ -429,9 +429,16 @@ Write tests for these. They are custom and non-obvious:
   **before** the trade fold (folding it after makes a trade of an absent player
   permanently unappliable) and guarded `if pid not in owner` so a mis-entered absence can
   never steal a rostered player. `place_on_il`/`place_on_intl` require the player to
-  actually be on the manager's effective roster for the same reason — except the admin
-  historical backfill (`require_roster=False`), which exists precisely because the
-  snapshot shows the replacement, not the injured player. **Season-end resolution**: an
+  actually be THIS manager's — `services._validate_absence_eligibility`, which checks
+  the current effective roster first and, failing that, falls back to whether the
+  manager held him at some point THIS season (the same `presence` dict
+  `_derive_keeper_status` shares) with nobody else currently holding him for real —
+  the self-service historical path (`services.dropped_players_for_manager` is the My
+  Team picker's candidate list, added 2026-08-24 for "drafted him, he got hurt, dropped
+  him for a replacement before ever recording it here"). Refuses loudly, never
+  silently, if a DIFFERENT manager now holds him. The admin historical backfill
+  (`require_roster=False`) skips this entirely — for a genuinely old season with no
+  roster history to check at all. **Season-end resolution**: an
   absence still open after GW38 must be resolved back to the roster size — Release the
   absentee (`via="waiver"`, he goes to nobody), or Return him and **name who leaves**
   (`released_player_id` on the absence row, folded as the one subtraction in

@@ -1899,29 +1899,56 @@ def unresolved_absences(db: Session, league: League, manager_id=None) -> list:
     return rows
 
 
-def _refuse_absence_for_unheld_player(
+def _validate_absence_eligibility(
     db: Session, league: League, manager: Manager, player: Player, *, what: str
-) -> None:
-    """You can only put your OWN player on an absence list.
+) -> bool:
+    """Confirms `manager` may place `player` on the given absence list. Returns True
+    when the answer came from roster HISTORY rather than the current roster — a
+    self-reported historical placement — so the caller can flag the entry as such.
 
-    Placement resolves the player globally, so without this a manager could name anyone.
-    That was survivable while an absence only granted keeper candidacy; now that it
-    grants OWNERSHIP through the overlay (see _owner_maps), an unchecked placement would
-    let a manager claim any un-rostered player as theirs — including in draft slot math.
+    Placement resolves the player globally, so without this a manager could name
+    anyone. That was survivable while an absence only granted keeper candidacy; now
+    that it grants OWNERSHIP through the overlay (see _owner_maps), an unchecked
+    placement would let a manager claim any un-rostered player as theirs — including
+    in draft slot math.
 
-    Judged on the EFFECTIVE roster, not the raw snapshot, so a player acquired by a
-    commissioner trade counts and a backfill entered after the manager already dropped
-    him in FPL still works. A league with no gameweeks yet (preseason) can't answer the
-    question, so it doesn't refuse.
+    ORDINARY case: he's on the manager's current effective roster (a commissioner
+    trade counts too, same as before) — returns False.
+
+    HISTORICAL case: he's NOT on the current roster, but `presence`
+    (_roster_presence_and_il_coverage) shows the manager held him at some point THIS
+    season — the "drafted him, he got hurt, dropped him for a replacement before ever
+    recording it" gap. Fails closed on either half of that check: never held by this
+    manager at all raises the same message as the ordinary refusal; held now by a
+    DIFFERENT manager (he was later claimed for real) raises a distinct message,
+    because silently accepting the claim and letting _owner_maps' own "only if
+    unowned" fold guard quietly no-op it would be a worse failure mode than refusing
+    up front — every other guard in this subsystem fails loud, not quiet.
+
+    A league with no gameweeks yet (preseason) can't answer either question, so it
+    doesn't refuse — same as before.
     """
     gw = latest_gameweek(db, league)
     if gw is None:
-        return
-    if player.id not in _effective_roster_pids(db, league, manager.id, gw.id):
+        return False
+    if player.id in _effective_roster_pids(db, league, manager.id, gw.id):
+        return False
+
+    presence, _il = _roster_presence_and_il_coverage(db, league, gw.number)
+    if not presence.get((manager.id, player.id)):
         raise RuleViolation(
             f"{player.name} isn't on {manager.display}'s roster, so they can't go on "
             f"the {what}"
         )
+    holder_id = effective_owner(db, league).get(player.id)
+    if holder_id is not None and holder_id != manager.id:
+        holder = db.get(Manager, holder_id)
+        raise RuleViolation(
+            f"{player.name} is currently rostered by "
+            f"{holder.display if holder else 'another manager'}, so {manager.display} "
+            f"can't put him on the {what}"
+        )
+    return True
 
 
 def place_on_il(
@@ -1939,20 +1966,24 @@ def place_on_il(
     Enforces: one active IL player per manager; replacement same position; the injured
     player is actually the manager's.
 
-    `require_roster=False` is for the commissioner's HISTORICAL backfill only. That
-    route exists precisely because the roster CANNOT confirm the placement — the whole
-    reason a backfill is needed is that FPL's snapshot shows the replacement in the
-    injured player's slot, so the injured player is off the roster by definition. Asking
-    the roster there would refuse every case the route was built for. Manager
-    self-service keeps the check.
+    `require_roster=False` is for the commissioner's HISTORICAL backfill only, and skips
+    _validate_absence_eligibility entirely — no roster-history check either, since a
+    genuinely old season's row may have none. Manager self-service (the default) runs
+    that check, which itself now accepts either the current roster OR this manager's
+    OWN roster history this season (drafted him, he got hurt, dropped him for a
+    replacement before ever recording it here) — the exact gap that used to force a
+    manager to ask the commissioner for something the site could verify itself.
     """
     manager = _resolve_manager(db, league, fpl_manager_id)
     injured = _resolve_player(db, injured_fpl_id)
     replacement = _resolve_player(db, replacement_fpl_id)
     if injured.id == replacement.id:
         raise RuleViolation("replacement must be a different player")
+    self_reported = False
     if require_roster:
-        _refuse_absence_for_unheld_player(db, league, manager, injured, what="injury list")
+        self_reported = _validate_absence_eligibility(
+            db, league, manager, injured, what="injury list"
+        )
 
     existing = (
         db.query(InjuryList)
@@ -1974,14 +2005,17 @@ def place_on_il(
         start_gw=start_gw,
         replacement_id=replacement.id,
         status="active",
+        self_reported=self_reported,
     )
     db.add(entry)
     record_audit(db, league, action="il.place",
                  summary=(f"{manager.display} placed {injured.name} "
-                          f"({injured.position}) on IL → {replacement.name} (GW{start_gw})"),
+                          f"({injured.position}) on IL → {replacement.name} (GW{start_gw})"
+                          + (" [self-reported, off-roster]" if self_reported else "")),
                  manager_ids=[manager.id],
                  details={"injured_fpl_id": injured_fpl_id,
-                          "replacement_fpl_id": replacement_fpl_id, "start_gw": start_gw})
+                          "replacement_fpl_id": replacement_fpl_id, "start_gw": start_gw,
+                          "self_reported": self_reported})
     db.commit()
     db.refresh(entry)
     return _il_to_dict(entry, injured, replacement)
@@ -2085,7 +2119,13 @@ def place_on_intl(
 ) -> dict:
     """Replace a player away at a national-team cup with a same-position replacement.
     One active entry per manager; one replacement for the whole absence. Keeper
-    eligibility is preserved while away (covered in the keeper-drop derivation)."""
+    eligibility is preserved while away (covered in the keeper-drop derivation).
+
+    Same self-reported historical path as place_on_il: if `away` isn't on the manager's
+    current roster, _validate_absence_eligibility falls back to this manager's own
+    roster history this season before refusing — the AFCON/Asia Cup twin of the "drafted
+    him, he got hurt, dropped him before recording it" gap.
+    """
     from models import InternationalList
 
     manager = _resolve_manager(db, league, fpl_manager_id)
@@ -2093,7 +2133,9 @@ def place_on_intl(
     replacement = _resolve_player(db, replacement_fpl_id)
     if away.id == replacement.id:
         raise RuleViolation("replacement must be a different player")
-    _refuse_absence_for_unheld_player(db, league, manager, away, what="international list")
+    self_reported = _validate_absence_eligibility(
+        db, league, manager, away, what="international list"
+    )
     _refuse_goalkeeper_list_move(league, away, replacement, what="international list")
     if not il_same_position(away.position, replacement.position):
         raise RuleViolation(
@@ -2114,15 +2156,18 @@ def place_on_intl(
     entry = InternationalList(
         player_id=away.id, manager_id=manager.id, start_gw=start_gw,
         replacement_id=replacement.id, tournament=tournament or None, status="active",
+        self_reported=self_reported,
     )
     db.add(entry)
     record_audit(db, league, action="intl.place",
                  summary=(f"{manager.display} placed {away.name} ({away.position}) on the "
                           f"international list → {replacement.name} (GW{start_gw}"
-                          + (f", {tournament}" if tournament else "") + ")"),
+                          + (f", {tournament}" if tournament else "") + ")"
+                          + (" [self-reported, off-roster]" if self_reported else "")),
                  manager_ids=[manager.id],
                  details={"away_fpl_id": away_fpl_id, "replacement_fpl_id": replacement_fpl_id,
-                          "start_gw": start_gw, "tournament": tournament})
+                          "start_gw": start_gw, "tournament": tournament,
+                          "self_reported": self_reported})
     db.commit()
     db.refresh(entry)
     return {"player": away.name, "replacement": replacement.name, "start_gw": start_gw}
@@ -3480,6 +3525,57 @@ def _roster_presence_and_il_coverage(db: Session, league: League, last_n: int) -
         presence.setdefault((mid, pid), set()).add(gnum)
 
     return presence, _absence_cover(db, league, last_n)
+
+
+def dropped_players_for_manager(db: Session, league: League, manager: Manager) -> list[dict]:
+    """Players this manager held at some point THIS season but no longer holds and
+    nobody else currently holds either — candidates for a self-reported historical IL
+    or international-list placement (a player drafted, hurt, and dropped for a
+    replacement before the manager ever recorded the injury here).
+
+    Built from the same `presence` dict `_derive_keeper_status` and
+    `unexplained_roster_gaps` already share, scoped to one manager, so this is a third
+    reader rather than a new query shape. A player currently held by a DIFFERENT
+    manager is excluded here too — same rule `_validate_absence_eligibility` enforces
+    at write time, so the picker never offers a choice the write path would refuse.
+
+    Returns [{"fpl_id", "name", "label", "suggested_start_gw"}], newest-dropped first,
+    for the self-service form's picker — keyed on `fpl_id` like every other self-service
+    IL/international picker, and so excludes anyone who has since left the league
+    entirely (a rare combination on top of an already-rare gap; see the still-open
+    "IL backfill form must search by player name, not FPL id" backlog item, which
+    should pick this picker up too if that ever needs closing).
+    """
+    gw = latest_gameweek(db, league)
+    if gw is None:
+        return []
+    last_n = gw.number
+    presence, _il = _roster_presence_and_il_coverage(db, league, last_n)
+    on_roster_now = _effective_roster_pids(db, league, manager.id, gw.id)
+    holder = effective_owner(db, league)
+    candidates = {}
+    for (mid, pid), gws in presence.items():
+        if mid != manager.id or pid in on_roster_now:
+            continue
+        held_by = holder.get(pid)
+        if held_by is not None and held_by != manager.id:
+            continue
+        candidates[pid] = max(gws)
+    if not candidates:
+        return []
+    out = []
+    for p in db.query(Player).filter(Player.id.in_(candidates)):
+        if p.fpl_id is None:
+            continue
+        last_held_gw = candidates[p.id]
+        out.append({
+            "fpl_id": p.fpl_id,
+            "name": p.name,
+            "label": f"{p.name} · {p.current_team}" if p.current_team else p.name,
+            "suggested_start_gw": min(last_held_gw + 1, last_n),
+        })
+    out.sort(key=lambda r: -r["suggested_start_gw"])
+    return out
 
 
 def unexplained_roster_gaps(
@@ -7398,6 +7494,18 @@ def data_health(db: Session, league: League) -> list[dict]:
     add("no absentee playing while still parked", not overdue,
         "; ".join(sorted(f"{e['manager']}/{e['player']}" for e in overdue))
         if overdue else "none")
+
+    # Self-reported historical placements — not a failure (that's the whole point of
+    # the feature), just visibility: these bypassed the current-roster check on the
+    # manager's own say-so, so a quick admin skim catches the rare bad-faith or
+    # mistaken one. Mirrors "discovery picks linked to players" below: informational,
+    # never gates anything.
+    self_rep = [
+        f"{mname.get(e.manager_id, '—')}/{pname.get(e.player_id, '—')} (GW{e.start_gw})"
+        for e in active if e.self_reported
+    ]
+    add("self-reported IL/international placements", not self_rep,
+        f"{len(self_rep)}: " + "; ".join(sorted(self_rep)) if self_rep else "none")
 
     # players on the latest roster with no keeper seed (they default to fresh)
     seeded = {pid for (pid,) in db.query(KeeperSeed.player_id).filter_by(league_id=league.id)}

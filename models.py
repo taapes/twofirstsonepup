@@ -393,6 +393,14 @@ class InjuryList(Base):
     # Drives the must-return alert: he is playing again but still off the roster.
     # See docs/DESIGN_IL_OWNERSHIP.md §6.
     last_played_gw: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # True when a MANAGER placed this entry for a player already off their roster
+    # (drafted him, he got hurt, they dropped him for a replacement before ever
+    # recording it here) rather than an admin backfill or an ordinary on-roster
+    # placement. Purely a display/audit marker -- place_on_il enforces the real
+    # guards (was he ever this manager's, is he unclaimed by anyone else now)
+    # before this is ever set; nothing downstream branches on it except the
+    # data_health visibility check and the My Team badge.
+    self_reported: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
 
 class InternationalList(Base):
@@ -434,6 +442,8 @@ class InternationalList(Base):
     # See InjuryList.last_played_gw — same field, same rule. No minimum stay here, so
     # the must-return alert fires as soon as this is set, with no eligibility gate.
     last_played_gw: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # See InjuryList.self_reported — same field, same rule.
+    self_reported: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
 
 class KeeperException(Base):
