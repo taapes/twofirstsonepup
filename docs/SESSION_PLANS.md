@@ -1515,6 +1515,330 @@ that ALSO has goalie teams on -> refused. Update the backlog entry. Full suite,
 
 ---
 
+## Item 17 — Conditional / tiered draft-pick trades
+
+**Priority:** `P1` — real, recurring league mechanic; moved up ahead of most quick-win
+items per the commissioner (2026-08-24 planning session).
+**Recommended model:** Opus 5 — schema spanning two genuinely different subject types
+(player vs. manager) + a read-path change to the single most load-bearing pick-resolution
+function + a new cup-winner-resolution helper that must correctly handle both live and
+historical-import paths + write-path validation + display changes across four templates
++ a migration.
+**Backlog entry:** "Conditional / tiered draft-pick trades".
+
+**Session prompt:**
+
+```text
+Read CLAUDE.md in full (especially the main-draft, trades, and cups sections), then this
+session's docs/BACKLOG.md entry "Conditional / tiered draft-pick trades". You are
+building a NEW feature: a draft pick trade whose round can escalate (e.g. 2nd round
+becomes 1st) if a condition is met in a named future season. This is general
+infrastructure — there is no live conditional trade needing backfill; do not invent one
+for testing beyond fixture data. The Trade model has NO existing structured condition
+columns today (only a write-only free-text `conditions` field) — you are building this
+schema from scratch, not extending something that already exists.
+
+THE THREE REAL CONDITION TYPES (confirmed with the commissioner — this league's actual
+historical conditional trades used these, not just player points):
+1. A PLAYER's season point total ("total_points").
+2. A MANAGER's league finishing position ("league_finish") — e.g. "upgrades to a 1st if
+   Kevin T finishes top 3."
+3. Whether a MANAGER won the Cup or Pup Cup that season ("cup_win" / "pup_cup_win") — a
+   boolean fact, not a threshold comparison.
+
+DECISIONS (confirmed, do not re-open):
+- Schema: condition_metric (str, one of "total_points"|"league_finish"|"cup_win"|
+  "pup_cup_win"); condition_player_id (FK players.id, nullable — set ONLY for
+  total_points); condition_manager_name (str, nullable — set ONLY for the other three
+  metrics, storing Manager.display_name text, NEVER a Manager.id FK and NEVER
+  fpl_manager_id); condition_season_year (int); condition_comparison (str, one of
+  ">"|">="|"<"|"<=" — meaningful for total_points/league_finish only, NULL/ignored for
+  the two cup metrics); condition_threshold (int, same scoping as comparison);
+  pick_round_if_met (int). Exactly one of condition_player_id/condition_manager_name must
+  be set, matching condition_metric — validate this in the write path and reject
+  otherwise.
+- WHY condition_manager_name is a plain string, not a Manager.id FK: managers has one row
+  PER MANAGER PER SEASON (multi-season design — see CLAUDE.md), and a condition entered
+  today must resolve against a FUTURE season's League row whose Manager rows don't exist
+  yet. This mirrors an EXISTING precedent already in this codebase: FuturePick.owner/
+  original_owner already store person names as plain text for the same reason, and
+  services._historical_cup_winners already resolves a stored winner name against
+  Manager.display.strip().lower() for cross-season matching. Store Manager.display_name
+  (CLAUDE.md's designated stable identity) — do not key on fpl_manager_id, which is
+  proven NOT stable across a rollover (2026-08-18 incident, documented in CLAUDE.md).
+- Evaluation timing: a condition is evaluated ONLY once condition_season_year's League row
+  has sync_locked=True — for ALL FOUR metrics uniformly, not just points. Before that, the
+  row behaves as if unconditional (base pick_round applies), regardless of any live/
+  provisional number or in-progress bracket.
+- Resolution mechanics: resolved FRESH on every read inside services.pick_ownership's
+  existing fold loop — nothing is ever written back onto pick_round. One additive branch
+  dispatching on condition_metric:
+    * total_points -> services.season_identity(db, condition_league_row,
+      [condition_player_id])[condition_player_id].total_points, compared via
+      condition_comparison/condition_threshold.
+    * league_finish -> services.get_standings(db, condition_league_row), find the row
+      where row["manager"] == condition_manager_name, compare row["rank"] via
+      condition_comparison/condition_threshold. (get_standings already applies the
+      correct adjusted rank + alphabetical tie-break — do not reimplement standings
+      logic, just consume its output.)
+    * cup_win / pup_cup_win -> a NEW helper, e.g. services._resolve_cup_winner_name(db,
+      league, cup_name) -> str | None, mirroring get_payouts's EXISTING internal
+      logic exactly: try the live bracket first (a Tournament row named "Cup"/"Pup Cup"
+      for that league; use the same _cup_final_and_third helper for Cup, or
+      _round_matches(..., round=3)[0].winner_id for Pup Cup — resolve winner_id to
+      Manager.display_name), and if no live Tournament exists, fall back to
+      services._historical_cup_winners(db, league) exactly as get_payouts already does.
+      Compare the resolved winner name for EQUALITY against condition_manager_name;
+      condition_comparison/condition_threshold are ignored for these two metrics.
+  For every row with pick_round_if_met IS NULL, behavior must be BYTE-IDENTICAL to today
+  — this is the regression to guard hardest, since pick_ownership feeds the draft board
+  for every season.
+- Write path: commissioner-only. Extend services.trade_pick and services.edit_trade with
+  the seven optional kwargs plus the metric/subject validation described above. Do NOT
+  touch the public /trade form or record_trade's pick-spec parser.
+- Display: get_draft_board, get_future_picks, and get_trades each gain optional keys on
+  their EXISTING per-pick dicts: conditional (bool), condition_status
+  ("pending"|"met"|"not_met"|None), condition_note (human string, phrased per metric —
+  e.g. "upgrades to R1 if Kevin T wins the Cup in 2027 — pending" or "...if Kevin T
+  finishes top 3 in 2027 — pending (currently 5th)"). No new response shapes.
+
+READ BEFORE WRITING: services.py — pick_ownership (the fold loop to extend), trade_pick,
+edit_trade, get_draft_board, get_future_picks, get_trades, season_identity, stats_season,
+get_standings (note: `rank` is the FINAL ADJUSTED standing with alphabetical tie-break —
+use it as-is, never sort Standing.rank directly), get_payouts (read its cup-resolution
+logic at the sites resolving recipients["cup_1"]/["pup_cup"] — this is exactly the logic
+to mirror in the new helper), _cup_final_and_third, _historical_cup_winners, get_cups.
+models.py — Trade (all fields; note there are NO uniqueness/CHECK constraints on trades
+today beyond what's specified above), FuturePick (the owner/original_owner free-text
+precedent), Manager.display/display_name, PlayerSeason.total_points, League.sync_locked,
+Tournament, TournamentMatch, SeasonHistory (cup_winner/pup_winner text fields). CLAUDE.md's
+multi-season and cups sections. templates/_board.html (the "Trade a pick" <details> panel
+— posts to /draft/{year}/trade-pick), templates/admin_corrections.html (the trade-edit
+row), templates/picks.html, templates/trades.html.
+
+BUILD:
+1. Migration: alembic revision --autogenerate for the seven nullable columns + the FK on
+   condition_player_id. Zero backfill.
+2. services._resolve_cup_winner_name(db, league, cup_name) -> str | None: live bracket
+   first, historical fallback second, exactly mirroring get_payouts's existing logic.
+3. services._condition_met(db, trade) -> bool: resolves the condition's League row by
+   season_year, returns False if not sync_locked, then dispatches on condition_metric per
+   the three branches above.
+4. services.pick_ownership: the ONE additive branch. Do not restructure the existing fold
+   or its created_at ordering.
+5. services.trade_pick / edit_trade: accept and persist the seven optional fields, with
+   the metric/subject exclusivity validation (reject if condition_metric is set but the
+   wrong subject field is populated, or neither/both are set).
+6. services.get_draft_board / get_future_picks / get_trades: add conditional /
+   condition_status / condition_note (per-metric phrasing) to each function's existing
+   per-pick dict.
+7. Templates: a collapsed-by-default "Make this pick conditional" sub-section in
+   _board.html's trade-a-pick panel — a metric dropdown toggling between a player-search
+   input (total_points) and a manager-name input (the other three), with
+   comparison/threshold fields hidden for the two cup metrics; matching fields on
+   admin_corrections.html's trade-edit row; a small "conditional" pill (with
+   condition_note as a title/tooltip) on _board.html, picks.html, and trades.html.
+8. ui.py: the /draft/{year}/trade-pick route passes the extra form fields through to
+   trade_pick only when present (all optional — omission must behave exactly as today).
+
+TESTS (tests/test_conditional_pick_trade.py, DB-backed, existing style —
+test_trade_overlay.py and test_goalie_team_periphery.py's cup-adjacent fixtures are the
+closest templates):
+- Ordinary pick trade (no condition fields) resolves identically before/after.
+- total_points: met+frozen, unmet+frozen, unresolved (live total already clears threshold
+  but season not yet frozen -> base round still applies).
+- league_finish: met+frozen (manager at/better than threshold rank), unmet+frozen,
+  unresolved, and a tie-break case confirming get_standings' existing alphabetical
+  tie-break flows through correctly.
+- cup_win/pup_cup_win: won it via a live scored bracket, didn't win it, unresolved (bracket
+  exists but final round not yet scored), and a HISTORICAL-season case resolving via
+  _historical_cup_winners' text-match fallback (no live Tournament for that league row).
+- get_draft_board/get_future_picks/get_trades surface conditional/condition_status/
+  condition_note correctly for all four metrics.
+- trade_pick/edit_trade round-trip all seven columns; reject both-subjects-set,
+  neither-subject-set, and a metric/subject mismatch.
+- A multi-row escalating deal (3+ Trade rows, same manager/threshold, different
+  condition_season_year per row) resolves each independently — no shared-state coupling.
+
+ACCEPTANCE: full DB-backed regression, green with 0 skipped (command in this file's
+header). Update docs/BACKLOG.md (status -> done). Do not commit; end with a summary,
+explicitly noting the exact helper name and location for cup-winner resolution so a
+future session extending this (e.g. adding the Pupmunity Shield as a fifth metric) can
+find and reuse it.
+```
+
+---
+
+## Item 18 — My Team "Upcoming" page: show form and total points per player
+
+**Priority:** `P3` — small, low-risk, immediate visible value.
+**Recommended model:** Haiku 4.5 / Sonnet 5 — confirmed template-only change.
+**Backlog entry:** "My Team 'Upcoming' page: show form and total points per player".
+
+**Session prompt:**
+
+```text
+Read the docs/BACKLOG.md entry "My Team 'Upcoming' page: show form and total points per
+player" — it contains the full investigation; implement its fix sketch as written.
+
+CONFIRMED (do not re-derive): services.get_upcoming_matchups already builds every
+player's dict via _player_stat_dict(p) — the same helper get_my_team uses — which
+already includes form and total_points (plus points_per_game, goals_scored, assists,
+clean_sheets, bonus, minutes, ict_index, selected_by_percent) for both my_squad and
+opp_squad, for every gameweek. templates/my_team_upcoming.html's squad(players) macro
+simply never reads those keys. NO services.py, models.py, or sync.py change is needed —
+this is a template-only change.
+
+BUILD: in templates/my_team_upcoming.html's squad() macro, add <td class="num"> cells
+for form and total_points (optionally points_per_game too), with matching header cells,
+mirroring templates/my_team.html's existing "Form"/"Pts" column pattern exactly:
+  <td class="num">{{ p.form or "—" }}</td>
+  <td class="num">{{ p.total_points if p.total_points is not none else "—" }}</td>
+Reuse the existing .num / table CSS conventions already defined for my_team.html — no
+new CSS needed if those classes are shared (confirm; add matching styles only if not).
+
+OPTIONAL, NOT REQUIRED: get_upcoming_matchups could additionally call the shared
+_rich_player_rows helper (used by get_my_team/get_my_team_in_progress) instead of the
+lower-level _player_stat_dict, to also surface the recent-points sparkline (trend) and
+keeper badges on the Upcoming page. Only do this if it's a small, contained change
+(resolving the Manager row per side, then calling _rich_player_rows) — do not let it
+expand scope beyond the core ask (form + total points visible).
+
+TESTS: no test exists today for get_upcoming_matchups or the Upcoming page's rendering.
+Add one service-level test asserting form/total_points appear in returned squad dicts
+(pins the already-correct behavior — this is not new logic, so the test's job is to
+prevent a future regression, not to prove new behavior).
+
+ACCEPTANCE: full suite, 0 skipped (command in this file's header). Manual check: run the
+dev server, view /my-team/upcoming, confirm form and total points render for both squads
+across all shown gameweeks. Update the backlog entry (status -> done). Do not commit.
+```
+
+---
+
+## Item 19 — AI enhancements epic, sub-item 1: GW review / pundit-style banter
+
+**Priority:** `P2` (epic) — this sub-item is the recommended first slice.
+**Recommended model:** Opus 5 — the app's first-ever outbound paid third-party API call,
+its first new runtime dependency in a while, a new table, and a new post-sync hook
+branch; the architectural care matters more than the line count.
+**Backlog entry:** "AI enhancements epic (Anthropic API): GW banter/review, next-GW
+preview, waiver-wire suggestions, trade analysis".
+**Scope:** sub-item 1 ONLY. Sub-items 2-5 (next-GW preview, waiver-wire, after-the-fact
+trade commentary, proposed-trade advice) are separate future sessions.
+
+**Session prompt:**
+
+```text
+Read CLAUDE.md in full (the Pull->Normalize->Store->Serve rule and the two-truths
+boundary especially), then this session's docs/BACKLOG.md entry "AI enhancements epic"
+— you are building ONLY sub-item 1 (GW review / pundit-style banter) of that epic.
+Sub-items 2-5 (next-GW preview, waiver-wire, trade commentary, proposed-trade advice)
+are explicitly OUT OF SCOPE for this session — build the shared plumbing (table,
+Anthropic client wrapper, post-sync hook wiring) generally enough that they can reuse
+it, but do not build them.
+
+DECISIONS (confirmed, do not re-open):
+- Integration: the official `anthropic` Python SDK (add to requirements.txt) — a
+  DELIBERATE exception to this repo's stated dependency-austere philosophy, taken here
+  because typed responses/retry handling are worth it for a content-generation feature.
+  Note this explicitly in your summary so it isn't mistaken for an oversight later.
+- Storage: one new table `ai_generated_content` — league_id (FK), gameweek_id (FK,
+  nullable — this sub-item always sets it), kind (str — use "gw_review" here),
+  status (str, default "ready"), content (Text), model (str, which Anthropic model
+  produced it), generated_at (DateTime(timezone=True), server_default now()).
+  UNIQUE(league_id, gameweek_id, kind). Regenerate = UPDATE the existing row in place
+  (content/model/generated_at/status), never insert a second row for the same key —
+  there's no value in keeping stale banter drafts (unlike discovery_match_suggestions's
+  "keep every candidate" pattern, which does not apply here).
+- Trigger: HYBRID. (1) Auto-generate in main.py's existing post-sync hook (the
+  `if plan == "full":` block, alongside match_discovery_picks), the first time a full
+  sync observes services.gw_finished(db, league, N) is True AND no ai_generated_content
+  row exists yet for (league_id, gameweek_id=N's row, kind="gw_review"). (2) A new admin
+  "Regenerate" button (POST /admin/ai/gw-review/{gw}, require_admin) that calls the same
+  generation function on demand and always UPDATEs. Guard the manual path with a minimum
+  time-between-regenerations (e.g. reject a regenerate within 5 minutes of the last one
+  for the same key) so repeated clicks can't runaway-spend.
+- Guardrail: a MAX_AI_CALLS_PER_GW-style constant (e.g. rules.MAX_AI_CALLS_PER_GW = 5)
+  enforced before any Messages API call — count existing rows/attempts for that
+  (league_id, gameweek_id, kind) this GW and refuse once the cap is hit, logging via the
+  existing audit pattern (record_audit or SyncLog — pick whichever the post-sync hook
+  already uses at that call site).
+- Credential: ANTHROPIC_API_KEY, read from env exactly like SYNC_AUTH_TOKEN/
+  ADMIN_PASSWORD (see auth.py/settings.py for the pattern). Add it to SECURITY.md's env
+  var list. Feature is OFF (no-op, logged, never raises) when the env var is unset —
+  same convention as the Discord webhook backlog entry's "feature-off is a no-op" rule.
+- Content sourcing: build the prompt ONLY from services.get_scoreboard,
+  services.get_standings, and GameweekPoints for the finished GW — all already computed,
+  no new query work needed. Do not invent new data-gathering beyond formatting what these
+  three already return into the prompt.
+- Persona (default, adjustable): a lighthearted, enthusiastic sports-pundit voice —
+  genuinely fun and a little cheeky, but NEVER mean-spirited about any specific manager's
+  real performance (no personal-attack humor, no piling on a last-place finish beyond
+  gentle ribbing). Reference managers by their display_name. Put the persona/system
+  prompt in ONE clearly-marked constant (e.g. services.py's top or a new small
+  ai_content.py module) so the commissioner can tune tone later without touching the
+  surrounding logic — flag this location in your summary.
+- Outbound-call safety (non-negotiable, per CLAUDE.md's inbound rule extended to
+  outbound, and the Discord entry's worked precedent): the Anthropic call must be
+  wrapped so a failure/timeout/bad response NEVER fails or blocks the sync it's attached
+  to. Catch everything, log, leave the row unset (or status="failed") for the next
+  attempt. Timeout the call reasonably (a GW review can tolerate ~30-60s, unlike a
+  webhook ping — this is not a "must return in 2s" situation, but it still must not be
+  allowed to hang the sync request indefinitely; run it as its own bounded async call).
+
+READ BEFORE WRITING: CLAUDE.md's architecture section; main.py's post-sync hook
+(the exact `if plan == "full":` block and how match_discovery_picks is wired in);
+services.gw_finished; services.get_scoreboard, get_standings; models.GameweekPoints;
+models.DiscoveryMatchSuggestion (the closest existing "idempotent generated content"
+precedent — UNIQUE constraint + status column + never-delete shape, even though this
+table's regenerate semantics differ as noted above); docs/BACKLOG.md's Discord-webhook
+entry (the outbound-call risk pattern: env-var credential, fire-and-forget, persisted
+marker, reuse existing service output); SECURITY.md's env-var list; requirements.txt.
+
+BUILD:
+1. Migration: new `ai_generated_content` table as specified above.
+2. requirements.txt: add `anthropic` (pin a version).
+3. A small module (services.py or a new ai_content.py, your call, but keep it isolated
+   from unrelated service functions) with: (a) the system/persona prompt constant,
+   (b) a function building the user-facing prompt content from get_scoreboard +
+   get_standings + GameweekPoints for a given league+GW, (c) a function calling the
+   Anthropic Messages API via the SDK with a bounded timeout, wrapped in try/except that
+   never raises, (d) a function that checks the cap, checks the existing row, calls the
+   above, and upserts ai_generated_content.
+4. Wire the auto-trigger into main.py's post-sync hook.
+5. Admin route + a small "Regenerate GW review" button/section, matching the existing
+   admin-write pattern (services function enforcing rules, RuleViolation/failure ->
+   sensible HTTP response).
+6. A read surface: minimally, render the stored content somewhere sensible (e.g. the
+   homepage or a new small section) — check with existing template conventions
+   (base.html's card idiom) for the smallest reasonable placement; this session should
+   make the content visible to managers, not just stored.
+
+TESTS (DB-backed, existing style; mock/monkeypatch the Anthropic call — no real network
+in tests, following this repo's existing "fake/monkeypatched HTTP layer" convention from
+the Discord entry's test plan):
+- Auto-trigger: a finished GW with no existing row generates one and stamps it; a second
+  full sync for the same GW does NOT call the API again (idempotency).
+- A failed/mocked-erroring API call leaves no row (or status="failed") and does not
+  raise out of the post-sync hook.
+- Manual regenerate updates the existing row in place (no duplicate row) and respects
+  the minimum-time-between-regenerations guard.
+- The per-GW call cap refuses once hit.
+- Feature-off (no ANTHROPIC_API_KEY) is a clean no-op, logged, never raises.
+- The prompt-building function's output contains the expected scoreboard/standings
+  facts (a content-shape test, not an LLM-output test).
+
+ACCEPTANCE: full DB-backed regression, green with 0 skipped. Manual/documented check:
+confirm (by inspection, not a live call, unless you have a test API key) that the
+outbound call path times out and fails safely. Update docs/BACKLOG.md — mark sub-item 1
+done inside the epic entry, leave sub-items 2-5 open. Do not commit; end with a summary
+including exactly where the persona-prompt constant lives (for easy tone tuning) and
+confirm no other sub-item's logic was accidentally started.
+```
+
+---
+
 ## Deferred — no session prompt
 
 - **Item 5b** (provisional-row architecture): **retired 2026-08-20** (was parked for
