@@ -1,4 +1,3 @@
-import asyncio
 import os
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -20,7 +19,7 @@ from api import router as v1_router
 from audit import reset_actor, set_actor
 from auth import is_admin, is_logged_in, require_admin
 from db import get_db
-from sync import LeagueIdentityError, sync_all
+from sync import LeagueIdentityError, run_sync
 from templating import templates
 from ui import router as ui_router
 
@@ -214,57 +213,13 @@ def home(request: Request, db: Session = Depends(get_db)):
 @app.post("/admin/sync", dependencies=[Depends(require_admin)])
 def admin_sync(force: bool = False):
     """Heartbeat: advance the time/GW-driven phase, then sync per the fixture-aligned
-    cadence plan (full | live | skip). `?force=1` always does a full sync (manual)."""
-    from db import SessionLocal
-    from sync import sync_fixtures, sync_gameweek_points, sync_rosters
-
-    advanced = False
-    plan = "full"
-    with SessionLocal() as db:
-        league = services.current_league(db)
-        if league:
-            advanced = services.advance_phase_if_due(db, league)
-            plan = "full" if force else services.sync_plan(db, league)
-
+    cadence plan (full | live | skip). `?force=1` always does a full sync (manual).
+    The orchestration itself lives in sync.run_sync so the admin-panel "Force sync"
+    button (session-authenticated, in ui.py) can call the identical logic."""
     try:
-        if plan == "full":
-            asyncio.run(sync_all())
-        elif plan == "live":
-            # only the GW-changing pulls while matches are live
-            async def _live():
-                await sync_rosters()
-                await sync_gameweek_points()
-                await sync_fixtures()
-
-            asyncio.run(_live())
+        return run_sync(force=force)
     except LeagueIdentityError as e:
         # The feed stopped being our league (FPL reuses league ids between
         # seasons). Nothing was written. 409 so the cron goes red rather than
         # quietly importing a stranger's league for weeks.
         raise HTTPException(status_code=409, detail=str(e)) from e
-
-    if plan in ("full", "live"):
-        # rosters just refreshed: re-flag post-draft additions and auto-return any
-        # IL / international player the manager has re-added in FPL. Skipped for a
-        # frozen season — its roster data is final and the player pool has moved on.
-        with SessionLocal() as db:
-            league = services.current_league(db)
-            if league and not league.sync_locked:
-                if plan == "full":
-                    services.flag_ineligible(db, league)
-                services.reconcile_absences(db, league)
-            if plan == "full":
-                # Deliberately OUTSIDE the sync_locked guard above. That guard is
-                # about the current league's ROSTER data being final; this reads the
-                # global player pool (which sync_players just refreshed, frozen
-                # seasons or not) against discovery picks that may live on an older
-                # league row entirely. Its relevance doesn't depend on the current
-                # season's freeze state — in fact the offseason, when everything is
-                # frozen, is exactly when September's picks start arriving in the PL.
-                # Only ever writes suggestions; never links a pick.
-                services.match_discovery_picks(db)
-    # plan == "skip": nothing to do (phase advance already ran). Note the daily
-    # "full" run calls sync_players first, so the global player pool refreshes once a
-    # day even while every season is frozen — that's what keeps promoted clubs and new
-    # signings arriving between seasons.
-    return {"ok": True, "plan": plan, "phase_advanced": advanced}

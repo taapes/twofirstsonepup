@@ -40,6 +40,18 @@
   </form>
 </div>
 
+<h2>Sync</h2>
+<div class="card" style="padding:12px;max-width:560px">
+  <p class="sub">The cron syncs every 30 minutes during the day, but only does work
+    when something's actually live or a full sync hasn't run yet today — otherwise it
+    no-ops. Use this to force a full sync right now instead of waiting (e.g. right
+    after a gameweek finishes, or if a match's stats look stale).</p>
+  <form method="post" action="/admin/sync/force"
+        onsubmit="return confirm('Force a full sync now? This pulls fresh data from FPL and can take a minute.')">
+    <button type="submit">Force sync now</button>
+  </form>
+</div>
+
 <h2>Editing Lock</h2>
 <div class="card" style="padding:12px;max-width:480px">
   <p class="sub">When locked, the public can't record picks or trades; you (logged in) still can.
@@ -82,8 +94,8 @@
   </ul>
   <p class="sub" style="margin:8px 0 0">
     {% if goalie_team_clubs >= 20 %}✓ {{ goalie_team_clubs }} clubs synced.
-    {% else %}⚠ Only {{ goalie_team_clubs }} clubs in <code>pl_teams</code> — run
-    <code>POST /admin/sync?force=1</code>, or the goalie-team picker will be empty.{% endif %}
+    {% else %}⚠ Only {{ goalie_team_clubs }} clubs in <code>pl_teams</code> — use
+    "Force sync now" below, or the goalie-team picker will be empty.{% endif %}
   </p>
   <p class="sub">This setting belongs to <em>this</em> league row and is carried forward
     at rollover. Changing it mid-draft would resize a board that already has picks in

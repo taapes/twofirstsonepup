@@ -971,3 +971,60 @@ async def sync_all(fpl_league_id: str | None = None):
     await sync_rosters(fpl_league_id=fpl_league_id)
     await sync_gameweek_points(fpl_league_id=fpl_league_id)
     await sync_trades(fpl_league_id=fpl_league_id)
+
+
+def run_sync(force: bool = False) -> dict:
+    """The shared body behind `POST /admin/sync` — advance the time/GW-driven phase,
+    then sync per the fixture-aligned cadence plan (full | live | skip); `force=True`
+    always does a full sync. Lives here, not in main.py/ui.py, so both the
+    X-Auth-Token cron route and a session-authenticated admin-panel button can call
+    the exact same orchestration without either importing the other (main.py already
+    imports ui.py, so the reverse would be circular) and without duplicating the
+    post-sync hooks below.
+
+    Raises LeagueIdentityError on a feed that no longer looks like our league — the
+    caller decides how to surface that (409 for the cron, a rendered error for the
+    button)."""
+    advanced = False
+    plan = "full"
+    with SessionLocal() as db:
+        league = services.current_league(db)
+        if league:
+            advanced = services.advance_phase_if_due(db, league)
+            plan = "full" if force else services.sync_plan(db, league)
+
+    if plan == "full":
+        asyncio.run(sync_all())
+    elif plan == "live":
+        async def _live():
+            await sync_rosters()
+            await sync_gameweek_points()
+            await sync_fixtures()
+
+        asyncio.run(_live())
+
+    if plan in ("full", "live"):
+        # rosters just refreshed: re-flag post-draft additions and auto-return any
+        # IL / international player the manager has re-added in FPL. Skipped for a
+        # frozen season — its roster data is final and the player pool has moved on.
+        with SessionLocal() as db:
+            league = services.current_league(db)
+            if league and not league.sync_locked:
+                if plan == "full":
+                    services.flag_ineligible(db, league)
+                services.reconcile_absences(db, league)
+            if plan == "full":
+                # Deliberately OUTSIDE the sync_locked guard above. That guard is
+                # about the current league's ROSTER data being final; this reads the
+                # global player pool (which sync_players just refreshed, frozen
+                # seasons or not) against discovery picks that may live on an older
+                # league row entirely. Its relevance doesn't depend on the current
+                # season's freeze state — in fact the offseason, when everything is
+                # frozen, is exactly when September's picks start arriving in the PL.
+                # Only ever writes suggestions; never links a pick.
+                services.match_discovery_picks(db)
+    # plan == "skip": nothing to do (phase advance already ran). Note the daily
+    # "full" run calls sync_players first, so the global player pool refreshes once a
+    # day even while every season is frozen — that's what keeps promoted clubs and new
+    # signings arriving between seasons.
+    return {"ok": True, "plan": plan, "phase_advanced": advanced}

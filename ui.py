@@ -647,6 +647,23 @@ def picks_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@router.post("/admin/sync/force")
+def admin_force_sync(request: Request):
+    """Session-authenticated twin of `POST /admin/sync?force=1` (that route is
+    token-gated for the cron — a logged-in commissioner's browser session can't
+    satisfy it). Calls the identical orchestration in sync.run_sync so the two
+    paths can never drift apart."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    import sync as _sync
+
+    try:
+        _sync.run_sync(force=True)
+    except _sync.LeagueIdentityError as e:
+        return _err(str(e), status_code=409)
+    return RedirectResponse("/admin/health", status_code=303)
+
+
 @router.get("/admin/health", response_class=HTMLResponse)
 def admin_health(request: Request, db: Session = Depends(get_db)):
     if not is_admin(request):
