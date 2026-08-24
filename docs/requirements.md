@@ -39,7 +39,11 @@ Waiver keepers limited to 2 (from 2025 onward)
 Traded players retain keeper history
 
 
-Dropped players lose keeper eligibility
+Dropped players keep their clock WITHIN a season: if you drop a player and
+another manager claims him off waivers, the remaining years follow the player (capped
+at 3, still labelled a waiver acquisition, so an exhausted clock means the new owner
+cannot keep him either). At the season rollover anyone not kept resets — going back
+through a draft is what grants a fresh 4.
 
 
 🔁 Transfers & Waivers

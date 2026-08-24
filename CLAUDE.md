@@ -191,7 +191,26 @@ Write tests for these. They are custom and non-obvious:
   dropped and re-acquired, which always relabels "waiver" regardless of original
   acquisition — gets only 3 (`rules.KEEPER_FRESH_WAIVER`) — track the clock per
   player. Waiver keepers capped at 2 (from 2025 on). Traded players KEEP keeper
-  history; dropped players LOSE keeper eligibility.
+  history.
+  **THE CLOCK BELONGS TO THE PLAYER, MID-SEASON.** Drop a player and whoever claims him
+  off waivers inherits his remaining years (capped at `KEEPER_FRESH_WAIVER`, still
+  labelled `waiver` so it still eats one of the two waiver slots) — an EXHAUSTED clock
+  means the claimant cannot keep him either. `_status_for` resolves the clock from three
+  sources in strict order: this manager's `KeeperSeed`, then a trade sender, then the
+  previous holder this season (recursed with `upto` = their last GW, mirroring the trade
+  path). Every step tests `is None`, never truthiness — a deliberate seed of 0 is falsy
+  and must not fall through. At the ROLLOVER anyone not kept resets: `advance_season`
+  iterates `KeeperSelection`, so a non-kept player's clock simply ends, which is the
+  rule, not an oversight — there is deliberately no carryover table.
+  **"On the GW1 roster" is only a PROXY for "drafted"** and it over-grants to a preseason
+  free-agent signing, who lands on GW1 too and collected a draft-length clock.
+  `_drafted_this_season` consults real `DraftPick` rows — but returns a `trusted` set
+  alongside, and the distinction applies ONLY to managers with at least one recorded main
+  pick that season. Seasons before 2026 predate the live draft board, and reading their
+  silence as "undrafted" would regress every historical keeper to `waiver`. A pick
+  carrying only free text (three real 26/27 ones do) is resolved against that manager's
+  own GW1 roster; an UNRESOLVED one drops its manager from `trusted`, because the pick we
+  couldn't read might be the very player being asked about.
   *Phase 1 (done):* eligibility is **derived**, not manually entered — roster
   continuity across GW snapshots determines drops (a gap not covered by the IL
   or a trade = dropped → clock resets); acquisition (draft/trade/waiver) and

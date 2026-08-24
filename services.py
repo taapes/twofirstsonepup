@@ -3639,6 +3639,139 @@ def unexplained_roster_gaps(
     return out
 
 
+def _drafted_this_season(db: Session, league: League, presence: dict) -> tuple[set, set]:
+    """(drafted, trusted) for the main draft that stocked THIS season's rosters.
+
+    `drafted` is {(manager_id, player_id)} actually selected. `trusted` is the set of
+    managers for whom that answer is COMPLETE — only for them may a caller read "not in
+    `drafted`" as "not drafted".
+
+    Why the second return value. `started_with_manager` ("on the GW1 roster") was only
+    ever a proxy for "drafted", and it over-grants: a preseason free-agent signing lands
+    on GW1 too and collects a draft-length clock. Consulting DraftPick fixes that, but
+    ONLY where the picks are actually recorded. Absence of a pick is not evidence of a
+    free-agent signing when nobody recorded any picks at all — seasons before 2026
+    predate the live draft board entirely, and treating their silence as "undrafted"
+    would regress every historical keeper to 'waiver'. So a manager is `trusted` only if
+    at least one of his main-draft picks for this season is on record.
+
+    Label-only picks. A handful of real picks carry free text and no `player_id` (three
+    in the 26/27 draft: Ruben Dias, Alex Scott, Braithwaite) because the player had no
+    `players` row when the pick was made. Those are resolved against THAT MANAGER'S OWN
+    GW1 roster — a ~15-player haystack, not the global pool — by exact normalised
+    full-name first, then a token-subset match, which is how a typed "Ruben Dias" reaches
+    a web_name of "Dias". Reuses the discovery matcher's `_match_norm`/`_match_tokens`
+    rather than adding a fourth normalisation.
+
+    An UNRESOLVED label pick removes its manager from `trusted`, deliberately: the pick
+    we couldn't read might be the very player being asked about, so the honest answer is
+    "no complete evidence" and the caller keeps the proxy. Failing the other way would
+    silently cost a genuinely drafted keeper a year.
+
+    Queried with NO `league_id` filter and bridged by PERSON — same precedent as
+    `_goalie_team_history` and `_in_progress_bridge`. A draft run before a rollover lives
+    on the outgoing row under that row's manager uuids, and FPL reissued every entry id
+    at the 26/27 rollover (overlap zero), so `display_name` leads and `fpl_manager_id` is
+    only the fallback, exactly as `_manager_bridge` does it.
+    """
+    season = league.season_year or 0
+    picks = (
+        db.query(DraftPick)
+        .filter(DraftPick.season_year == season, DraftPick.draft_type == "main")
+        .all()
+    )
+    if not picks:
+        return set(), set()
+
+    here = db.query(Manager).filter_by(league_id=league.id).all()
+    by_person = {
+        (m.display_name or "").strip().casefold(): m.id
+        for m in here if (m.display_name or "").strip()
+    }
+    by_fpl = {m.fpl_manager_id: m.id for m in here}
+    src = {
+        m.id: m for m in db.query(Manager).filter(
+            Manager.id.in_({p.manager_id for p in picks})
+        )
+    }
+
+    def _bridge(manager_id):
+        m = src.get(manager_id)
+        if m is None:
+            return None
+        person = (m.display_name or "").strip().casefold()
+        return (by_person.get(person) if person else None) or by_fpl.get(m.fpl_manager_id)
+
+    # GW1 roster per manager — the haystack a free-text label is resolved against.
+    gw1 = {}
+    for (mid, pid), gws in presence.items():
+        if 1 in gws:
+            gw1.setdefault(mid, set()).add(pid)
+    names = {
+        p.id: p for p in db.query(Player).filter(
+            Player.id.in_({pid for pids in gw1.values() for pid in pids})
+        )
+    } if gw1 else {}
+
+    drafted, has_pick, unresolved = set(), set(), set()
+    for dp in picks:
+        if dp.team_id is not None:
+            # A goalie-team pick names a CLUB, and says nothing about which PLAYERS this
+            # manager drafted — so it must not count as evidence. Counting it made a
+            # manager whose only recorded pick was his club `trusted` with an empty
+            # drafted set, and every outfielder on his GW1 roster read as an undrafted
+            # free agent (caught by test_goalie_team_keepers, which does exactly that).
+            continue
+        mid = _bridge(dp.manager_id)
+        if mid is None:
+            continue
+        has_pick.add(mid)
+        if dp.player_id is not None:
+            drafted.add((mid, dp.player_id))
+            continue
+        if not dp.player_label:
+            continue
+        hit = _resolve_label_on_roster(dp.player_label, gw1.get(mid, set()), names)
+        if hit is None:
+            unresolved.add(mid)
+        else:
+            drafted.add((mid, hit))
+    return drafted, has_pick - unresolved
+
+
+def _resolve_label_on_roster(label: str, pids: set, names: dict):
+    """The single player on `pids` that `label` names, or None if it's not exactly one.
+
+    Exact normalised full name first; failing that, a token-subset match (the player's
+    tokens are a subset of the label's, so a short web_name "Dias" is found by the typed
+    "Ruben Dias"). Ambiguity returns None rather than guessing — the caller treats that
+    as missing evidence, which is the safe direction.
+    """
+    lab_n, lab_t = _match_norm(label), _match_tokens(label)
+    if not lab_n:
+        return None
+    exact = [
+        pid for pid in pids
+        if _match_norm(getattr(names.get(pid), "full_name", "") or "") == lab_n
+        or _match_norm(getattr(names.get(pid), "name", "") or "") == lab_n
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return None
+    subset = []
+    for pid in pids:
+        p = names.get(pid)
+        if p is None:
+            continue
+        for field in (p.full_name, p.name):
+            toks = _match_tokens(field or "")
+            if toks and toks <= lab_t:
+                subset.append(pid)
+                break
+    return subset[0] if len(subset) == 1 else None
+
+
 def _derive_keeper_status(
     db: Session,
     league: League,
@@ -3784,6 +3917,38 @@ def _derive_keeper_status(
         if mid_here is not None:
             discovery_linked.add((mid_here, pid_linked))
 
+    # ---- "was he DRAFTED, or just on the GW1 roster?" -----------------------
+    # `started_with_manager` below is "on the GW1 roster", which was only ever a PROXY
+    # for "drafted". A player signed in preseason free agency AFTER the draft also
+    # lands on GW1, and the proxy hands him ("draft", 4) — a full year more than the
+    # waiver rule allows. Consulting real DraftPick rows draws the line properly.
+    #
+    # GUARDED on the season actually having recorded main-draft picks. Only 2026 onward
+    # does; everything earlier predates the live draft board, so applying the
+    # distinction there would find NO picks and regress every historical keeper to
+    # 'waiver'. When there are no picks to consult, the GW1 proxy stands unchanged.
+    drafted, drafted_trusted = _drafted_this_season(db, league, presence)
+
+    # ---- who held this player immediately before? ---------------------------
+    # The clock follows the PLAYER through a drop: if A held him and B claimed him off
+    # waivers, B inherits A's clock (capped at the waiver fresh cap by keeper_status).
+    # Built from `presence`, which is already loaded — no extra query.
+    held_at: dict = {}
+    for (mid_h, pid_h), gws_h in presence.items():
+        for g in gws_h:
+            held_at.setdefault(pid_h, {})[g] = mid_h
+
+    def _previous_holder(mid, pid, first_gw):
+        """(manager_id, their last GW) for whoever held `pid` most recently before
+        `first_gw`, or None. Skips `mid` himself — a manager who dropped and re-added
+        his own player is the `dropped` case, and his own seed is already the answer."""
+        by_gw = held_at.get(pid) or {}
+        for g in range(first_gw - 1, 0, -1):
+            other = by_gw.get(g)
+            if other is not None and other != mid:
+                return other, g
+        return None
+
     def _dropped(mid, pid, upto=None) -> bool:
         # A candidate reached purely through IL coverage (see final_candidates
         # above) may have no recorded roster presence at all — .get, not [], and
@@ -3824,6 +3989,13 @@ def _derive_keeper_status(
         trade both the clock and the label come from the SENDER — evaluated as of the
         moment he left them. Recursive so a chain carries the whole way, with `seen`
         guarding a trade-and-trade-back from looping.
+
+        The CLOCK BELONGS TO THE PLAYER, not the pair. Three sources for it, in strict
+        precedence order — a commissioner seed for this manager, then a trade sender,
+        then whoever last held him before this manager claimed him off waivers. Each is
+        consulted only if the one before it said nothing, and `is None` is the test
+        every time: a deliberate seed of 0 ("maxed out, cannot be kept") is falsy and
+        must not fall through to a later source that would hand the years back.
         """
         key = (mid, pid, upto)
         if key in memo:
@@ -3838,9 +4010,38 @@ def _derive_keeper_status(
             inherited = s_acq
             if carried is None:
                 carried = s_years
+        my_gws = presence.get((mid, pid), set())
+        # Dropped by someone else and claimed here: inherit their clock. Evaluated with
+        # `upto` = their last gameweek, exactly as the trade path does — asked about
+        # their FULL tenure their empty tail after the drop reads as a drop of their
+        # own, and every carry would collapse to the waiver cap instead of the real
+        # number. keeper_status applies min(prev, KEEPER_FRESH_WAIVER) on top, so an
+        # exhausted clock arrives as 0 and the claimant simply cannot keep him.
+        if carried is None and my_gws and (mid, pid) not in seen:
+            prior = _previous_holder(mid, pid, min(my_gws))
+            if prior is not None:
+                carried = _status_for(
+                    prior[0], pid, prior[1], seen + ((mid, pid),)
+                )[1]
+        # "On the GW1 roster" is only a PROXY for "drafted", and it over-grants to a
+        # preseason free-agent signing. Where the season's picks are actually recorded
+        # (see _drafted_this_season), require the pick; elsewhere the proxy stands.
+        #
+        # ONLY refines the no-seed case. On GW1 WITH a seed already means "kept", not
+        # "drafted" — and a kept player has no DraftPick row, because he never went
+        # through the draft. Without this clause every keeper in the league derives as
+        # a waiver pickup: 60 of 150 players on the live 26/27 rosters flipped, which
+        # would also blow the =<2 waiver-keeper cap for everyone.
+        started = 1 in my_gws
+        if (
+            started
+            and seed_remaining.get((mid, pid)) is None
+            and mid in drafted_trusted
+        ):
+            started = (mid, pid) in drafted
         was_dropped = _dropped(mid, pid, upto)
         memo[key] = keeper_status(
-            1 in presence.get((mid, pid), set()),   # started_with_manager (on GW1 roster)
+            started,
             (mid, pid) in traded_in,
             was_dropped,
             carried,
