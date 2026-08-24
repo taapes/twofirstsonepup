@@ -252,8 +252,67 @@ FPL's eyes). A general fix likely wants to solve both through the same mechanism
 ### Keeper years must survive a drop — the clock belongs to the player, not the owner
 
 **Priority:** `P2` — after the rollover; a full season of runway.
-**Status:** `open` — rule change, decided 2026-08-15. **No known player is affected for
-the 2026 draft**, so this is not draft-blocking.
+**Status:** `done 2026-08-24`. Rule decided 2026-08-15; scope settled 2026-08-24 and it
+collapsed most of the planned work.
+
+**The scope call that shrank it.** The rule applies **MID-SEASON ONLY** — at the rollover
+anyone not kept resets, which is exactly what `advance_season` already does by iterating
+`KeeperSelection`. So the "fix sketch" below is superseded: there is **no player-level
+ledger table, no `advance_season` change, no migration, and no backfill**. `KeeperSeed`
+keeps its per-manager key untouched (`test_keeper_override.py:96` still passes unedited).
+
+**What was built**, all inside `_derive_keeper_status`:
+- `_status_for` resolves the clock from three sources in strict order — this manager's
+  `KeeperSeed`, then a trade sender, then **the previous holder this season**, recursed
+  with `upto` = their last gameweek and guarded by the existing `seen` tuple. Every step
+  tests `is None`, never truthiness: a deliberate seed of 0 is falsy and must not fall
+  through to a source that hands the years back.
+- A seed-only fallback was considered and rejected: it misses a prior holder who arrived
+  by TRADE (clock 2, no seed of his own), who would have passed on a fresh 3.
+- `rules.keeper_status` needed **no change**, exactly as the sketch predicted — its
+  `dropped or (not started and not traded_in)` branch already honours a non-None `prev`
+  and already applies `min(prev, KEEPER_FRESH_WAIVER)`. An exhausted clock arrives as 0,
+  and `keeper_eligible(0)` is already False, so that case worked for free.
+- `_drafted_this_season` closes the "on the GW1 roster is only a PROXY for drafted" edge
+  case the entry flagged: a preseason free-agent signing lands on GW1 and used to collect
+  a draft-length clock. It returns a `trusted` set alongside the drafted pairs, and the
+  distinction applies only to managers with at least one recorded main pick that season —
+  seasons before 2026 have none, and reading their silence as "undrafted" would regress
+  every historical keeper to `waiver`.
+- Free-text picks (three real 26/27 ones — Ruben Dias, Alex Scott, Braithwaite — carry
+  `player_label` and no `player_id`) resolve against that manager's own GW1 roster via the
+  discovery matcher's `_match_norm`/`_match_tokens`. An unresolved one drops its manager
+  from `trusted`, because the pick we couldn't read might be the player being asked about.
+
+**Two errors caught before commit, both worth recording.** (1) A goalie-team pick made
+its manager count as "picks on record" while naming no players, so a manager whose only
+recorded pick was his club had every outfielder read as an undrafted free agent — caught
+by `test_goalie_team_keepers`. A club pick is now skipped as evidence entirely. (2) The
+first version applied the drafted distinction to ALL GW1 players, which reclassified
+**60 of the 150 live 26/27 roster players** from `draft` to `waiver` — because a KEPT
+player holds a GW1 slot with no `DraftPick` row. That would also have blown the ≤2
+waiver-keeper cap league-wide. The distinction now refines only the NO-SEED case: on GW1
+with a seed already means "kept", which is not the same question. Caught by the read-only
+production diff, not by any test — worth keeping that step in the recipe.
+
+**Live effect, measured read-only against production:** 18 of 150 change, all
+`("draft", 4)` → `("waiver", 3)`, all verified as genuine preseason free-agent signings
+(neither in `draft_picks` nor holding a seed). Nine of ten managers are `trusted`; Tucker
+is not, because his "Braithwaite" pick is unresolvable — no such player exists in
+`players` at all, which is exactly why the pick is free text — so his whole roster keeps
+the proxy and none of his players moved. The fail-safe behaving as designed.
+
+Tests: `tests/test_keeper_clock_follows_player.py` (17). Four guards mutation-tested —
+the previous-holder fallback, the `is None` check, the per-manager evidence guard, and
+the club-pick exclusion.
+**One honest negative:** the `upto` cutoff on the inherited clock is NOT observable today
+and no test pins it — the waiver cap flattens any difference (`min(4,3)` and `min(3,3)`
+are both 3). It is kept because it asks the semantically right question and mirrors the
+trade path, so it stays correct if the cap ever moves; it is defensive, not load-bearing.
+
+None of the tests this entry predicted would need rewriting actually did — they pin
+`rules.keeper_status`, which is unchanged. `test_trade_overlay.py:386` (`seeds == []`
+after a rollover) passing untouched is a useful signal the no-table scope is right.
 
 **The rule.** Keeper years hold even when a player is dropped and picked back up on
 waivers/FA — including by a *different* manager. If Scott dropped Haaland at the end of

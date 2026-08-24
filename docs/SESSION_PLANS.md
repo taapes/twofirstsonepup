@@ -1125,7 +1125,35 @@ docs/BACKLOG.md and CLAUDE.md. Do not commit; end with a summary.
 
 ---
 
-## Item 7 — Keeper years survive a drop (the clock belongs to the player)
+## Item 7 — Keeper years survive a drop (the clock belongs to the player) — **DONE 2026-08-24**
+
+**Outcome:** built, uncommitted for review. **The scope collapsed on the day**: the
+commissioner confirmed the rule is MID-SEASON only — at the rollover anyone not kept
+resets, which `advance_season` already does. So build items 1 and 2 of the prompt below
+(the `keeper_clock_carryover` table and the rollover carry) were **not built**, and there
+is no migration and no backfill. Item 3's mechanism changed from a stored ledger to a
+recursive lookup of the previous holder — which also covers a case the ledger would have
+missed, a prior holder who arrived by trade and so had no seed of his own.
+
+Items 4 (drafted vs. preseason FA) and 5-7 were built as written. `rules.keeper_status`
+needed no change, as predicted. Two things the prompt didn't anticipate, both found by
+reading production: three real 26/27 main picks carry only a free-text `player_label`
+(so a `player_id`-keyed drafted-set would have docked them a year), and the
+"has recorded picks" guard is better applied **per manager** than per season — an
+unresolvable label pick removes only its own manager from the trusted set.
+
+**None of the six pinned tests needed rewriting.** They pin `rules.keeper_status`, which
+is untouched; `test_keeper_override.py:96` (per-manager seed keying) and
+`test_trade_overlay.py:386` (`seeds == []` after a rollover) both pass unedited, the
+latter being a useful signal the no-table scope is right. New coverage lives in
+`tests/test_keeper_clock_follows_player.py` (17 cases).
+
+**The drafted distinction must refine ONLY the no-seed case** — a kept player holds a GW1
+slot with no `DraftPick` row, so applying it to every GW1 player reclassified 60 of 150
+live roster players from `draft` to `waiver`. Caught by the read-only production diff,
+not by the suite. Keep that check in the recipe for anything touching keeper derivation:
+derive against prod before and after, and diff.
+
 
 **Priority:** season runway — next matters for summer 2027 keeper selections;
 `set_keeper_override` covers any known case in the interim. Run after Items 4a and
