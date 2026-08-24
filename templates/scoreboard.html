@@ -1,19 +1,107 @@
 {% extends "base.html" %}
 {% block title %}Scoreboard{% endblock %}
+{% macro remaining_list(r) -%}
+{% if r and r.remaining_players %}
+<details style="margin-top:2px"><summary class="sub">remaining players</summary>
+  <ul style="margin:4px 0 0 16px;padding:0">
+    {% for p in r.remaining_players %}
+    <li class="sub">{{ p.name }} ({{ p.position }}){% if p.kickoff_time %} — kicks off {{ p.kickoff_time.strftime('%a %H:%M') }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}
+{%- endmacro %}
 {% block content %}
 <h1>Scoreboard{% if board.gameweek %} <span class="tag">GW{{ board.gameweek }}</span>{% endif %}</h1>
 {% if board.matches %}
-<p class="sub">Head-to-head matchups for the gameweek (live points; updates as the sync runs).</p>
+<p class="sub">
+  Head-to-head matchups for the gameweek.
+  {% if board.synced_at %}
+    Points as of
+    {% if board.synced_at.points_synced_at %}<strong>{{ board.synced_at.points_synced_at.strftime('%H:%M') }} UTC</strong>{% else %}<strong>never</strong>{% endif %}
+    · Fixtures as of
+    {% if board.synced_at.fixtures_synced_at %}<strong>{{ board.synced_at.fixtures_synced_at.strftime('%H:%M') }} UTC</strong>{% else %}<strong>never</strong>{% endif %}
+  {% endif %}
+  · <a href="?{% if board.gameweek %}gw={{ board.gameweek }}{% endif %}">Refresh</a>
+</p>
+
+{% if board.fixtures and board.fixtures.fixtures %}
+{% set c = board.fixtures.counts %}
+{% set pct = ((c.finished / c.total * 100) | round(0, 'floor')) if c.total else 0 %}
+<div class="card" style="padding:8px 12px;margin-bottom:12px">
+  <div class="sub">{{ c.finished }} of {{ c.total }} PL fixtures finished this gameweek
+    {% if c.in_progress %}· {{ c.in_progress }} in progress{% endif %}</div>
+  <div style="background:#1c2030;border-radius:4px;height:6px;margin-top:6px;overflow:hidden">
+    <div style="background:var(--accent);height:100%;width:{{ pct }}%"></div>
+  </div>
+
+  {% set to_come = board.fixtures.fixtures | rejectattr("status", "equalto", "finished") | list %}
+  {% set done = board.fixtures.fixtures | selectattr("status", "equalto", "finished") | list %}
+
+  {% if to_come %}
+  <table style="margin-top:10px">
+    <thead><tr><th>Home</th><th class="num">Score</th><th>Away</th><th>Kickoff</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for f in to_come %}
+      <tr>
+        <td>{{ f.home or "—" }}</td>
+        <td class="num">{{ f.home_score if f.home_score is not none else "—" }} – {{ f.away_score if f.away_score is not none else "—" }}</td>
+        <td>{{ f.away or "—" }}</td>
+        <td class="sub">{{ f.kickoff_time.strftime('%a %H:%M') if f.kickoff_time else "—" }}</td>
+        <td class="sub">
+          {% if f.status == "in_progress" %}<span class="pill">in progress{% if f.minutes %} · {{ f.minutes }}'{% endif %}</span>
+          {% else %}not started{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if done %}
+  <details style="margin-top:8px">
+    <summary class="sub">{{ done|length }} finished fixture{{ "s" if done|length != 1 }}</summary>
+    <table style="margin-top:8px">
+      <thead><tr><th>Home</th><th class="num">Score</th><th>Away</th><th>Kickoff</th></tr></thead>
+      <tbody>
+        {% for f in done %}
+        <tr>
+          <td>{{ f.home or "—" }}</td>
+          <td class="num">{{ f.home_score if f.home_score is not none else "—" }} – {{ f.away_score if f.away_score is not none else "—" }}</td>
+          <td>{{ f.away or "—" }}</td>
+          <td class="sub">{{ f.kickoff_time.strftime('%a %H:%M') if f.kickoff_time else "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="card">
   <table>
-    <thead><tr><th>Home</th><th class="num">Score</th><th>Away</th><th></th></tr></thead>
+    <thead><tr><th>Home</th><th class="num">Score</th><th>Away</th><th>H2H scoring</th></tr></thead>
     <tbody>
       {% for m in board.matches %}
       <tr>
-        <td>{{ m.home }}{% if m.leader == m.home %} ▲{% endif %}</td>
-        <td class="num">{{ m.home_score if m.home_score is not none else "—" }} – {{ m.away_score if m.away_score is not none else "—" }}</td>
-        <td>{{ m.away }}{% if m.leader == m.away %} ▲{% endif %}</td>
-        <td class="sub">{% if m.finished %}final{% else %}live{% endif %}</td>
+        <td>
+          {{ m.home }}{% if m.leader == m.home %} ▲{% endif %}
+          {% if m.home_remaining %}<br><span class="sub" title="{% for pos, b in m.home_remaining.by_position.items() %}{{ pos }} {{ b.remaining }}/{{ b.total }} {% endfor %}">{{ m.home_remaining.remaining }} of {{ m.home_remaining.total }} left to play</span>{% endif %}
+          {% if m.home_playing_now %}<br>{% for name in m.home_playing_now %}<span class="pill">{{ name }}</span> {% endfor %}{% endif %}
+          {{ remaining_list(m.home_remaining) }}
+        </td>
+        <td class="num">
+          {{ m.home_score if m.home_score is not none else "—" }} – {{ m.away_score if m.away_score is not none else "—" }}
+          {% if m.closest %}<br><span class="pill" title="Smallest margin among matches still in progress">closest match</span>{% endif %}
+        </td>
+        <td>
+          {{ m.away }}{% if m.leader == m.away %} ▲{% endif %}
+          {% if m.away_remaining %}<br><span class="sub" title="{% for pos, b in m.away_remaining.by_position.items() %}{{ pos }} {{ b.remaining }}/{{ b.total }} {% endfor %}">{{ m.away_remaining.remaining }} of {{ m.away_remaining.total }} left to play</span>{% endif %}
+          {% if m.away_playing_now %}<br>{% for name in m.away_playing_now %}<span class="pill">{{ name }}</span> {% endfor %}{% endif %}
+          {{ remaining_list(m.away_remaining) }}
+        </td>
+        <td class="sub">{% if m.finished %}finalized{% else %}in progress{% endif %}</td>
       </tr>
       {% endfor %}
     </tbody>

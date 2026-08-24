@@ -262,6 +262,12 @@ class Fixture(Base):
     home_difficulty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     away_difficulty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     finished: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    # Live-match state, from the same classic feed -- see rules.fixture_status.
+    started: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    finished_provisional: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class Roster(Base):

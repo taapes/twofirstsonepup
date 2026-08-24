@@ -199,6 +199,22 @@ def decide_sync(*, full_today: bool, live_fixture: bool, gw_starts_today: bool) 
     return "skip"
 
 
+def fixture_status(fx) -> str:
+    """A real-life PL fixture's state: 'not_started' | 'in_progress' | 'finished'.
+
+    `fx.finished` wins outright. Otherwise `fx.started` decides — a plain bool from
+    the classic FPL feed's own live state, not derived from `kickoff_time` (a
+    delayed or postponed match would make a kickoff-time heuristic wrong in either
+    direction). `started` is NULL for any row synced before this field existed;
+    treat that the same as False rather than raising, so a pre-migration fixture
+    just reads as not-yet-started instead of breaking every caller."""
+    if fx.finished:
+        return "finished"
+    if fx.started:
+        return "in_progress"
+    return "not_started"
+
+
 # Anti-tanking (across gameweeks): a manager is flagged when, for >= MIN_WEEKS
 # consecutive gameweeks, each of those gameweeks has >= MIN_ZERO_PLAYERS rostered
 # players (the entire 15-man squad, not just the XI) who recorded 0 real-match

@@ -62,6 +62,7 @@ from rules import (
     compute_payouts,
     current_tanking_streak,
     decide_sync,
+    fixture_status,
     keepers_revealed as _keepers_revealed_rule,
     next_phase,
     phase_features,
@@ -297,24 +298,33 @@ def waiver_window(db: Session, league: League) -> dict | None:
 
 def get_scoreboard(db: Session, league: League, gw_number: int | None = None) -> dict:
     """Current-GW H2H scoreboard: each matchup with live scores (from gameweek_points,
-    falling back to the match's stored points) and whether it's finished."""
+    falling back to the match's stored points) and whether it's finished.
+
+    `finished` is `Match.finished` — H2H scoring-lock, sourced verbatim from FPL's
+    Draft API for that pairing. It is NOT a real-match concept and must never be
+    labelled "live"/"final" in a template; that word belongs to `fixtures`/
+    `home_remaining`/`away_remaining` below, which are about actual PL matches.
+    """
     gw_number = gw_number or current_gameweek(db, league)
     if gw_number is None:
-        return {"gameweek": None, "matches": []}
+        return {"gameweek": None, "matches": [], "fixtures": None, "synced_at": None}
     gw = (
         db.query(Gameweek).filter_by(league_id=league.id, number=gw_number).one_or_none()
     )
     if not gw:
-        return {"gameweek": gw_number, "matches": []}
+        return {"gameweek": gw_number, "matches": [], "fixtures": None, "synced_at": None}
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
     live = {
         gp.manager_id: gp.total_points
         for gp in db.query(GameweekPoints).filter_by(gameweek_id=gw.id)
     }
+    remaining = players_remaining_by_manager(db, league, gw_number)
     matches = []
     for mt in db.query(Match).filter_by(league_id=league.id, gameweek_id=gw.id):
         hs = live.get(mt.home_manager_id, mt.home_points)
         as_ = live.get(mt.away_manager_id, mt.away_points)
+        home_r = remaining.get(mt.home_manager_id)
+        away_r = remaining.get(mt.away_manager_id)
         matches.append({
             "home": names.get(mt.home_manager_id),
             "away": names.get(mt.away_manager_id),
@@ -322,9 +332,33 @@ def get_scoreboard(db: Session, league: League, gw_number: int | None = None) ->
             "finished": bool(mt.finished),
             "leader": (names.get(mt.home_manager_id) if (hs or 0) > (as_ or 0)
                        else names.get(mt.away_manager_id) if (as_ or 0) > (hs or 0) else None),
+            "home_remaining": home_r,
+            "away_remaining": away_r,
+            "home_playing_now": (home_r or {}).get("playing_now", []),
+            "away_playing_now": (away_r or {}).get("playing_now", []),
         })
     matches.sort(key=lambda x: (x["home"] or ""))
-    return {"gameweek": gw_number, "matches": matches}
+    # "Closest match": the smallest score margin among matches still in progress —
+    # a match FPL has already finalized isn't a "live impact" fact worth flagging.
+    live_margins = [
+        abs(m["home_score"] - m["away_score"])
+        for m in matches
+        if not m["finished"] and m["home_score"] is not None and m["away_score"] is not None
+    ]
+    closest_margin = min(live_margins) if live_margins else None
+    for m in matches:
+        m["closest"] = (
+            closest_margin is not None
+            and not m["finished"]
+            and m["home_score"] is not None and m["away_score"] is not None
+            and abs(m["home_score"] - m["away_score"]) == closest_margin
+        )
+    return {
+        "gameweek": gw_number,
+        "matches": matches,
+        "fixtures": gw_fixture_progress(db, league, gw_number),
+        "synced_at": scoreboard_freshness(db),
+    }
 
 
 def gw_finished(db: Session, league: League, number: int) -> bool:
@@ -1477,6 +1511,154 @@ def _season_by_fpl_id(db: Session, league: League) -> dict:
     }
 
 
+def gw_fixture_progress(db: Session, league: League, gw_number: int) -> dict:
+    """Real-life PL fixtures for `gw_number`: the per-fixture list (sorted by
+    kickoff) plus aggregate counts. `status` is per-fixture, from `rules.
+    fixture_status` — this is the accurate, per-match answer `Match.finished`
+    (an H2H scoring-lock flag, unrelated to any real match) can't give."""
+    fixtures = (
+        db.query(Fixture)
+        .filter(Fixture.league_id == league.id, Fixture.event == gw_number)
+        .order_by(Fixture.kickoff_time)
+        .all()
+    )
+    rows = [
+        {
+            "home": fx.home_team,
+            "away": fx.away_team,
+            "kickoff_time": fx.kickoff_time,
+            "status": fixture_status(fx),
+            "home_score": fx.home_score,
+            "away_score": fx.away_score,
+            "minutes": fx.minutes,
+        }
+        for fx in fixtures
+    ]
+    counts = {"total": len(rows), "finished": 0, "in_progress": 0, "not_started": 0}
+    for r in rows:
+        counts[r["status"]] += 1
+    return {"fixtures": rows, "counts": counts}
+
+
+_STATUS_ORDER = {"not_started": 0, "in_progress": 1, "finished": 2}
+
+
+def _club_status_by_gw(db: Session, league: League, gw_number: int) -> dict:
+    """club short-name -> 'not_started'|'in_progress'|'finished' for `gw_number`.
+
+    A double-GW club (two Fixture rows the same event) collapses to the EARLIEST
+    non-finished status — one leg finished and one not still reads as whichever
+    of in_progress/not_started applies, never silently 'finished', because a
+    player from that club still has a scoring opportunity. A club with NO fixture
+    that GW (a blank) is simply absent from this dict — that's a different
+    question (see `_gw_fixture_teams`), not this function's job to answer."""
+    by_club: dict = {}
+    for fx in (
+        db.query(Fixture)
+        .filter(Fixture.league_id == league.id, Fixture.event == gw_number)
+    ):
+        status = fixture_status(fx)
+        for club in (fx.home_team, fx.away_team):
+            if club is None:
+                continue
+            current = by_club.get(club)
+            if current is None or _STATUS_ORDER[status] < _STATUS_ORDER[current]:
+                by_club[club] = status
+    return by_club
+
+
+def _club_next_kickoff_by_gw(db: Session, league: League, gw_number: int) -> dict:
+    """club short-name -> kickoff_time of its EARLIEST not-yet-finished fixture
+    this GW (skipping any fixture with no known kickoff time). Absent from the
+    dict if every fixture for that club this GW is already finished, or has no
+    recorded kickoff — feeds the "kicks off HH:MM" detail for a remaining
+    player who hasn't started yet; an already-in-progress player is shown via
+    `playing_now` instead, where a kickoff time is no longer the interesting
+    fact."""
+    by_club: dict = {}
+    for fx in (
+        db.query(Fixture)
+        .filter(Fixture.league_id == league.id, Fixture.event == gw_number)
+    ):
+        if fx.finished or fx.kickoff_time is None:
+            continue
+        for club in (fx.home_team, fx.away_team):
+            if club is None:
+                continue
+            current = by_club.get(club)
+            if current is None or fx.kickoff_time < current:
+                by_club[club] = fx.kickoff_time
+    return by_club
+
+
+def players_remaining_by_manager(db: Session, league: League, gw_number: int) -> dict:
+    """manager_id -> {"total", "remaining", "in_progress", "by_position",
+    "playing_now", "remaining_players"} for a gameweek's STARTING XI only —
+    bench doesn't score in this format, matching the starter filter
+    `_tanking_counts_by_manager` already uses. A player whose club has NO
+    fixture that GW (a blank) is excluded from both `total` and `remaining`
+    entirely — he isn't "done," he's simply not counted, so a blank-GW player
+    can never make a manager look further along than they are. A double-GW
+    player with at least one leg still unfinished counts as remaining
+    (`_club_status_by_gw` already resolves the per-club status this way).
+    `remaining_players` lists each not-yet-started remaining player's name and
+    upcoming kickoff time, sorted soonest first — an in-progress player is
+    already covered by `playing_now` and has no useful "kicks off at" to show."""
+    gw = db.query(Gameweek).filter_by(league_id=league.id, number=gw_number).one_or_none()
+    if not gw:
+        return {}
+    season = _season_by_fpl_id(db, league)
+    club_status = _club_status_by_gw(db, league, gw_number)
+    next_kickoff = _club_next_kickoff_by_gw(db, league, gw_number)
+    out: dict = {}
+    for gp in db.query(GameweekPoints).filter_by(gameweek_id=gw.id):
+        buckets = {
+            pos: {"total": 0, "remaining": 0, "in_progress": 0}
+            for pos in ("GKP", "DEF", "MID", "FWD")
+        }
+        total = remaining = in_progress = 0
+        playing_now = []
+        remaining_players = []
+        for entry in gp.player_points or []:
+            if not entry.get("is_starting"):
+                continue
+            ps = season.get(entry.get("fpl_id"))
+            if ps is None:
+                continue
+            status = club_status.get(ps.current_team)
+            if status is None:  # blank GW for this club — excluded entirely
+                continue
+            pos = (ps.position or "").upper() or "FWD"
+            bucket = buckets.setdefault(pos, {"total": 0, "remaining": 0, "in_progress": 0})
+            total += 1
+            bucket["total"] += 1
+            if status != "finished":
+                remaining += 1
+                bucket["remaining"] += 1
+            if status == "in_progress":
+                in_progress += 1
+                bucket["in_progress"] += 1
+                playing_now.append(ps.name)
+            elif status == "not_started":
+                remaining_players.append({
+                    "name": ps.name,
+                    "position": pos,
+                    "kickoff_time": next_kickoff.get(ps.current_team),
+                })
+        remaining_players.sort(
+            key=lambda p: (p["kickoff_time"] is None, p["kickoff_time"])
+        )
+        out[gp.manager_id] = {
+            "total": total,
+            "remaining": remaining,
+            "in_progress": in_progress,
+            "by_position": buckets,
+            "playing_now": playing_now,
+            "remaining_players": remaining_players,
+        }
+    return out
+
+
 def _tanking_counts_by_manager(db: Session, league: League) -> dict:
     """manager_id -> {"manager": Manager, "counts": {gw_number: zero_minute_count}}.
 
@@ -2279,6 +2461,29 @@ def player_pool_freshness(db: Session) -> dict:
         "notes": last.notes if last else None,
         "live": live,
         "historical": total - live,
+    }
+
+
+def scoreboard_freshness(db: Session) -> dict:
+    """When gameweek points and real-life PL fixtures were each last successfully
+    synced — the honest 'as of' timestamp for the Scores page. Two separate sync
+    sub-tasks, so they can legitimately drift out of step; show both rather than
+    picking one and implying more freshness than the other actually has."""
+    from models import SyncLog
+
+    def _last(kind):
+        return (
+            db.query(SyncLog)
+            .filter(SyncLog.kind == kind, SyncLog.ok.is_(True))
+            .order_by(SyncLog.started_at.desc())
+            .first()
+        )
+
+    points = _last("gameweek_points")
+    fixtures = _last("fixtures")
+    return {
+        "points_synced_at": points.started_at if points else None,
+        "fixtures_synced_at": fixtures.started_at if fixtures else None,
     }
 
 

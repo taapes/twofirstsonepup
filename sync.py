@@ -451,6 +451,11 @@ async def sync_fixtures(fpl_league_id: str | None = None):
                     "home_difficulty": f.get("team_h_difficulty"),
                     "away_difficulty": f.get("team_a_difficulty"),
                     "finished": bool(f.get("finished")),
+                    "started": f.get("started"),
+                    "finished_provisional": f.get("finished_provisional"),
+                    "home_score": f.get("team_h_score"),
+                    "away_score": f.get("team_a_score"),
+                    "minutes": f.get("minutes"),
                 },
             )
 
