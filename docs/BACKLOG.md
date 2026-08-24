@@ -35,8 +35,9 @@ plans + copy-paste session prompts live in **`docs/SESSION_PLANS.md`**.
 6. ~~**Item 6** — IL ownership design session, Item 6b (ownership fold), Item 6c
    (must-return alert)~~ — **all done**, shipped 2026-08-20/21 (`37f7f2f`). See
    `docs/DESIGN_IL_OWNERSHIP.md` and the backlog entry above.
-7. **Item 7** — keeper years survive a drop (rules decided: frozen while unowned;
-   preseason FA carries; only a draft resets) — Opus 5
+7. ~~**Item 7** — keeper years survive a drop~~ — **done 2026-08-24**. Scope shrank on
+   the day: the rule is mid-season only, so no ledger table, no rollover change, no
+   migration. See the entry below.
 8. **Items 8-16** — small fixes and tooling, any idle session — Haiku/Sonnet
 
 **Open, added during the 5a work and not yet in `SESSION_PLANS.md`:**
