@@ -335,3 +335,48 @@ def test_a_club_drafted_with_matching_season_year_resolves_to_owner(test_session
     _draft_club(test_session, lg, mgrs["A"], 3, season=2026)
     owner = services.goalie_team_owner(test_session, lg)
     assert owner[clubs["ARS"].id] == "1"
+
+
+# ---- ownership of an ineligible player must be VISIBLE ----------------------
+# Add/drops happen in the FPL app, so nothing here can block the pickup. The rule's
+# only teeth are a rejected keeper submission months later, by which point the manager
+# has already paid to acquire him. These two surfaces are the whole warning.
+
+def test_rostering_an_ineligible_player_raises_a_flagged_action(test_session):
+    lg, mgrs, _clubs, gws = _seed(test_session, mode="off")
+    drafted = _player(test_session, lg, gws, "Drafted", "MID", owner=mgrs["A"])
+    _snapshot(test_session, lg, [drafted])
+    # signed after the draft, then picked up by A in the FPL app
+    _player(test_session, lg, gws, "Late Arrival", "FWD", owner=mgrs["A"])
+    services.flag_ineligible(test_session, lg)
+
+    acts = services.flagged_actions(test_session, lg)
+    inelig = [a for a in acts if a["category"] == "Ineligible player"]
+    assert len(inelig) == 1, acts
+    assert inelig[0]["manager"] == "A"
+    assert "Late Arrival" in inelig[0]["detail"]
+
+
+def test_an_unrostered_ineligible_player_raises_no_flagged_action(test_session):
+    """The homepage report already lists the PLAYER. This surface is about ownership,
+    so an unowned post-draft arrival must not nag every manager."""
+    lg, mgrs, _clubs, gws = _seed(test_session, mode="off")
+    drafted = _player(test_session, lg, gws, "Drafted", "MID", owner=mgrs["A"])
+    _snapshot(test_session, lg, [drafted])
+    _player(test_session, lg, gws, "Free Agent", "FWD")  # nobody owns him
+    services.flag_ineligible(test_session, lg)
+
+    acts = services.flagged_actions(test_session, lg)
+    assert [a for a in acts if a["category"] == "Ineligible player"] == []
+
+
+def test_my_team_marks_the_ineligible_player_and_only_him(test_session):
+    lg, mgrs, _clubs, gws = _seed(test_session, mode="off")
+    drafted = _player(test_session, lg, gws, "Drafted", "MID", owner=mgrs["A"])
+    _snapshot(test_session, lg, [drafted])
+    _player(test_session, lg, gws, "Late Arrival", "FWD", owner=mgrs["A"])
+    services.flag_ineligible(test_session, lg)
+
+    team = services.get_my_team(test_session, lg, mgrs["A"].fpl_manager_id)
+    marked = {p["name"]: p["ineligible"] for p in team["players"]}
+    assert marked == {"Drafted": False, "Late Arrival": True}

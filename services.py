@@ -1228,6 +1228,12 @@ def _rich_player_rows(
         )
     }
 
+    # Post-draft additions: keyed on THIS season's element id, so compare against the
+    # row's season fpl_id, not the global Player.fpl_id (which means whoever holds that
+    # id now). A global Player row reached the fallback path with no snapshot, and a
+    # player with no PlayerSeason row can't have been flagged anyway.
+    inelig = _ineligible_fpl_ids(db, league)
+
     out_players = []
     for p in players:
         d = _player_stat_dict(p)
@@ -1237,6 +1243,7 @@ def _rich_player_rows(
         pid = p.player_id if isinstance(p, PlayerSeason) else p.id
         d["trend"] = trend.get(pid, [])
         d["is_keeper"] = pid in keeper_pids
+        d["ineligible"] = isinstance(p, PlayerSeason) and p.fpl_id in inelig
         out_players.append(d)
     out_players.sort(key=lambda d: (_POSITION_ORDER.get(d["position"], 9), d["name"]))
     return out_players
@@ -2735,6 +2742,31 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
         if season_over:
             out.append({"category": "International", "manager": m.display,
                         "detail": f"Season over — return {p.name} from international duty"})
+
+    # Rostering a player who was added to FPL after the draft. Add/drops happen in the
+    # FPL app, so nothing here can BLOCK the pickup — the rule's only teeth are a
+    # rejected keeper submission months later, by which point the manager has already
+    # paid to acquire him. Surfacing ownership now is the whole point: the homepage
+    # report lists ineligible PLAYERS but never says who holds one.
+    inelig = _ineligible_fpl_ids(db, league)
+    if inelig:
+        owner = effective_owner(db, league)
+        mgr = {m.id: m for m in db.query(Manager).filter_by(league_id=league.id)}
+        # PlayerIneligibility is keyed on the SEASON's element id, so resolve through
+        # PlayerSeason rather than the global Player.fpl_id (which now means whoever
+        # holds that id this season).
+        for fid, pid, pname in (
+            db.query(PlayerSeason.fpl_id, PlayerSeason.player_id, PlayerSeason.name)
+            .filter(PlayerSeason.league_id == league.id,
+                    PlayerSeason.fpl_id.in_(inelig))
+        ):
+            mid = owner.get(pid)
+            m = mgr.get(mid)
+            if m is None:
+                continue
+            out.append({"category": "Ineligible player", "manager": m.display,
+                        "detail": f"{pname} was added to FPL after the draft — "
+                                  "cannot be kept this season"})
 
     # Anti-tanking: flagged (in violation) or at risk (one GW short of the threshold).
     # Dismissed windows drop out, so this table can't contradict the flag list below it.
@@ -7789,6 +7821,30 @@ def data_health(db: Session, league: League) -> list[dict]:
             add("this season's draft is on this season's row", here > 0 or not there,
                 f"{here} here, {there} still on {prior.season_year}"
                 + (" — run scripts/migrate_2026_draft.py" if there and not here else ""))
+
+    # THE INPUT MUST EXIST, not merely "the guard behaved". `flag_ineligible` returns
+    # 0 on an empty player_pool_snapshot BY DESIGN, and it runs on every full sync, so
+    # a season with no snapshot has the ineligible-player rule quietly switched off and
+    # nothing anywhere reports a problem. That is exactly how the original
+    # snapshot_player_pool NameError survived unnoticed for every season (found
+    # 2026-08-20), and the fix did NOT backfill: snapshot_player_pool's only caller is
+    # the rollover route, so a season rolled over before the fix landed stays empty
+    # until someone captures it by hand. Assert the pool, not the flagging — zero
+    # ineligible players is a legitimate result, zero POOL never is.
+    from models import PlayerPoolSnapshot
+
+    pool = db.query(PlayerPoolSnapshot).filter_by(league_id=league.id).count()
+    add(
+        "draft-day player pool captured",
+        pool > 0,
+        f"{pool} rows"
+        + (
+            ""
+            if pool
+            else " — the ineligible-player rule cannot fire without it; run "
+            "services.snapshot_player_pool for this league"
+        ),
+    )
 
     # The cron reporting green while syncing nothing: every sub-task skips a frozen
     # league and the skip sets ok=True. If THIS league isn't frozen but the last

@@ -221,6 +221,17 @@
 <p class="sub">Form is FPL's recent-points average; ICT is FPL's
   influence-creativity-threat rating. 🔒 = locked as a keeper for next season.
   ● availability (hover for news).</p>
+{% set inelig = team.players | selectattr('ineligible') | list %}
+{% if inelig %}
+<div class="card" style="padding:12px;border-color:var(--warn)">
+  <strong>{{ inelig | length }} ineligible player{{ '' if inelig | length == 1 else 's' }}
+  on this squad:</strong>
+  {{ inelig | map(attribute='name') | join(', ') }}.
+  <span class="sub">Added to FPL after the draft, so they can be rostered and scored
+  as normal but <strong>cannot be kept</strong> next season — a keeper submission
+  naming one will be rejected.</span>
+</div>
+{% endif %}
 <div class="card" style="overflow-x:auto">
   <table class="stats">
     <thead><tr>
@@ -235,7 +246,7 @@
       <tr>
         <td>
           {% if p.status and p.status != 'a' %}<span class="dot warn" title="{{ p.news or 'doubtful' }}">●</span>{% else %}<span class="dot ok">●</span>{% endif %}
-          {{ p.name }}{% if p.is_keeper %} 🔒{% endif %}
+          {{ p.name }}{% if p.is_keeper %} 🔒{% endif %}{% if p.ineligible %} <span class="pill warn" title="Added to FPL after the draft — cannot be kept this season">ineligible</span>{% endif %}
         </td>
         <td class="sub">{{ p.position }}</td>
         <td class="sub">{{ p.team }}</td>

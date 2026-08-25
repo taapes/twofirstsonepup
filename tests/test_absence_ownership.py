@@ -726,3 +726,27 @@ def test_the_alert_disappears_once_reconciled(test_session):
     services.reconcile_absences(test_session, lg)
 
     assert services._return_required_entries(test_session, lg) == []
+
+
+# ---- silent-inert sweep: assert the INPUT exists, not that the guard behaved ----
+
+def test_health_flags_a_season_with_no_draft_day_player_pool(test_session):
+    """`flag_ineligible` returns 0 on an empty pool BY DESIGN and runs on every full
+    sync, so without this check a season with no snapshot has the ineligible-player
+    rule silently switched off and nothing reports it. Production was in exactly this
+    state on 2026-08-24: 0 pool rows for every season."""
+    lg, _a, _b, _gws = _seed(test_session)
+
+    checks = {c["check"]: c for c in services.data_health(test_session, lg)}
+    chk = checks["draft-day player pool captured"]
+    assert not chk["ok"]
+    assert "snapshot_player_pool" in chk["detail"]
+
+
+def test_health_passes_once_the_pool_is_captured(test_session):
+    lg, _a, _b, _gws = _seed(test_session)
+    _player(test_session, lg, "Anyone", 4242)
+    assert services.snapshot_player_pool(test_session, lg) > 0
+
+    checks = {c["check"]: c for c in services.data_health(test_session, lg)}
+    assert checks["draft-day player pool captured"]["ok"]
