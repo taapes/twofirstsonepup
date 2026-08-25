@@ -38,6 +38,10 @@ plans + copy-paste session prompts live in **`docs/SESSION_PLANS.md`**.
 7. ~~**Item 7** — keeper years survive a drop~~ — **done 2026-08-24**. Scope shrank on
    the day: the rule is mid-season only, so no ledger table, no rollover change, no
    migration. See the entry below.
+11. ~~**Item 18** — Upcoming page form/points~~ — **done 2026-08-25** (`3c12902`).
+   Template-only as predicted; added the availability dot too.
+10. ~~**Item 13** — `/teams` uneven card heights~~ — **done 2026-08-24** (`430dfd6`).
+   The 17/13 row-count outliers turned out to be gone already.
 9. ~~**Item 10** — make the test-DB skip loud~~ — **done 2026-08-24**. Also produced
    the refuse-guard that makes a plain `pytest` unable to reach production (see the
    "Three test files can commit to the PRODUCTION database" entry, now `mitigated`).
@@ -55,16 +59,14 @@ reflects the commissioner's explicit request to move conditional pick trades and
 
 | # | Item | Why this slot |
 |---|---|---|
-| 1 | **Item 13** — `/teams` uneven card heights | Moved up per commissioner request. Pure polish, no data risk, cheap. |
-| 2 | **Item 18** — Upcoming page form/points | Template-only, zero risk, immediate visible value for every manager checking fixtures. |
-| 3 | **Item 12** — accent-insensitive `<datalist>` matching | Small, mechanical, already-designed (ASCII-folded alias). Same "quick win" tier as the two above. |
-| 4 | **Item 17** — conditional / tiered draft-pick trades | Moved up per commissioner request, ahead of the remaining mid-tier fixes — reflects a real, recurring league mechanic (finish-position and cup-win conditions have actually been used in past trades), not a hypothetical. |
-| 5 | **Item 9** — IL backfill form search by name | Self-service IL/international placement (done 2026-08-24) now covers the common case, lowering urgency, but this is still the right fix for the admin-only historical path. |
-| 6 | **Item 16** — historical GK IL backfill refused once goalie teams are on | Small; confirm whether `goalie_team_mode` is already live this season before treating as low-urgency. |
-| 7 | **Item 11** — preflight "rollover NOT done" detection fix | Matters most right before the *next* draft (2027), not urgently now. |
-| 8 | **Item 19** — AI enhancements epic, sub-item 1 (GW review/banter) | Largest, most novel item on this list (new dependency, new outbound integration pattern) — sequenced after the smaller/safer items and after the pick-trade item has proven the newer trade-related surface, but has the highest ceiling for visible payoff. |
-| 9 | **Item 14** — scheduled keeper lock / draft open | Not time-critical until closer to the *next* draft/keeper-lock cycle. |
-| 10 | **Item 15** — Discord webhook trade announcements | P3, designed but not built; nice-to-have, no urgency. |
+| 1 | **Item 12** — accent-insensitive `<datalist>` matching | Small, mechanical, already-designed (ASCII-folded alias). Same "quick win" tier as the two above. |
+| 2 | **Item 17** — conditional / tiered draft-pick trades | Moved up per commissioner request, ahead of the remaining mid-tier fixes — reflects a real, recurring league mechanic (finish-position and cup-win conditions have actually been used in past trades), not a hypothetical. |
+| 3 | **Item 9** — IL backfill form search by name | Self-service IL/international placement (done 2026-08-24) now covers the common case, lowering urgency, but this is still the right fix for the admin-only historical path. |
+| 4 | **Item 16** — historical GK IL backfill refused once goalie teams are on | **Premise settled 2026-08-24: `goalie_team_mode` is `off` for 26/27 and the commissioner confirmed that is deliberate.** So `_refuse_goalkeeper_list_move` cannot fire this season and this is latent, not live — safe to leave here or drop further. |
+| 5 | **Item 11** — preflight "rollover NOT done" detection fix | Matters most right before the *next* draft (2027), not urgently now. |
+| 6 | **Item 19** — AI enhancements epic, sub-item 1 (GW review/banter) | Largest, most novel item on this list (new dependency, new outbound integration pattern) — sequenced after the smaller/safer items and after the pick-trade item has proven the newer trade-related surface, but has the highest ceiling for visible payoff. |
+| 7 | **Item 14** — scheduled keeper lock / draft open | Not time-critical until closer to the *next* draft/keeper-lock cycle. |
+| 8 | **Item 15** — Discord webhook trade announcements | P3, designed but not built; nice-to-have, no urgency. |
 
 Still open with no session prompt yet (see the two bullets immediately below): "Three
 test files can commit to the PRODUCTION database" and "Audit for the silent-inert
