@@ -2121,7 +2121,47 @@ defaults — see the session prompt):**
 
 **Priority:** `P3` — small, low-risk, immediate visible value. See
 `docs/SESSION_PLANS.md` for a full build session prompt.
-**Status:** `open`
+**Status:** `done 2026-08-25`. Template-only, as the entry predicted — the claim was
+re-verified EMPIRICALLY before building (calling `get_upcoming_matchups` against
+production returned 3 GWs x 2 squads x 15 = 90 player dicts, **0 missing `form`, 0
+missing `total_points`**), not just by re-reading the code.
+
+**Shipped:** the `squad()` macro in `templates/my_team_upcoming.html` gained a `<thead>`
+(`Player | Team | Form | Pts | Fixture`) and two `class="num"` cells, plus the
+availability dot from My Team. The commissioner chose the dot over PPG: on a page for
+planning three gameweeks ahead, "is he fit" beats another points average, and
+`status`/`news` were already in the dict. The dot lives INSIDE the name cell, as
+`my_team.html` does it, so the table went 3 -> 5 columns rather than 6.
+
+**Three things the entry's fix sketch did not anticipate:**
+1. **There was no `<thead>` at all** — the sketch says "with matching header cells", but
+   the table was headerless, so bare numbers would have been unlabelled. Headers are new
+   markup, and `table.up td` targeted `td` ONLY, so the rule had to widen to
+   `table.up th, table.up td` or the new `th` would keep base's `8px 12px` uppercase
+   styling against 3px rows.
+2. **Desktop clips, mobile does not — the opposite of the intuition.** `.card` is
+   `overflow:hidden` at all widths; the `overflow-x:auto` escape hatch lives only inside
+   `@media (max-width:760px)`. With `.grid2` at `1.3fr 1fr` the opponent card has only
+   ~437px of usable table width, so widening the table would have clipped silently, with
+   no scrollbar. Both cards now carry `overflow-x:auto`, mirroring `my_team.html:235`.
+3. **`.dot`/`.dot.ok`/`.dot.warn` were local to `my_team.html`**, not shared. Promoted to
+   `base.html` rather than duplicated.
+
+**Not done, deliberately:** the `ineligible` pill is absent here. That key is set in
+`_rich_player_rows`, which this page doesn't call — adding it would have ended the
+template-only scope. `p.ineligible` in this template would be Jinja `Undefined` (falsy),
+so it fails silently rather than loudly; noted in case the inconsistency matters later.
+The entry's "optional larger scope" (swapping in `_rich_player_rows` for `trend` and the
+keeper badge) also remains undone — it needs a `Manager` row resolved per side, since
+`get_upcoming_matchups` holds only an `opp_id` for the opponent.
+
+Verified: 5 new tests in `tests/test_upcoming_matchups.py` (service-level contract pin +
+route-level rendering), two mutations confirmed to bite (`total_points` via `or` swallows
+a legitimate 0; dropping the dot), full suite 836 passed / 18 skipped, and the macro
+rendered against live production data (headers present, real form/points, 14 available
+dots + 1 injury warning, zero dashes). Note `form` is a STRING from FPL's bootstrap, so
+`or` is right there and any numeric filter would raise; `total_points` is an int and
+needs `is not none`, which matters most at GW1 when half the league is on 0.
 
 **The ask.** For each player on the Upcoming page (`/my-team/upcoming`), show more
 analysis — at minimum form and total points.

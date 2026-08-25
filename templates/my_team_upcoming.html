@@ -2,11 +2,20 @@
 {% block title %}Upcoming{% endblock %}
 {% macro squad(players) -%}
 <table class="up">
+  <thead><tr>
+    <th>Player</th><th>Team</th><th class="num">Form</th><th class="num">Pts</th><th>Fixture</th>
+  </tr></thead>
   <tbody>
     {% for p in players %}
     <tr>
-      <td>{{ p.name }} <span class="sub">{{ p.position }}</span></td>
+      <td>{% if p.status and p.status != 'a' %}<span class="dot warn" title="{{ p.news or 'doubtful' }}">●</span>{% else %}<span class="dot ok">●</span>{% endif %}
+        {{ p.name }} <span class="sub">{{ p.position }}</span></td>
       <td class="sub">{{ p.team }}</td>
+      {# form is a STRING from FPL's bootstrap ('2.0'), so `or` is right and any numeric
+         filter would raise; total_points is an int, so it needs `is not none` or a
+         legitimate 0 renders as a dash. Same pair as my_team.html. #}
+      <td class="num">{{ p.form or "—" }}</td>
+      <td class="num">{{ p.total_points if p.total_points is not none else "—" }}</td>
       <td>
         {% if p.fixtures %}
           {% for f in p.fixtures %}
@@ -26,14 +35,15 @@
   fixtures sync, your next opponents and each player's fixture will appear here.</div>
 {% else %}
 <p class="sub">Your H2H opponents for the next gameweeks, with each player's real-life
-  PL fixture and difficulty. Lineups shown are current squads — future
+  PL fixture and difficulty. Form and total points are this season's;
+  ● shows availability (hover for news). Lineups shown are current squads — future
   starting XIs aren't set yet.</p>
 {% for mu in matchups %}
 <h2>GW{{ mu.gameweek }} — {{ me_name }} vs {{ mu.opponent or "TBD" }}</h2>
 {% if mu.opponent %}
 <div class="grid2">
-  <div class="card" style="padding:10px"><h3>{{ me_name }}</h3>{{ squad(mu.my_squad) }}</div>
-  <div class="card" style="padding:10px"><h3>{{ mu.opponent }}</h3>{{ squad(mu.opp_squad) }}</div>
+  <div class="card" style="padding:10px;overflow-x:auto"><h3>{{ me_name }}</h3>{{ squad(mu.my_squad) }}</div>
+  <div class="card" style="padding:10px;overflow-x:auto"><h3>{{ mu.opponent }}</h3>{{ squad(mu.opp_squad) }}</div>
 </div>
 {% else %}
 <div class="empty">No scheduled opponent for this gameweek.</div>
@@ -41,7 +51,7 @@
 {% endfor %}
 {% endif %}
 <style>
-  table.up td { padding:3px 6px; white-space:nowrap; }
+  table.up th, table.up td { padding:3px 6px; white-space:nowrap; }
   .fix { display:inline-block; padding:1px 6px; border-radius:4px; font-size:.75rem; margin-right:3px;
          background:#1c2030; color:var(--txt); }
   .fix.d1, .fix.d2 { background:rgba(55,214,122,.22); color:#9ff0bf; }   /* easy */
