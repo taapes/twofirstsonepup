@@ -64,9 +64,15 @@
     details form { margin-top:8px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
     .infraction { padding:12px; border-bottom:1px solid var(--line); }
     .infraction:last-child { border-bottom:0; }
-    .teamgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:12px; }
+    /* align-items:start — without it the grid default (stretch) pads every card in a
+       visual row to the tallest one, so which card sets your height depends on the
+       viewport, not on the managers. Same fix as .grid2 above. */
+    .teamgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:12px; align-items:start; }
     .yrs { color:var(--muted); font-variant-numeric:tabular-nums; }
     .tag { font-size:.7rem; color:var(--muted); }
+    /* scoped, NOT on .tag: that class is also used in the nav and page headings,
+       where nowrap would overflow on mobile. */
+    .acq { white-space:nowrap; }
     tr.taken-row td { opacity:.55; }
     ol.reorder { list-style:none; margin:6px 0; padding:0; display:block; width:100%; }
     ol.reorder li { display:flex; align-items:center; gap:8px; padding:5px 8px; margin:3px 0; background:#0f1117; border:1px solid var(--line); border-radius:6px; }

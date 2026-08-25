@@ -1,18 +1,56 @@
-<div class="card">
-  <table>
-    <thead><tr><th colspan="3"><a href="/team/{{ t.manager_fpl }}">{{ t.manager }}</a></th></tr></thead>
-    <tbody>
-      {% for p in t.players %}
+{#
+  One manager's roster card. Included (bare, reading `t` from the parent scope) by
+  teams.html inside .teamgrid and by team.html as a single card — in BOTH the normal
+  and the in-progress data modes, so four callers in total.
+
+  Once keeper selections exist the card shows only the KEPT players by default and puts
+  the rest behind a <details>, which is what makes side-by-side cards a uniform height.
+  Before selections exist `kept` is false for everyone and it falls back to the full
+  list, so the compaction switches itself on in the offseason rather than rendering ten
+  empty cards mid-season.
+#}
+{% set ACQ = {'waiver': 'waiv', 'discovery': 'disc'} %}
+
+{% macro row(p) %}
       <tr>
         <td>{{ p.player }}{% if p.kept %} <span class="pill" title="locked keeper for next season">🔒 keeper{% if p.kept_discovery %} (disc){% endif %}</span>{% endif %}</td>
-        <td class="tag">{{ p.position }} · {{ p.acquisition }}</td>
+        <td class="tag acq">{{ p.position }} · <span title="{{ p.acquisition }}">{{ ACQ.get(p.acquisition, p.acquisition) }}</span></td>
         <td class="num">
           {% if p.years_remaining > 0 %}{{ p.years_remaining }} left{% else %}<span class="pill warn">max</span>{% endif %}
         </td>
       </tr>
-      {% else %}
+{% endmacro %}
+
+{% set kept_rows = t.players | selectattr('kept') | list %}
+{% set rest = t.players | rejectattr('kept') | list %}
+{#
+  Never collapse mid-draft: `phase.macro in (draft, preseason)` is exactly the branch
+  ui._teams_data uses to swap in get_teams_in_progress, and there the arriving picks are
+  the point of the card — hiding them behind an expand to show the static kept players
+  would be backwards.
+#}
+{% set in_progress = phase and phase.macro in ('draft', 'preseason') %}
+{% set collapse = kept_rows and rest and not in_progress %}
+<div class="card">
+  <table>
+    <thead><tr><th colspan="3"><a href="/team/{{ t.manager_fpl }}">{{ t.manager }}</a></th></tr></thead>
+    <tbody>
+      {% for p in (kept_rows if collapse else t.players) %}{{ row(p) }}{% else %}
       <tr><td colspan="3" class="sub">No roster data.</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  {% if collapse %}
+  {# The summary must never contain the word "keeper": test_keeper_privacy's
+     teams-page test asserts on a 120-char window after a player's name, and this text
+     can land inside another manager's window. A count is also the house idiom. #}
+  <details style="padding:8px 12px">
+    <summary class="sub">+{{ rest | length }} more</summary>
+    <table>
+      <tbody>
+        {% for p in rest %}{{ row(p) }}{% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
 </div>

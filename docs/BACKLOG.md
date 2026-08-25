@@ -1083,7 +1083,44 @@ in `services.py`, and `api.py:59`'s `/v1/.../keepers` route.
 ### `/teams` grid renders uneven card heights — one manager's list looks twice as long
 
 **Priority:** `P3` — visual polish, requested 2026-08-16.
-**Status:** `open`
+**Status:** `done 2026-08-24`.
+
+**What shipped.** (1) `align-items:start` on `.teamgrid` (`templates/base.html`) — the
+actual cause; the grid default `stretch` padded every card in a visual row to the
+tallest. (2) `templates/_roster_card.html` shows only KEPT players by default with the
+rest behind a `<details>`, the row markup factored into a Jinja macro so the two loops
+can't drift. (3) Acquisition labels abbreviate (`waiver`->`waiv`, `discovery`->`disc`)
+with the full word in a `title`, inside a `.acq { white-space:nowrap }` cell — scoped
+deliberately, since `.tag` is also used in the nav and headings where nowrap would
+overflow on mobile.
+
+**The row-count outliers are gone.** Re-checked against production while planning: all
+ten managers are now exactly 15 rows. The 17/13 figures in this entry were 25/26 data,
+reset by the 26/27 draft. So cause (2) in the original analysis no longer exists, and
+fix direction 3 (the IL-restored-duplicate theory) needs no follow-up here.
+
+**The kept-only default needed a fallback, decided with the commissioner 2026-08-24.**
+Keeper selections for the upcoming season don't exist until after GW38 — `kept` is
+false on all 150 live rows — so a literal "kept only" card renders TEN EMPTY CARDS for
+most of the year. The card therefore falls back to the full roster whenever nothing is
+kept, and the compaction switches itself on in the offseason, which is when managers
+actually compare "who's keeping what". Two further decisions: the card never collapses
+in `draft`/`preseason` (the branch where `ui._teams_data` swaps in
+`get_teams_in_progress`, and there the arriving picks ARE the card); and pre-reveal only
+YOUR card compacts, since `get_keepers` redacts everyone else's `kept` — that discloses
+nothing and resolves once keepers lock.
+
+**Trap worth keeping.** `tests/test_keeper_privacy.py`'s teams-page test asserts on a
+120-character window after a player's name, so the word "keeper" in the new `<summary>`
+can land inside ANOTHER manager's window and fail it. The summary reads `+N more`; a
+test pins that it never says "keeper".
+
+Verified: 10 new tests in `tests/test_teams_card.py` (template-level for the partition
+and abbreviation, route-level for the wiring), three mutations confirmed to bite, full
+suite 831 passed / 18 skipped, and all ten live cards rendered against production data
+(uniform 2812-2883 bytes, no expand at kept=0, all 18 real `waiver` rows abbreviated).
+
+Original analysis follows.
 
 **The ask.** On `/teams`, side-by-side manager cards render very differently tall —
 e.g. John's next to a "Kevin" looked roughly double the length.
