@@ -38,6 +38,9 @@ plans + copy-paste session prompts live in **`docs/SESSION_PLANS.md`**.
 7. ~~**Item 7** — keeper years survive a drop~~ — **done 2026-08-24**. Scope shrank on
    the day: the rule is mid-season only, so no ledger table, no rollover change, no
    migration. See the entry below.
+9. ~~**Item 10** — make the test-DB skip loud~~ — **done 2026-08-24**. Also produced
+   the refuse-guard that makes a plain `pytest` unable to reach production (see the
+   "Three test files can commit to the PRODUCTION database" entry, now `mitigated`).
 8. ~~**Item 8** — verify `goalie_team_owner` self-healed at the rollover~~ — **done
    2026-08-24**. Confirmed self-healed (the 26/27 row's `season_year` now matches the
    `DraftPick.season_year` on goalie-team picks); regression test added
@@ -52,17 +55,16 @@ reflects the commissioner's explicit request to move conditional pick trades and
 
 | # | Item | Why this slot |
 |---|---|---|
-| 1 | **Item 10** — make the test-DB skip loud | Cheapest possible risk reduction: a silent `TEST_DATABASE_URL`-unset skip has already produced false-green regressions in this project's history. Protects every session after it. |
-| 2 | **Item 13** — `/teams` uneven card heights | Moved up per commissioner request. Pure polish, no data risk, cheap. |
-| 3 | **Item 18** — Upcoming page form/points | Template-only, zero risk, immediate visible value for every manager checking fixtures. |
-| 4 | **Item 12** — accent-insensitive `<datalist>` matching | Small, mechanical, already-designed (ASCII-folded alias). Same "quick win" tier as the two above. |
-| 5 | **Item 17** — conditional / tiered draft-pick trades | Moved up per commissioner request, ahead of the remaining mid-tier fixes — reflects a real, recurring league mechanic (finish-position and cup-win conditions have actually been used in past trades), not a hypothetical. |
-| 6 | **Item 9** — IL backfill form search by name | Self-service IL/international placement (done 2026-08-24) now covers the common case, lowering urgency, but this is still the right fix for the admin-only historical path. |
-| 7 | **Item 16** — historical GK IL backfill refused once goalie teams are on | Small; confirm whether `goalie_team_mode` is already live this season before treating as low-urgency. |
-| 8 | **Item 11** — preflight "rollover NOT done" detection fix | Matters most right before the *next* draft (2027), not urgently now. |
-| 9 | **Item 19** — AI enhancements epic, sub-item 1 (GW review/banter) | Largest, most novel item on this list (new dependency, new outbound integration pattern) — sequenced after the smaller/safer items and after the pick-trade item has proven the newer trade-related surface, but has the highest ceiling for visible payoff. |
-| 10 | **Item 14** — scheduled keeper lock / draft open | Not time-critical until closer to the *next* draft/keeper-lock cycle. |
-| 11 | **Item 15** — Discord webhook trade announcements | P3, designed but not built; nice-to-have, no urgency. |
+| 1 | **Item 13** — `/teams` uneven card heights | Moved up per commissioner request. Pure polish, no data risk, cheap. |
+| 2 | **Item 18** — Upcoming page form/points | Template-only, zero risk, immediate visible value for every manager checking fixtures. |
+| 3 | **Item 12** — accent-insensitive `<datalist>` matching | Small, mechanical, already-designed (ASCII-folded alias). Same "quick win" tier as the two above. |
+| 4 | **Item 17** — conditional / tiered draft-pick trades | Moved up per commissioner request, ahead of the remaining mid-tier fixes — reflects a real, recurring league mechanic (finish-position and cup-win conditions have actually been used in past trades), not a hypothetical. |
+| 5 | **Item 9** — IL backfill form search by name | Self-service IL/international placement (done 2026-08-24) now covers the common case, lowering urgency, but this is still the right fix for the admin-only historical path. |
+| 6 | **Item 16** — historical GK IL backfill refused once goalie teams are on | Small; confirm whether `goalie_team_mode` is already live this season before treating as low-urgency. |
+| 7 | **Item 11** — preflight "rollover NOT done" detection fix | Matters most right before the *next* draft (2027), not urgently now. |
+| 8 | **Item 19** — AI enhancements epic, sub-item 1 (GW review/banter) | Largest, most novel item on this list (new dependency, new outbound integration pattern) — sequenced after the smaller/safer items and after the pick-trade item has proven the newer trade-related surface, but has the highest ceiling for visible payoff. |
+| 9 | **Item 14** — scheduled keeper lock / draft open | Not time-critical until closer to the *next* draft/keeper-lock cycle. |
+| 10 | **Item 15** — Discord webhook trade announcements | P3, designed but not built; nice-to-have, no urgency. |
 
 Still open with no session prompt yet (see the two bullets immediately below): "Three
 test files can commit to the PRODUCTION database" and "Audit for the silent-inert
@@ -74,7 +76,8 @@ pattern."
   `DATABASE_URL`. Deliberate (they test code that commits internally) but unguarded,
   and the reason every regression summary here says "green excluding those three".
   Confirmed to have actually written to prod on 2026-08-18.
-- **Audit for the silent-inert pattern** (`P2`, suggested 2026-08-20). Now THREE
+- **Audit for the silent-inert pattern** (`P2`, suggested 2026-08-20) — **first sweep run
+  2026-08-24; see "Silent-inert sweep #1" below for its six findings.** Now THREE
   findings sharing a shape, the last one a live production outage: a guard or an
   implicit invariant that held only because of how something else behaved, going quiet
   the moment that something else changed, with the empty/wrong case looking legitimate
@@ -822,10 +825,24 @@ run into a wrong one, only make the outcome reproducible.
 
 ### Three test files can commit to the PRODUCTION database
 
-**Priority:** `P3` — latent, and it has been this way a while, but the failure mode is
-writes to live Neon from a routine `pytest`. Promote if anyone runs the suite on a
-machine with a normal `.env`.
-**Status:** `open`. Found 2026-08-18 while running the Item 4a regression.
+**Priority:** `P3` — was latent; it fired twice (2026-08-18, 2026-08-24).
+**Status:** `mitigated 2026-08-24` — a plain `pytest` can no longer reach production.
+**Still open:** making them *runnable* (in CI, against a populated scratch DB) rather
+than merely refused. Found 2026-08-18 while running the Item 4a regression.
+
+**The guard (2026-08-24).** `pytest_collection_modifyitems` in `tests/conftest.py`
+skips every test in `COMMITTING_DB_MODULES` unless `ALLOW_COMMITTING_DB_TESTS=1`, with
+a reason naming the host it refused (host only — never the credentials). Default `pytest`
+is now safe with **no flags**: `816 passed, 18 skipped`, the same 816 as the old
+correctly-excluded run, so nothing real was lost. **Delete the `--ignore` convention
+rather than reviving it** — it depends on a hand-typed flag and already failed once.
+Two deliberate choices: a *skip*, not a deselect, so the refusal stays visible in the
+summary (invisible skips being the exact failure this file's other guard exists to stop);
+and the sanction is **not** `DATABASE_URL == TEST_DATABASE_URL`, because `test_engine`
+asserts those two must DIFFER — keying on equality would trade a prod write for a
+failure in every other DB-backed test. That collision is also why the "point them at
+`TEST_DATABASE_URL`" fix proposed below is not a one-liner: it needs its own URL, or a
+relaxation of the must-differ rule.
 
 **What's actually wrong — and what ISN'T.** `test_audit.py`, `test_demo.py` and
 `test_sync_freeze.py` build their sessions from `db.SessionLocal()` rather than the
@@ -847,6 +864,17 @@ and `test_sync_freeze` commits five times per run.
 container from the regression recipe is a real committing database, which is all they
 actually need — or give them the same refuse-if-it-equals-`DATABASE_URL` guard
 `conftest.py` already has. The first is better: it makes them runnable in CI.
+**Caveat found 2026-08-24:** they need a *populated* database, not just a committing
+one. Pointed at the empty container they don't pass — `test_sync_freeze` skips
+(`no league in the configured DB`) and `test_audit`/`test_demo` raise `AttributeError`
+resolving a manager off `None`. Whatever CI does must seed a league + managers first.
+
+**Which file is actually risky (checked 2026-08-24, the earlier framing was too broad).**
+`test_demo.py` is **read-only** against the DB — it reads a manager and exercises session
+login — so it never wrote anything. The real exposure is `test_audit.py`, which creates
+`AuditLog` and **`Fine`** rows, and `test_sync_freeze.py`, which flips `sync_locked` on
+the LIVE current league and commits five times per run. A leaked `Fine` is the one with
+teeth: fines are added to the League-1st payout, so a stray row moves real money.
 
 **Not a duplicate of the silent-skip item** under "Running a full regression": that one
 is about DB-backed tests *skipping* when `TEST_DATABASE_URL` is missing, and its proposed
@@ -858,6 +886,44 @@ refuse to.
 `sqlalchemy.exc.OperationalError: connection to server at "ep-...neon.tech"`, which is
 noise that masks real failures — 14 items on every full run. Every regression summary in
 this backlog that says "green excluding these three files" is describing this.
+
+**Second confirmed prod run, 2026-08-24 (Item 10 session) — and the trap is the SHELL.**
+The convention that protects prod is "pass `--ignore` for the three files", i.e. a
+correctly-typed command line every single time. It failed on a mechanical detail: the
+flags were held in a variable (`IG="--ignore=... --ignore=... --ignore=..."`) and used
+unquoted as `pytest -q $IG`. **zsh does not word-split unquoted parameters; bash does.**
+So all three flags arrived as ONE argument — a path that doesn't exist — and pytest
+silently ignored it rather than erroring. The three files ran against production Neon
+twice before the stray `test_sync_freeze` failure in the output revealed it. Nothing in
+the run said "you are talking to prod"; the only tell was a test name that shouldn't
+have been collected.
+This is the same silent-inert shape catalogued above: a guard that held only because of
+how something *else* behaved (the operator's shell splitting a string), going quiet the
+moment that changed, with the wrong case looking legitimate. It raises the priority
+argument — a convention requiring a hand-typed flag is not a guard. Prefer the fix that
+needs no cooperation: make the three files **refuse** a `DATABASE_URL` they weren't
+pointed at deliberately, so a mistyped exclusion fails closed instead of connecting.
+(A `collect_ignore` in `conftest.py` would also beat the hand-typed flag, but only the
+refuse-guard protects a targeted `pytest tests/test_sync_freeze.py`.)
+**Damage from that run: none — verified read-only the same night.** `sync_locked` on the
+current league (11818) is back to `False`, correct for an in-season row, so
+`frozen_league`'s teardown restored it even though the test it wrapped FAILED. Zero
+`sync_logs` rows in the run's window (the only recent cluster is one ordinary 8-task cron
+sync, `resolve_league` first, all `ok`); no `Rottehulen`/foreign league rows; **0 `fines`
+rows total** and 0 `audit_log` rows in the last 2h (newest is 2026-08-21). The
+cleanup fixtures held. Note `test_demo.py` turns out to be read-only against the DB
+entirely — it reads a manager and exercises session login — so the write risk is really
+`test_audit.py` (creates `AuditLog` + **`Fine`** rows) and `test_sync_freeze.py` (flips
+`sync_locked` on the LIVE current league, five commits per run). A leaked `Fine` is the
+one with teeth: fines are added to the League-1st payout, so a stray row moves money.
+
+**Known-stale test, found the same day:** `test_sync_freeze.py::
+test_foreign_feed_aborts_before_writing` asserts the abort message contains
+`"reused league id"` (the season-jump branch). Post-rollover the current league's
+`season_year` is 2026 and the test's fabricated foreign feed derives 2026 too, so the
+season jump no longer trips and the entry-overlap branch (`0/10 known managers`) fires
+instead. The *guard* is working — both branches abort and write nothing; only the
+assertion's choice of branch is stale. Fix when this item is picked up.
 
 ---
 
@@ -1452,6 +1518,104 @@ health check that fails when any current manager lacks one.
 
 ---
 
+### Silent-inert sweep #1 (2026-08-24)
+
+**Status:** sweep `done`; findings 1-3 `open`.
+**Method that worked:** a read-only ROW CENSUS of all 42 tables, per season. A documented
+rule that has never fired shows up as a table that is 0 rows when it shouldn't be — this
+is how `snapshot_player_pool` was originally caught, and it found more. Grepping for the
+*code* shape (`if not x: return`) produced ~26 candidates and almost no signal; the data
+told the truth immediately. **Start from the data next time.**
+
+**1. The ineligible-player rule is STILL inert in production (`P1`).** `player_pool_snapshot`
+is **0 rows for both seasons**, and `player_ineligibility` likewise — the same numbers as
+when this was "fixed" on 2026-08-20. The code fix is real (`services.py` imports
+`PlayerPoolSnapshot` correctly), but **it never backfilled**: `snapshot_player_pool`'s only
+caller is the last statement of the rollover route, the 26/27 rollover ran 08-17/18 *before*
+the fix landed 08-20, and nothing re-runs the capture until the 2027 rollover. Meanwhile
+`flag_ineligible` executes on every full sync (`sync.py:1012`) and returns 0 by design on
+the empty pool. So the rule runs nightly and does nothing, all season.
+*Done:* a `data_health` check — **"draft-day player pool captured"** — asserting the INPUT
+EXISTS rather than that the guard behaved (0 ineligible players is a legitimate result;
+0 POOL never is), plus two tests, mutation-verified.
+*RESOLVED 2026-08-24 — 26/27 reconstructed from the draft-morning snapshot and applied
+to production.* Capturing the pool from TODAY's `players` was rejected: the draft was
+2026-08-16 and 23 players have been added since, 14 of them non-defenders — i.e. exactly
+the players the rule exists to catch would have been recorded as draft-day-eligible and
+made permanently unflaggable. A third option, deriving it from `players.fpl_added_date`,
+is not available: **that column is 0/997 populated** (a dead field; see finding 7).
+So the pool came from `snapshots/pre-draft-start-20260816.json` (587 ids). Two checks
+made that safe rather than hopeful: the draft ran BEFORE the 08-17/18 rollover, so a
+snapshot `fpl_id` need not mean today's player — compared via the permanent `code`,
+**587/587 agree, 0 mismatched**; and all three pre-draft snapshots (08-15 21:39, 08-16
+09:14, 08-16 10:05) yield the IDENTICAL 587-id pool, so the result doesn't hinge on
+picking the right file.
+*Tooling:* `scripts/capture_draft_day_pool.py` — dry-run default, `--apply`, idempotent,
+and it **refuses to run** if the snapshot's `(fpl_id -> code)` mapping disagrees with the
+DB, so a snapshot from the wrong side of a rollover fails closed instead of seeding the
+wrong pool.
+*Outcome in production:* 587 pool rows written; `flag_ineligible` then flagged **14**
+(David, Jebbison, Cherif; Benda, Suzuki; and 9 MIDs) — matching the dry run's prediction
+exactly. The nine defenders added post-draft stay eligible, per the rule. The two
+goalkeepers ARE flagged because goalie teams are off for 26/27; `flag_ineligible` would
+exempt them if the mode were on. The health check now reads `ok — 587 rows`.
+*Left open deliberately:* **25/26 still has an empty pool.** It is a frozen season with no
+pre-draft snapshot from that era, so there is nothing faithful to reconstruct from; the
+new health check will report it as a known historical gap rather than pretend otherwise.
+
+**7. `players.fpl_added_date` is dead (`P3`).** 0 of 997 rows populated, though the column
+exists and would be the natural independent witness for the eligibility rule (no snapshot
+file needed, works for future seasons). Either populate it in `sync_players` or drop it —
+as it stands it is a plausible-looking source that silently answers "never".
+
+**Unrelated check now failing (noticed 2026-08-24, NOT investigated):** `/admin/health`
+reports `rostered players have a keeper seed: 103 without a seed`. Nothing to do with the
+pool work; surfaced while verifying. Worth a look.
+
+**2. `_goalie_team_history` bridges seasons on the ONE id FPL reassigns (`P2`, latent).**
+It keys `{(season_year, team_id): (fpl_manager_id, how)}` on the entry id. Its docstring's
+reasoning is right (`managers` has one row per season, so a UUID key would read as three
+owners for a club held three years) but the key it picked is the one the `P0` entry proves
+is not stable: **measured overlap between 25/26 and 26/27 entry ids is 0 of 10.** So a club
+held across a rollover reads as two different owners and `_derive_gk_team_keeper_status`
+silently mis-counts the keeper clock — no error, just wrong years.
+*Why it is quiet:* it cannot manifest yet (see finding 3), which is precisely the pattern —
+an invariant holding only because something else happens to be true today. Fix when goalie
+teams go live: key on `display_name`, the only identity the league owns.
+
+**3. `goalie_team_mode` is `off` in production — CONFIRMED DELIBERATE by the commissioner
+2026-08-24: goalie teams are NOT on for 26/27.** This closes Item 16's open question and
+de-risks finding 2 (which cannot manifest while the feature is off). CLAUDE.md's "from
+2026" should be read as "built and available from 2026", not "in force in 26/27".
+Original observation follows.
+
+**3a. `goalie_team_mode` is `off` in production — this answers Item 16's open question.**
+Both league rows are `'off'`, with **zero** club draft picks and zero club keeper
+selections. CLAUDE.md documents goalie teams as active "from 2026", but the 26/27 draft
+(2026-08-16, 94 picks) ran under ordinary 15-man rules. Either the league deferred adoption
+or the mode was never flipped — **that is a commissioner question, not a code one**, and it
+gates findings 2 and Item 16 both. Item 16 said "confirm whether `goalie_team_mode` is
+already live this season": it is not.
+
+**4. CLAUDE.md is stale about `match_discovery_picks` (doc-only).** It says the call runs
+"from `main.py`'s post-sync hook ... and never from `sync.py`". It actually runs from
+`sync.py:1025` — correctly OUTSIDE the `sync_locked` guard, with a comment explaining why.
+The invariant the docs care about holds; the location named does not exist. Fix the prose.
+
+**5. Vestigial tables (`P3`, informational).** `transactions`, `keeper_exceptions` and
+`commissioner_alerts` have **0 rows AND 0 construction sites** in app code — schema from the
+original spec that was superseded (transactions are derived on read by
+`services.get_transactions`; alerts by `flagged_actions`). Not a bug. Worth deleting or
+annotating so a future session doesn't read them as "a feature that stopped working".
+
+**6. The live cup bracket has never run in production (`P3`, watch item).** `tournaments` /
+`tournament_matches` (written by `generate_cups` / `set_shield`) are empty; 25/26's 64
+`cup_matches` rows came from `history_import`, i.e. the documented historical fallback. So
+`generate_cups` gets its first real exercise at GW28 of 26/27. Not inert — untested in
+anger. Rehearse before GW28.
+
+---
+
 ### `snapshot_player_pool` has never run — the ineligible-player rule never fired
 
 **Priority:** `P2` — a documented league rule that has silently never worked.
@@ -2001,9 +2165,19 @@ PYTHONDONTWRITEBYTECODE=1 \
 `PYTHONDONTWRITEBYTECODE=1` is house style for anything involving mutation testing — a
 stale `__pycache__` otherwise reports "no bite" against a restored file.
 
-**Worth doing:** make the skip loud rather than silent (a session-scoped check that fails
-when `TEST_DATABASE_URL` is missing unless an explicit opt-out is passed), so a green
-`pytest` can be trusted at a glance.
+**Status: DONE (Item 10), 2026-08-24.** `pytest_configure` in `tests/conftest.py`
+now stops the run before collection with a single `ERROR:` line (exit 4) when
+`TEST_DATABASE_URL` is unset, so `passed ... skipped, exit 0` can no longer be misread
+as green; `ALLOW_DB_SKIP=1` is the deliberate opt-out for pure-rules runs. The
+alembic-not-on-PATH case is checked in the same hook via `shutil.which`.
+**Why the hook and not the fixture:** a session-scoped fixture that raises has its
+exception cached and re-raised for every dependent test — the first attempt at this
+fix improved the *message* but still emitted 585 errors (the text 1170 times). Moving
+the check ahead of collection is what makes it one error. Verified in all four modes:
+no-env → `exit 4`, one message; `ALLOW_DB_SKIP=1` → 231 passed, 585 skipped, exit 0;
+full env → **816 passed, 0 skipped**; alembic off PATH → `exit 4`, one message, 0
+per-test errors. (All excluding `test_audit.py` / `test_demo.py` / `test_sync_freeze.py`,
+which still resolve their session from `DATABASE_URL` — see the open P3 entry.)
 
 ---
 

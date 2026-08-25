@@ -38,8 +38,21 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
 - Apply migrations: `alembic upgrade head`
 - Dev deps (tests + local proxy workaround): `uv pip install -r requirements-dev.txt`
 - Tests: `pytest`. Pure rule tests run anywhere; anything touching the DB needs
-  `TEST_DATABASE_URL` (local Postgres recipe in `tests/conftest.py`) and **silently skips
-  without it** — confirm a run says `passed`, not `skipped`, before trusting it.
+  `TEST_DATABASE_URL` (local Postgres recipe in `tests/conftest.py`). **Without it the
+  run now stops before collection** with `ERROR: TEST_DATABASE_URL is not set` (exit 4)
+  — a silent `585 skipped, exit 0` used to read as green and has caused false-green
+  regressions here. Set `ALLOW_DB_SKIP=1` to opt out on purpose (pure-rules only).
+  Both that check and the alembic-on-PATH check live in `pytest_configure`, **not** in
+  the `test_engine` fixture: a session-fixture failure is cached and re-raised per
+  dependent test, which is what turned one unactivated venv into 585 identical errors.
+- **The three committing test files are refused by default.** `test_audit.py` /
+  `test_demo.py` / `test_sync_freeze.py` build sessions from `DATABASE_URL` (which
+  `db.py` resolves via `load_dotenv()`, i.e. **production Neon** on a dev machine) and
+  commit. `pytest_collection_modifyitems` skips them unless `ALLOW_COMMITTING_DB_TESTS=1`,
+  naming the host it refused. **A plain `pytest` is now safe** — the old convention of
+  hand-typing three `--ignore` flags is obsolete, and shouldn't be revived: it failed on
+  2026-08-24 because zsh doesn't word-split an unquoted `$IG`, and they hit prod twice.
+  A full run is `816 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
@@ -340,9 +353,9 @@ Write tests for these. They are custom and non-obvious:
   mislink. Linking also makes him `taken` in **discovery** search only — the overlay is
   `draft_type`-scoped, so the main draft is untouched.
   **Finding the player is assisted; deciding is not.** `services.match_discovery_picks`
-  runs after every full sync (from `main.py`'s post-sync hook — *outside* the
+  runs after every full sync (at the end of `sync.run_sync`, `sync.py:1025` — *outside* the
   `sync_locked` guard, since it reads the global pool against picks that may live on an
-  older league row, and never from `sync.py`, which must stay on the FPL-canonical side)
+  older league row, and never from a per-task sync helper, which must stay on the FPL-canonical side)
   and writes `discovery_match_suggestions` rows only. Three tiers — exact / strong
   (token subset, which is how a typed "Nick Woltemade" reaches web_name "Woltemade") /
   close (`difflib` ≥ 0.85, stdlib only). `players.full_name` (FPL's first + second name,
@@ -631,6 +644,23 @@ season's `player_pool_snapshot`, captured at rollover) is flagged in
 `player_ineligibility` (`services.flag_ineligible`, run after each full sync) — never
 mutating the global `Player` row — surfaced on the homepage and excluded from
 draft/keeper search.
+**The pool must actually exist or the rule is a no-op.** `flag_ineligible` returns 0 on
+an empty snapshot BY DESIGN, so a season with no pool has the rule silently switched
+off; `data_health`'s "draft-day player pool captured" asserts the INPUT, since 0
+ineligible players is legitimate but 0 POOL never is. `snapshot_player_pool`'s only
+caller is the rollover route, so a season rolled over before that function worked stays
+empty forever — `scripts/capture_draft_day_pool.py` seeds it from a pre-draft snapshot
+(dry-run default; refuses if the snapshot's `(fpl_id -> code)` mapping disagrees with
+the DB, i.e. it came from the wrong side of a rollover). 26/27 was seeded this way on
+2026-08-24; 25/26 has no pre-draft snapshot and stays an acknowledged gap.
+**Enforcement is deferred, so ownership must be VISIBLE.** Add/drops happen in the FPL
+app — nothing here can block picking up an ineligible player, and the only hard stop is
+`rules.validate_keeper_selection` rejecting the keeper submission months later. So
+ownership is surfaced in two places besides the homepage report (which lists players,
+not owners): a `flagged_actions` entry ("Ineligible player", manager + name) and an
+`ineligible` pill plus a squad-level banner on My Team (`_rich_player_rows` sets the
+key, so `get_my_team` and `get_my_team_in_progress` both get it). Both key on the
+SEASON's element id via `PlayerSeason`, never the global `Player.fpl_id`.
 
 ## Auth & authorization (per-manager identity)
 
