@@ -889,6 +889,32 @@ def validate_pick_condition(*, logic, effect, round_if_met, term_count: int) -> 
 # purpose. `services.get_draft_board` regenerates the slot list on EVERY read with no
 # season parameter, so a global 15 -> 14 would silently truncate every archived board
 # at /season/{fpl_league_id}. 'off' is the pre-2026 behaviour, unchanged.
+def squad_quota_reason(position, counts, *, limits=None) -> str | None:
+    """Why this position is full for a manager — or None.
+
+    FPL forces 2 GKP / 5 DEF / 5 MID / 3 FWD, which is why `SQUAD_POSITION_LIMITS`
+    existed here for a long time without anything enforcing it: the real draft happens
+    in FPL's app and it refuses an illegal pick upstream. Checked here so OUR board
+    can't record a squad FPL would never have allowed — a sixth defender would break
+    the auto-sub projection's formation maths, since those limits assume a legal squad.
+
+    `limits` overrides the shape for goalie-team mode, where a manager takes 13
+    outfielders plus a club instead of 15 players (`OUTFIELD_POSITION_LIMITS`).
+    An unknown position is never refused: we don't guess at a player we can't classify.
+    """
+    limits = limits if limits is not None else SQUAD_POSITION_LIMITS
+    cap = limits.get((position or "").upper())
+    if cap is None:
+        return None
+    have = counts.get((position or "").upper(), 0)
+    if have < cap:
+        return None
+    return (
+        f"a squad may hold {cap} {position.upper()}"
+        f"{'' if cap == 1 else 's'} and this manager already has {have}"
+    )
+
+
 GOALIE_TEAM_MODES = ("off", "redraft", "keeper")
 GOALIE_TEAM_SLOTS = 1
 

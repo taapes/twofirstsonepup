@@ -9,6 +9,28 @@
 <h1>{{ team.manager }} — My Team
   {% if team.gameweek %}<span class="tag">as of GW{{ team.gameweek }}</span>{% endif %}</h1>
 
+{% if team.projected and team.projected.subs %}
+{# Only shown when a substitution is actually being projected — a manager with a clean
+   gameweek doesn't need telling that nothing happened. FPL won't apply these until it
+   finalises the gameweek, so this is the one place the difference is explained. #}
+<div class="card" style="padding:10px;margin-bottom:14px">
+  <strong>GW{{ team.projected_gameweek }}: {{ team.projected.points }} pts</strong>
+  <span class="sub">with bench substitutions projected</span>
+  <ul style="margin:6px 0 0 16px;padding:0">
+    {% for s in team.projected.subs %}
+    <li class="sub">{{ s.out.name }} ({{ s.out.position }}) didn't play —
+      <strong>{{ s.in.name }}</strong> covers
+      {% if s.in.played %}({{ s.in.points }} pt{{ "" if s.in.points == 1 else "s" }})
+      {% elif s.in.opponent %}(vs {{ s.in.opponent }}{% if s.in.kickoff_time %}, {{ s.in.kickoff_time.strftime('%a %H:%M') }}{% endif %})
+      {% else %}(yet to play){% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="sub" style="margin:6px 0 0">FPL won't show these until the gameweek is
+    finalised.</p>
+</div>
+{% endif %}
+
 {% if team.status %}
 {% set t = team.status.tanking %}
 <div class="grid2" style="margin-bottom:14px">

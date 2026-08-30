@@ -52,7 +52,7 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   naming the host it refused. **A plain `pytest` is now safe** — the old convention of
   hand-typing three `--ignore` flags is obsolete, and shouldn't be revived: it failed on
   2026-08-24 because zsh doesn't word-split an unquoted `$IG`, and they hit prod twice.
-  A full run is `1050 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
+  A full run is `1056 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
@@ -177,8 +177,7 @@ Write tests for these. They are custom and non-obvious:
   **Who owns a club is derived, never stored as a keeper list** (`goalie_team_keepers`,
   `goalie_team_owner`): you own whoever keeps for that club TODAY, so a January signing
   joins and a sale leaves with nothing to reconcile.
-  Two rules live in `record_pick` (which still enforces no squad quotas — a sixth
-  defender is legal, and a test pins that): a manager gets ONE club
+  Two rules live in `record_pick`: a manager gets ONE club
   (`_team_unavailable_reason`), and a manager down to their last slot with no club must
   spend it on one (`_goalie_team_required_reason` — deliberately separate, because
   `_unavailable_reason` doubles as search's taken-oracle and a striker is not "taken"
@@ -198,6 +197,23 @@ Write tests for these. They are custom and non-obvious:
   `draftprep.Shape` carries the squad shape (`FPL_SHAPE` / `GOALIE_TEAM_SHAPE`,
   `shape_for(mode)`) so both eras stay simulable; clubs are RANKED
   (`goalie_team_values`) and never simulated — 20 clubs for 10 managers is no scarcity.
+- **Squad quotas (enforced from 2026-08-30):** `record_pick` refuses a pick that would
+  break FPL's shape — `rules.SQUAD_POSITION_LIMITS` (2 GKP / 5 DEF / 5 MID / 3 FWD), or
+  `OUTFIELD_POSITION_LIMITS` under goalie-team mode (13 outfielders + a club).
+  **This reversed a long-standing deliberate decision** (a sixth defender used to be
+  legal and a test pinned it). It changed nothing live: FPL Draft refuses an illegal
+  pick upstream, and all ten 26/27 squads were exactly 2/5/5/3 when checked. It matters
+  because the auto-sub projection's formation maths assumes a legal squad.
+  `services._squad_quota_reason` counts this season's main-draft picks plus keepers,
+  excluding the slot being filled right now (or an admin correction would be refused by
+  its own pick) and excluding discovery picks (not in the PL yet). Position resolves via
+  `PlayerSeason` **falling back to the global `Player` row** — the fallback is
+  load-bearing, not tidiness: without it a season with no snapshot counts zero of
+  everything and enforces nothing, which is how this shipped the first time, passing the
+  very test meant to prove it worked. Unlike scoring, a draft is always the current
+  season, so the global row is the same human. Deliberately NOT folded into
+  `_unavailable_reason` — that doubles as search's taken-oracle, and a defender isn't
+  "taken" because YOUR back line is full.
 - **Keepers:** 15-man rosters; up to 5 keepers/season (6 if a discovery keeper
   applies). Max 4 years of keeper eligibility for a draft- or trade-acquired
   player (`rules.KEEPER_FRESH_DRAFT`); a waiver/FA-acquired player — including one

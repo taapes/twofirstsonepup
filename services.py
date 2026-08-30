@@ -75,8 +75,11 @@ from rules import (
     compute_payouts,
     current_tanking_streak,
     decide_sync,
+    OUTFIELD_POSITION_LIMITS,
+    SQUAD_POSITION_LIMITS,
     fixture_status,
     project_auto_subs,
+    squad_quota_reason,
     keepers_revealed as _keepers_revealed_rule,
     validate_condition_term,
     validate_pick_condition,
@@ -1408,12 +1411,22 @@ def get_my_team(db: Session, league: League, fpl_manager_id: str) -> dict | None
         return None
     gw = latest_gameweek(db, league)
     players = _squad_players(db, league, manager.id, gw.id if gw else None)
+    # The same projection the scoreboard shows, so a manager checking their own page
+    # and the H2H table see one number rather than two. Absent when there is no points
+    # data for the gameweek yet, which the template treats as "nothing to say".
+    cur = current_gameweek(db, league)
+    projected = (
+        (projected_points_by_manager(db, league, cur) or {}).get(manager.id)
+        if cur else None
+    )
     return {
         "manager": manager.display,
         "fpl": manager.fpl_manager_id,
         "gameweek": gw.number if gw else None,
         "players": _rich_player_rows(db, league, manager, players),
         "status": _manager_status(db, league, manager),
+        "projected": projected,
+        "projected_gameweek": cur,
     }
 
 
@@ -5979,6 +5992,85 @@ def _team_unavailable_reason(
     return None
 
 
+def _squad_quota_reason(
+    db: Session, league: League, owner: Manager, player, *,
+    season_year: int, draft_type: str, pick_number: int,
+) -> str | None:
+    """Why this manager can't take this player — a full position — or None.
+
+    Counted from THIS season's main-draft picks plus this manager's keepers, since a
+    kept player occupies a squad slot exactly as a drafted one does. The slot being
+    filled right now is excluded, so re-recording a pick over itself is not refused as
+    a duplicate.
+
+    Discovery picks are excluded: a discovery player isn't in the PL yet and doesn't
+    occupy a squad position until he arrives.
+
+    Like `_goalie_team_required_reason`, deliberately NOT folded into
+    `_unavailable_reason` — that doubles as search's taken-oracle, and a defender is
+    not "taken" because YOUR back line is full.
+    """
+    if draft_type != "main":
+        return None
+    # The two agree on DEF/MID/FWD today — OUTFIELD_POSITION_LIMITS is derived from
+    # SQUAD_POSITION_LIMITS — so this branch currently changes nothing except that the
+    # outfield shape has no GKP entry, and keepers are off the board entirely under
+    # goalie-team mode anyway. Kept because it states which rule applies, and because
+    # the two would diverge the moment either shape is edited. A mutation swapping them
+    # does NOT fail any test, which is expected rather than a coverage gap.
+    limits = (
+        OUTFIELD_POSITION_LIMITS
+        if goalie_teams_on(league.goalie_team_mode)
+        else SQUAD_POSITION_LIMITS
+    )
+    # Position by players.id (stable across seasons via `code`), preferring this
+    # season's snapshot and FALLING BACK to the global row.
+    #
+    # The fallback is load-bearing, not defensive tidiness: a season with no
+    # PlayerSeason rows yet — a fresh rollover, or any test that seeds only `Player` —
+    # would otherwise count zero of everything and silently enforce nothing. That is
+    # exactly how this check first shipped, and it passed the very test meant to prove
+    # it worked. Unlike the SCORING path, where recycled element ids make PlayerSeason
+    # mandatory, a draft is always about the current season, so the global row is the
+    # same human at the same position.
+    by_uuid = {
+        ps.player_id: ps.position
+        for ps in _season_by_fpl_id(db, league).values()
+        if ps.position
+    }
+
+    counts: dict = {}
+    def _bump(player_uuid):
+        pos = by_uuid.get(player_uuid)
+        if pos is None:
+            row = db.get(Player, player_uuid)
+            pos = row.position if row else None
+        if pos:
+            counts[pos.upper()] = counts.get(pos.upper(), 0) + 1
+
+    for dp in (
+        db.query(DraftPick)
+        .filter(DraftPick.league_id == league.id,
+                DraftPick.season_year == season_year,
+                DraftPick.draft_type == "main",
+                DraftPick.manager_id == owner.id,
+                DraftPick.player_id.isnot(None))
+    ):
+        if dp.pick_number == pick_number:
+            continue          # the slot being (re)filled right now
+        _bump(dp.player_id)
+    for sel in (
+        db.query(KeeperSelection)
+        .filter(KeeperSelection.league_id == league.id,
+                KeeperSelection.manager_id == owner.id,
+                KeeperSelection.season_year == season_year)
+    ):
+        _bump(sel.player_id)
+
+    position = by_uuid.get(player.id) or player.position or ""
+    return squad_quota_reason(position, counts, limits=limits)
+
+
 def _goalie_team_required_reason(
     db: Session, league: League, owner: Manager, *,
     season_year: int, draft_type: str, pick_number: int, board: list[dict] | None = None,
@@ -6077,6 +6169,12 @@ def record_pick(
         )
         if reserved:
             raise RuleViolation(reserved)
+        full = _squad_quota_reason(
+            db, league, owner, player, season_year=season_year,
+            draft_type=draft_type, pick_number=pick_number,
+        )
+        if full:
+            raise RuleViolation(f"{player.name} can't be picked — {full}")
         selection, label = player, player.name
 
     is_team = team_code is not None

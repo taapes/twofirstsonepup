@@ -10,7 +10,9 @@ the UI:
   - a manager cannot spend their LAST slot on an outfielder while clubless.
 
 The fourth property is a negative one, and just as deliberate: this did NOT turn
-`record_pick` into a squad-quota enforcer. A sixth defender is still legal.
+`record_pick` into a squad-quota enforcer. (Quotas ARE enforced now, as of
+2026-08-30 — see test_a_sixth_defender_is_refused — but by an explicit check, not as a
+side effect of the goalie-team guards.)
 
 Runs against TEST_DATABASE_URL (see conftest); never the configured database.
 """
@@ -87,7 +89,29 @@ def _pick(session, lg, *, pick_number, owner_fpl, **kw):
 
 
 def _outfield_fpl_ids(players):
-    return sorted(p.fpl_id for p in players.values() if p.position != "GKP")
+    """Outfielders in an order that builds an FPL-LEGAL squad as you draft down it.
+
+    `record_pick` now enforces the squad quotas (2 GKP / 5 DEF / 5 MID / 3 FWD, or the
+    13-outfielder shape under goalie-team mode), so a helper that just returns ids in
+    id order hands out a fourth forward on the twelfth pick and every fill-based test
+    dies on an error about nothing they are testing.
+
+    Interleaving by position keeps each prefix as balanced as it can be, so the first
+    thirteen come out 5/5/3 — exactly the outfield shape the rule allows.
+    """
+    by_pos = {"DEF": [], "MID": [], "FWD": []}
+    for p in sorted(players.values(), key=lambda p: p.fpl_id):
+        if p.position in by_pos:
+            by_pos[p.position].append(p.fpl_id)
+    order, quota = [], {"DEF": 5, "MID": 5, "FWD": 3}
+    # Round-robin within the quota first, then whatever is left over for tests that
+    # need more ids than one legal squad's worth.
+    while any(quota.values()):
+        for pos in ("DEF", "MID", "FWD"):
+            if quota[pos] and by_pos[pos]:
+                order.append(by_pos[pos].pop(0))
+                quota[pos] -= 1
+    return order + [fid for ids in by_pos.values() for fid in ids]
 
 
 # ---- the board -------------------------------------------------------------
@@ -167,6 +191,37 @@ def _fill_all_but_last(session, lg, players, owner_fpl):
     return mine[-1], ids[len(mine) - 1:]
 
 
+def _positions_pool(players):
+    by_pos = {"DEF": [], "MID": [], "FWD": []}
+    for p in sorted(players.values(), key=lambda p: p.fpl_id):
+        if p.position in by_pos:
+            by_pos[p.position].append(p.fpl_id)
+    return by_pos
+
+
+def _legal_squads(players, owners):
+    """owner -> iterator over a DISJOINT, FPL-legal outfield squad (5 DEF, 5 MID, 3 FWD).
+
+    Disjoint because two managers cannot draft the same player, and legal because
+    record_pick enforces the squad quotas — a fixture that deals one manager six
+    defenders now dies on an error about nothing the test is exercising.
+    """
+    by_pos = _positions_pool(players)
+    out = {}
+    for owner in owners:
+        seq = []
+        for pos, n in (("DEF", 5), ("MID", 5), ("FWD", 3)):
+            seq += [by_pos[pos].pop(0) for _ in range(min(n, len(by_pos[pos])))]
+        out[owner] = iter(seq)
+    return out
+
+
+def _spare_outfield_ids(players, owner_fpl):
+    """Ids beyond every manager's legal squad — safe to queue without colliding."""
+    by_pos = _positions_pool(players)
+    return [fid for pos in ("DEF", "MID", "FWD") for fid in by_pos[pos][10:]]
+
+
 def _run_board_to_last_slot_of(session, lg, players, owner_fpl):
     """Draft the whole board out until `owner_fpl` is on the clock for their final,
     still-clubless pick — the state the autodraft has to get right.
@@ -177,7 +232,10 @@ def _run_board_to_last_slot_of(session, lg, players, owner_fpl):
     """
     board = services.get_draft_board(session, lg, UPCOMING)
     target = [b for b in board if b["owner_fpl"] == owner_fpl][-1]
-    ids = iter(_outfield_fpl_ids(players))
+    # A DISJOINT legal squad per manager. One shared iterator would deal them an
+    # alternating slice of a single sequence, which is legal for neither once
+    # record_pick enforces the quotas.
+    queues = _legal_squads(players, sorted({b["owner_fpl"] for b in board}))
     clubs = iter([c[1] for c in CLUBS])
     gave_club = set()
     for b in board:
@@ -189,10 +247,12 @@ def _run_board_to_last_slot_of(session, lg, players, owner_fpl):
                   team_code=next(clubs))
         else:
             _pick(session, lg, pick_number=b["pick"], owner_fpl=b["owner_fpl"],
-                  player_fpl_id=next(ids))
+                  player_fpl_id=next(queues[b["owner_fpl"]]))
     on_clock = services.next_open_pick(services.get_draft_board(session, lg, UPCOMING))
     assert on_clock["pick"] == target["pick"], "fixture didn't reach the reserved slot"
-    return target, list(ids)
+    # Leftovers this manager could still legally take: none of his own quota remains,
+    # so hand back spare ids from the shared pool for tests that queue an outfielder.
+    return target, _spare_outfield_ids(players, owner_fpl)
 
 
 def test_the_last_slot_must_be_a_club(test_session):
@@ -256,16 +316,23 @@ def test_the_reserve_rule_is_per_manager(test_session):
 
 
 # ---- what did NOT change ---------------------------------------------------
-def test_a_sixth_defender_is_still_legal(test_session):
-    """record_pick has never enforced squad quotas and still doesn't. If this ever
-    fails, the goalie-team guards quietly grew into a position checker."""
+def test_a_sixth_defender_is_refused(test_session):
+    """REVERSED 2026-08-30, deliberately. record_pick enforced no squad quotas for
+    years — FPL Draft refuses an illegal pick upstream, so ours never had to, and all
+    ten 26/27 squads were exactly 2/5/5/3 when checked.
+
+    It matters now because the auto-sub projection's formation maths assumes a legal
+    squad: with six defenders the "3-5 DEF" bounds stop describing anything real. This
+    is defensive — it protects our own board against a pick FPL would never have
+    allowed.
+    """
     lg, _, _, players = _seed(test_session)
     defs = sorted(p.fpl_id for p in players.values() if p.position == "DEF")
     assert len(defs) >= 6
-    for i, fid in enumerate(defs[:6], start=1):
+    for i, fid in enumerate(defs[:5], start=1):
         _pick(test_session, lg, pick_number=(i * 2) - 1, owner_fpl="1", player_fpl_id=fid)
-    board = services.get_draft_board(test_session, lg, UPCOMING)
-    assert len([b for b in board if b["owner_fpl"] == "1" and b["player"]]) == 6
+    with pytest.raises(RuleViolation, match="already has 5"):
+        _pick(test_session, lg, pick_number=11, owner_fpl="1", player_fpl_id=defs[5])
 
 
 # ---- search ----------------------------------------------------------------
@@ -629,3 +696,89 @@ def test_the_reorder_route_persists_the_new_order(client, test_session):
 
     q = services.get_draft_queue(test_session, lg, "1", UPCOMING)
     assert [e["kind"] for e in q] == ["team", "player"]
+
+
+# ---- squad quotas ----------------------------------------------------------
+# Enforced from 2026-08-30. FPL Draft refuses an illegal pick upstream, which is why
+# record_pick never had to — all ten 26/27 squads were exactly 2/5/5/3 when checked.
+# It matters now because the auto-sub projection's formation maths assumes a legal
+# squad. Defensive, with no live impact.
+
+def test_a_legal_squad_fills_without_complaint(test_session):
+    """The guard must not fire on the shape FPL actually produces."""
+    lg, _, _, players = _seed(test_session, mode="off")
+    by_pos = _positions_pool(players)
+    picks = ([("DEF", i) for i in range(5)] + [("MID", i) for i in range(5)]
+             + [("FWD", i) for i in range(3)])
+    for slot, (pos, i) in enumerate(picks, start=1):
+        _pick(test_session, lg, pick_number=(slot * 2) - 1, owner_fpl="1",
+              player_fpl_id=by_pos[pos][i])
+    board = services.get_draft_board(test_session, lg, UPCOMING)
+    assert len([b for b in board if b["owner_fpl"] == "1" and b["player"]]) == 13
+
+
+def test_a_fourth_forward_is_refused(test_session):
+    lg, _, _, players = _seed(test_session, mode="off")
+    fwds = _positions_pool(players)["FWD"]
+    for i, fid in enumerate(fwds[:3], start=1):
+        _pick(test_session, lg, pick_number=(i * 2) - 1, owner_fpl="1", player_fpl_id=fid)
+    with pytest.raises(RuleViolation, match="already has 3"):
+        _pick(test_session, lg, pick_number=7, owner_fpl="1", player_fpl_id=fwds[3])
+
+
+def test_the_quota_is_per_manager(test_session):
+    """A full back line for one manager says nothing about anyone else's."""
+    lg, _, _, players = _seed(test_session, mode="off")
+    defs = _positions_pool(players)["DEF"]
+    for i, fid in enumerate(defs[:5], start=1):
+        _pick(test_session, lg, pick_number=(i * 2) - 1, owner_fpl="1", player_fpl_id=fid)
+    _pick(test_session, lg, pick_number=2, owner_fpl="2", player_fpl_id=defs[5])
+    board = services.get_draft_board(test_session, lg, UPCOMING)
+    assert len([b for b in board if b["owner_fpl"] == "2" and b["player"]]) == 1
+
+
+def test_re_recording_the_same_slot_is_not_a_duplicate(test_session):
+    """The slot being filled right now is excluded from the count, or an admin
+    correcting a pick would be told the position is full by that very pick."""
+    lg, _, _, players = _seed(test_session, mode="off")
+    defs = _positions_pool(players)["DEF"]
+    for i, fid in enumerate(defs[:5], start=1):
+        _pick(test_session, lg, pick_number=(i * 2) - 1, owner_fpl="1", player_fpl_id=fid)
+    # Overwrite the fifth slot with a DIFFERENT defender — still five, still legal.
+    _pick(test_session, lg, pick_number=9, owner_fpl="1", player_fpl_id=defs[6],
+          overwrite=True)
+    board = services.get_draft_board(test_session, lg, UPCOMING)
+    assert len([b for b in board if b["owner_fpl"] == "1" and b["player"]]) == 5
+
+
+def test_the_quota_holds_under_goalie_team_mode(test_session):
+    """13 outfielders plus a club rather than 15 players, and the outfield limits still
+    bind.
+
+    Note this does NOT distinguish the two limit dicts: OUTFIELD_POSITION_LIMITS is
+    derived from SQUAD_POSITION_LIMITS, so they agree on every outfield position. The
+    branch in _squad_quota_reason states intent rather than changing behaviour, and a
+    mutation swapping them fails nothing — recorded so nobody mistakes that for a gap.
+    """
+    lg, _, _, players = _seed(test_session)          # mode="redraft"
+    defs = _positions_pool(players)["DEF"]
+    for i, fid in enumerate(defs[:5], start=1):
+        _pick(test_session, lg, pick_number=(i * 2) - 1, owner_fpl="1", player_fpl_id=fid)
+    with pytest.raises(RuleViolation, match="already has 5"):
+        _pick(test_session, lg, pick_number=11, owner_fpl="1", player_fpl_id=defs[5])
+
+
+def test_the_quota_counts_players_with_no_season_snapshot(test_session):
+    """The bug this check first shipped with: positions were read only from
+    PlayerSeason, so a season with no snapshot rows counted zero of everything and
+    enforced nothing — while passing the very test meant to prove it worked. The global
+    Player row is the correct fallback in a draft, which is always the current season.
+    """
+    lg, _, _, players = _seed(test_session, mode="off")
+    assert not test_session.query(PlayerSeason).filter_by(league_id=lg.id).count(), \
+        "this fixture deliberately has no season snapshot"
+    defs = _positions_pool(players)["DEF"]
+    for i, fid in enumerate(defs[:5], start=1):
+        _pick(test_session, lg, pick_number=(i * 2) - 1, owner_fpl="1", player_fpl_id=fid)
+    with pytest.raises(RuleViolation, match="already has 5"):
+        _pick(test_session, lg, pick_number=11, owner_fpl="1", player_fpl_id=defs[5])
