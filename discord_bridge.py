@@ -261,6 +261,65 @@ def announce_alerts(db, league, send=None) -> dict:
     return {"sent": len(fresh)}
 
 
+def announce_gameweek_summary(db, league, send=None) -> dict:
+    """Post the final projected scoreboard once a gameweek's fixtures are all done.
+
+    Fires ONCE per gameweek, deduped through the existing `discord_alerts` fingerprint
+    rather than a new marker column — the question ("have I already said this?") and the
+    answer (a content hash) are identical to the alert sweep's, and a second mechanism
+    for one message would be two things to keep in step.
+
+    Gated on every PL fixture in the gameweek being finished, not on `Match.finished`:
+    the latter is FPL's H2H scoring-lock and can lag by hours, and a summary posted
+    while a match is in play would be wrong in the one way that matters.
+    """
+    import services
+    from models import DiscordAlert
+
+    url = webhook_url(ALERT_WEBHOOK_ENV)
+    if send is None:
+        if not url:
+            return {"sent": 0, "skipped": "not configured"}
+        send = _webhook_sender(url)
+
+    gw = services.current_gameweek(db, league)
+    if not gw:
+        return {"sent": 0, "skipped": "no gameweek"}
+    counts = (services.gw_fixture_progress(db, league, gw) or {}).get("counts") or {}
+    if not counts.get("total") or counts.get("finished") != counts.get("total"):
+        return {"sent": 0, "skipped": "gameweek still in play"}
+
+    fingerprint = hashlib.sha256(
+        f"gw-summary|{league.id}|{gw}".encode("utf-8")
+    ).hexdigest()
+    already = (
+        db.query(DiscordAlert)
+        .filter(DiscordAlert.league_id == league.id,
+                DiscordAlert.fingerprint == fingerprint)
+        .first()
+    )
+    if already:
+        return {"sent": 0}
+
+    board = services.get_scoreboard(db, league, gw)
+    if not board.get("matches"):
+        return {"sent": 0, "skipped": "no matches"}
+    lines = []
+    for m in board["matches"]:
+        lines.append(f"**{m['home']} {m['home_score']} – {m['away_score']} {m['away']}**")
+        if m.get("analysis"):
+            lines.append(f"  _{m['analysis']}_")
+    header = f"🏁 **GW{gw} final** _(bench substitutions applied)_"
+    for message in _chunks(lines, header=header):
+        if not send(message):
+            return {"sent": 0, "failed": True}
+
+    db.add(DiscordAlert(league_id=league.id, fingerprint=fingerprint,
+                        summary=f"GW{gw} scoreboard summary"))
+    db.commit()
+    return {"sent": 1, "gameweek": gw}
+
+
 def run_outbound(db, league) -> dict:
     """Both sweeps, guarded. Called from the post-sync hook; never raises.
 
@@ -271,7 +330,8 @@ def run_outbound(db, league) -> dict:
     if league is None or getattr(league, "sync_locked", False):
         return {"skipped": "frozen" if league is not None else "no league"}
     out: dict = {}
-    for name, fn in (("trades", announce_new_trades), ("alerts", announce_alerts)):
+    for name, fn in (("trades", announce_new_trades), ("alerts", announce_alerts),
+                     ("gw_summary", announce_gameweek_summary)):
         try:
             out[name] = fn(db, league)
         except Exception as exc:  # noqa: BLE001

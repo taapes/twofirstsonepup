@@ -423,3 +423,67 @@ def test_the_check_is_absent_when_the_webhook_is_off(test_session, monkeypatch):
 
     names = [c["check"] for c in services.data_health(test_session, lg)]
     assert "trades announced to Discord" not in names
+
+
+# ---- the gameweek summary -----------------------------------------------------
+def _gw_summary_fixture(test_session, monkeypatch, *, finished, total=2, matches=None):
+    """Point the summary at fixed progress and scoreboard data."""
+    import services
+
+    monkeypatch.setattr(services, "current_gameweek", lambda db, lg: 7)
+    monkeypatch.setattr(services, "gw_fixture_progress",
+                        lambda db, lg, gw: {"counts": {"total": total,
+                                                       "finished": finished}})
+    monkeypatch.setattr(services, "get_scoreboard", lambda db, lg, gw=None: {
+        "matches": matches if matches is not None else [
+            {"home": "Ann", "away": "Ben", "home_score": 63, "away_score": 43,
+             "analysis": "Ann wins 63–43."},
+        ]})
+
+
+def test_the_summary_waits_until_every_fixture_is_finished(test_session, monkeypatch):
+    """Gated on real PL fixtures, not Match.finished — FPL's H2H scoring-lock can lag
+    by hours, and a summary posted mid-match is wrong in the way that matters most."""
+    lg, _a, _b = _seed(test_session)
+    _gw_summary_fixture(test_session, monkeypatch, finished=1, total=2)
+    out = discord_bridge.announce_gameweek_summary(
+        test_session, lg, send=FakeSender())
+    assert out == {"sent": 0, "skipped": "gameweek still in play"}
+
+
+def test_the_summary_posts_once_a_gameweek(test_session, monkeypatch):
+    lg, _a, _b = _seed(test_session)
+    _gw_summary_fixture(test_session, monkeypatch, finished=2, total=2)
+    send = FakeSender()
+
+    assert discord_bridge.announce_gameweek_summary(
+        test_session, lg, send=send)["sent"] == 1
+    assert "GW7 final" in send.messages[0]
+    assert "Ann 63 – 43 Ben" in send.messages[0]
+    assert "Ann wins 63–43." in send.messages[0]
+
+    # Sync re-runs constantly; the second call must be silent.
+    assert discord_bridge.announce_gameweek_summary(
+        test_session, lg, send=send)["sent"] == 0
+    assert len(send.messages) == 1
+
+
+def test_a_failed_summary_post_is_retried_next_sweep(test_session, monkeypatch):
+    """The dedupe row is written only after a confirmed send — the same
+    confirm-then-mark ordering the rest of this module uses."""
+    lg, _a, _b = _seed(test_session)
+    _gw_summary_fixture(test_session, monkeypatch, finished=2, total=2)
+
+    assert discord_bridge.announce_gameweek_summary(
+        test_session, lg, send=FakeSender(fail_after=0)) == {"sent": 0, "failed": True}
+    assert discord_bridge.announce_gameweek_summary(
+        test_session, lg, send=FakeSender())["sent"] == 1
+
+
+def test_a_gameweek_with_no_fixtures_is_not_a_finished_one(test_session, monkeypatch):
+    """total=0 would satisfy finished == total and post a summary for a gameweek that
+    hasn't been synced — the same missing-data-isn't-emptiness trap as elsewhere."""
+    lg, _a, _b = _seed(test_session)
+    _gw_summary_fixture(test_session, monkeypatch, finished=0, total=0)
+    assert discord_bridge.announce_gameweek_summary(
+        test_session, lg, send=FakeSender())["skipped"] == "gameweek still in play"
