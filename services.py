@@ -76,6 +76,7 @@ from rules import (
     current_tanking_streak,
     decide_sync,
     fixture_status,
+    project_auto_subs,
     keepers_revealed as _keepers_revealed_rule,
     validate_condition_term,
     validate_pick_condition,
@@ -311,6 +312,119 @@ def waiver_window(db: Session, league: League) -> dict | None:
     }
 
 
+# ---- matchup analysis --------------------------------------------------------
+# A plain-English line per H2H tie: what does the trailing manager still need?
+#
+# DETERMINISTIC, and the arithmetic lives here rather than in a template or a model.
+# When the pundit layer arrives (backlog Item 19) it dresses up facts it was handed —
+# a number in this sentence must never be something an LLM inferred.
+
+
+def _name_list(names, cap=3) -> str:
+    """"A, B and C" — capped, because a manager can have eleven players left."""
+    names = [n for n in names if n]
+    if not names:
+        return ""
+    if len(names) > cap:
+        return f"{', '.join(names[:cap])} +{len(names) - cap} more"
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _pts(n: int) -> str:
+    return f"{n} pt" if n == 1 else f"{n} pts"
+
+
+def _cover_clause(side) -> str:
+    """"— Hall covers Sesko from the bench (11 pts)" / "(vs SPU, Mon 19:00)".
+
+    Cover is looked up BY the at-risk player, because who replaces him depends on his
+    position — naming "the next bench player" would name the backup keeper nearly every
+    time, and he can only ever replace the keeper.
+
+    Names the cover's banked points if he has played, otherwise the fixture he still
+    has, which is the more useful fact: it says when the uncertainty resolves.
+    """
+    ids = [p.get("fpl_id") for p in side.get("remaining_players") or []]
+    cover_map = side.get("cover") or {}
+    for fid in ids:
+        cover = cover_map.get(fid)
+        if not cover or not cover.get("name"):
+            continue
+        who = next(
+            (p["name"] for p in side["remaining_players"] if p.get("fpl_id") == fid),
+            None,
+        )
+        if cover.get("played"):
+            detail = _pts(cover["points"])
+        elif cover.get("opponent"):
+            ko = cover.get("kickoff_time")
+            detail = f"vs {cover['opponent']}" + (f", {ko:%a %H:%M}" if ko else "")
+        else:
+            detail = "yet to play"
+        return f" — {cover['name']} covers {who} from the bench ({detail})"
+    return ""
+
+
+def matchup_analysis(match: dict) -> str:
+    """One sentence describing what the trailing manager needs.
+
+    Four states, and the branching does NOT explode with auto-subs in play: what is
+    uncertain is WHICH player fills a slot, not how many slots there are — a manager
+    always ends on eleven. So the contingency is one clause naming the next bench
+    player, never a tree of outcomes.
+
+    Points are treated as monotonic, which is what makes "settled" decidable: if the
+    trailing manager has nobody left, the leader can only gain, so the result is already
+    known. (A stat correction can technically reduce a score; that is rare enough not to
+    warrant hedging every sentence.)
+    """
+    home, away = match.get("home"), match.get("away")
+    hs, as_ = match.get("home_score"), match.get("away_score")
+    if hs is None or as_ is None:
+        return ""
+    def _side(name, key):
+        rem = match.get(f"{key}_remaining") or {}
+        players = rem.get("remaining_players") or []
+        return {
+            "name": name,
+            "remaining": rem.get("remaining") or 0,
+            "players": [p["name"] for p in players],
+            "remaining_players": players,
+            "cover": match.get(f"{key}_cover") or {},
+        }
+
+    h_side, a_side = _side(home, "home"), _side(away, "away")
+
+    if hs == as_:
+        if not h_side["remaining"] and not a_side["remaining"]:
+            return f"{hs}–{as_} — a draw."
+        parts = []
+        for side in (h_side, a_side):
+            parts.append(
+                f"{side['name']} has {_name_list(side['players']) or 'nobody'} left"
+                if side["remaining"] else f"{side['name']} has nobody left"
+            )
+        return f"Level at {hs} — {parts[0]}, {parts[1]}."
+
+    leader, trailer = (h_side, a_side) if hs > as_ else (a_side, h_side)
+    lead = abs(hs - as_)
+
+    # Points only go up, so a trailing manager with nobody left cannot catch up.
+    if not trailer["remaining"]:
+        return f"{leader['name']} wins {max(hs, as_)}–{min(hs, as_)}."
+
+    names = _name_list(trailer["players"])
+    tail = _cover_clause(trailer)
+    if not leader["remaining"]:
+        return (f"{trailer['name']} needs {lead + 1} from {names} to win, "
+                f"{lead} to draw.{tail}")
+    return (f"{trailer['name']} needs {names} to outscore "
+            f"{_name_list(leader['players'])} by {lead + 1} to win, "
+            f"{lead} to draw.{tail}")
+
+
 def get_scoreboard(db: Session, league: League, gw_number: int | None = None) -> dict:
     """Current-GW H2H scoreboard: each matchup with live scores (from gameweek_points,
     falling back to the match's stored points) and whether it's finished.
@@ -329,10 +443,13 @@ def get_scoreboard(db: Session, league: League, gw_number: int | None = None) ->
     if not gw:
         return {"gameweek": gw_number, "matches": [], "fixtures": None, "synced_at": None}
     names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    live = {
-        gp.manager_id: gp.total_points
-        for gp in db.query(GameweekPoints).filter_by(gameweek_id=gw.id)
-    }
+    # PROJECTED, not FPL's raw live total. FPL applies bench substitutions only when a
+    # gameweek is finalised, so its mid-week number shows a manager carrying a hole it
+    # will later fill — measured on 2026-08-30, four of ten managers were understated,
+    # one by six points. Once a gameweek IS finalised the two agree exactly, which is
+    # the invariant the tests key on.
+    projected = projected_points_by_manager(db, league, gw_number)
+    live = {mid: p["points"] for mid, p in projected.items()}
     remaining = players_remaining_by_manager(db, league, gw_number)
     matches = []
     for mt in db.query(Match).filter_by(league_id=league.id, gameweek_id=gw.id):
@@ -349,6 +466,12 @@ def get_scoreboard(db: Session, league: League, gw_number: int | None = None) ->
                        else names.get(mt.away_manager_id) if (as_ or 0) > (hs or 0) else None),
             "home_remaining": home_r,
             "away_remaining": away_r,
+            # Display only, and present even when empty so a template can iterate
+            # without guarding. Each entry carries the outgoing and incoming player.
+            "home_subs": (projected.get(mt.home_manager_id) or {}).get("subs") or [],
+            "away_subs": (projected.get(mt.away_manager_id) or {}).get("subs") or [],
+            "home_cover": (projected.get(mt.home_manager_id) or {}).get("cover") or [],
+            "away_cover": (projected.get(mt.away_manager_id) or {}).get("cover") or [],
             "home_playing_now": (home_r or {}).get("playing_now", []),
             "away_playing_now": (away_r or {}).get("playing_now", []),
         })
@@ -362,6 +485,7 @@ def get_scoreboard(db: Session, league: League, gw_number: int | None = None) ->
     ]
     closest_margin = min(live_margins) if live_margins else None
     for m in matches:
+        m["analysis"] = matchup_analysis(m)
         m["closest"] = (
             closest_margin is not None
             and not m["finished"]
@@ -1621,11 +1745,154 @@ def _club_next_kickoff_by_gw(db: Session, league: League, gw_number: int) -> dic
     return by_club
 
 
+def _club_opponent_by_gw(db: Session, league: League, gw_number: int) -> dict:
+    """club short-name -> the club it faces in its earliest unfinished fixture this GW.
+
+    Sibling of `_club_next_kickoff_by_gw` and filtered identically, so the two always
+    describe the SAME fixture — the analysis line quotes an opponent and a kickoff
+    together, and picking them from different legs of a double gameweek would read as a
+    fixture that doesn't exist.
+    """
+    chosen: dict = {}
+    for fx in (
+        db.query(Fixture)
+        .filter(Fixture.league_id == league.id, Fixture.event == gw_number)
+    ):
+        if fx.finished or fx.kickoff_time is None:
+            continue
+        for club, other in ((fx.home_team, fx.away_team), (fx.away_team, fx.home_team)):
+            if club is None or other is None:
+                continue
+            current = chosen.get(club)
+            if current is None or fx.kickoff_time < current[0]:
+                chosen[club] = (fx.kickoff_time, other)
+    return {club: other for club, (_ko, other) in chosen.items()}
+
+
+def _ruled_out_ids(entries, season, club_status, playing_clubs) -> set:
+    """Which of these picks definitively cannot score any more this gameweek.
+
+    A player is ruled out only when he has 0 minutes AND his club is done — either the
+    fixture is finished or the club has no fixture at all. A 0-minute player whose match
+    is still in progress or hasn't kicked off is NOT ruled out; he may yet play.
+
+    `playing_clubs` guards the blank test the way `_tanking_counts_by_manager` does: a
+    gameweek with NO fixture rows at all is missing data, not twenty blank clubs. Without
+    that check an unsynced fixture table would rule out every player in the league and
+    the projection would confidently report nonsense.
+    """
+    out = set()
+    for entry in entries or []:
+        if (entry.get("minutes") or 0) != 0:
+            continue
+        ps = season.get(entry.get("fpl_id"))
+        if ps is None:
+            continue
+        blank = bool(playing_clubs) and ps.current_team not in playing_clubs
+        if blank or club_status.get(ps.current_team) == "finished":
+            out.add(entry["fpl_id"])
+    return out
+
+
+def projected_points_by_manager(db: Session, league: League, gw_number: int) -> dict:
+    """manager_id -> {"points", "xi", "subs", "short"} with auto-subs projected.
+
+    FPL applies bench substitutions only when a gameweek is FINALISED, so its live
+    total shows a manager carrying a hole it will later fill. This fills it now. See
+    `rules.project_auto_subs` for the substitution rule and why it is not FPL's literal
+    one.
+
+    Each sub carries the incoming player's name, position, points so far, and whether
+    he has played yet — everything the analysis line and the scoreboard need without
+    re-resolving element ids.
+    """
+    gw = db.query(Gameweek).filter_by(league_id=league.id, number=gw_number).one_or_none()
+    if not gw:
+        return {}
+    season = _season_by_fpl_id(db, league)
+    positions = {fid: (ps.position or "").upper() for fid, ps in season.items()}
+    club_status = _club_status_by_gw(db, league, gw_number)
+    playing_clubs = _gw_fixture_teams(db, league).get(gw_number) or set()
+    next_kickoff = _club_next_kickoff_by_gw(db, league, gw_number)
+    opponents = _club_opponent_by_gw(db, league, gw_number)
+
+    out: dict = {}
+    for gp in db.query(GameweekPoints).filter_by(gameweek_id=gw.id):
+        entries = gp.player_points or []
+        ruled = _ruled_out_ids(entries, season, club_status, playing_clubs)
+        res = project_auto_subs(entries, positions=positions, ruled_out=ruled)
+        by_id = {e.get("fpl_id"): e for e in entries}
+
+        def _describe(fid):
+            ps = season.get(fid)
+            entry = by_id.get(fid) or {}
+            club = ps.current_team if ps else None
+            return {
+                "fpl_id": fid,
+                "name": ps.name if ps else None,
+                "position": positions.get(fid),
+                "points": entry.get("points") or 0,
+                "played": (entry.get("minutes") or 0) > 0,
+                "status": club_status.get(club) if club else None,
+                # For the analysis line's cover clause: who he still has to face, and
+                # when. Both absent once his fixtures are done, which is the signal to
+                # quote his points instead.
+                "opponent": opponents.get(club) if club else None,
+                "kickoff_time": next_kickoff.get(club) if club else None,
+            }
+
+        # Who would come on if a given player in the effective XI blanks — keyed BY
+        # that player, because the answer depends on his position. Naming "the next
+        # bench player" instead is wrong nearly every time: slot 12 is almost always
+        # the backup keeper, and he can only ever replace the keeper.
+        #
+        # Answered by re-running the projection with the player hypothetically ruled
+        # out, so the formation rules decide it rather than a second, drifting copy of
+        # them living here.
+        cover = {}
+        for fid in res["xi"]:
+            if fid in ruled:
+                continue
+            ps = season.get(fid)
+            if ps is not None and club_status.get(ps.current_team) == "finished":
+                continue    # he has played; he cannot blank now
+            hypo = project_auto_subs(
+                entries, positions=positions, ruled_out=ruled | {fid}
+            )
+            replacement = next(
+                (x["in"] for x in hypo["subs"] if x["out"] == fid), None
+            )
+            if replacement is not None:
+                cover[fid] = _describe(replacement)
+        out[gp.manager_id] = {
+            "points": res["points"],
+            "xi": res["xi"],
+            "short": res["short"],
+            "cover": cover,
+            "subs": [
+                {"out": _describe(s["out"]), "in": _describe(s["in"])}
+                for s in res["subs"]
+            ],
+        }
+    return out
+
+
 def players_remaining_by_manager(db: Session, league: League, gw_number: int) -> dict:
     """manager_id -> {"total", "remaining", "in_progress", "by_position",
-    "playing_now", "remaining_players"} for a gameweek's STARTING XI only —
-    bench doesn't score in this format, matching the starter filter
-    `_tanking_counts_by_manager` already uses. A player whose club has NO
+    "playing_now", "remaining_players"} for a gameweek's EFFECTIVE XI — the picked
+    starters with auto-subs projected, so this agrees with the score on the same page.
+
+    That matters for more than tidiness: a bench player who is covering a blank and
+    whose own match is still to come is a player this manager genuinely has left. On the
+    picked XI he appears nowhere, because the bench is excluded — so the count
+    understated exactly the managers the sub projection exists to help. Such a player is
+    flagged `sub: True` in `remaining_players`.
+
+    (The previous docstring claimed the starter filter matched "the starter filter
+    `_tanking_counts_by_manager` already uses". It never did — anti-tanking reads the
+    whole 15-man squad deliberately and has no starter filter at all.)
+
+    A player whose club has NO
     fixture that GW (a blank) is excluded from both `total` and `remaining`
     entirely — he isn't "done," he's simply not counted, so a blank-GW player
     can never make a manager look further along than they are. A double-GW
@@ -1640,6 +1907,7 @@ def players_remaining_by_manager(db: Session, league: League, gw_number: int) ->
     season = _season_by_fpl_id(db, league)
     club_status = _club_status_by_gw(db, league, gw_number)
     next_kickoff = _club_next_kickoff_by_gw(db, league, gw_number)
+    projected = projected_points_by_manager(db, league, gw_number)
     out: dict = {}
     for gp in db.query(GameweekPoints).filter_by(gameweek_id=gw.id):
         buckets = {
@@ -1649,10 +1917,18 @@ def players_remaining_by_manager(db: Session, league: League, gw_number: int) ->
         total = remaining = in_progress = 0
         playing_now = []
         remaining_players = []
+        proj = projected.get(gp.manager_id) or {}
+        effective = set(proj.get("xi") or [])
+        subbed_in = {s["in"]["fpl_id"] for s in (proj.get("subs") or [])}
         for entry in gp.player_points or []:
-            if not entry.get("is_starting"):
+            fid = entry.get("fpl_id")
+            # The EFFECTIVE XI, not the picked one — a projected sub belongs here and a
+            # starter he replaced does not. Falls back to the picked XI when there is no
+            # projection for this manager, so nothing regresses on missing data.
+            in_xi = fid in effective if effective else bool(entry.get("is_starting"))
+            if not in_xi:
                 continue
-            ps = season.get(entry.get("fpl_id"))
+            ps = season.get(fid)
             if ps is None:
                 continue
             status = club_status.get(ps.current_team)
@@ -1671,9 +1947,13 @@ def players_remaining_by_manager(db: Session, league: League, gw_number: int) ->
                 playing_now.append(ps.name)
             elif status == "not_started":
                 remaining_players.append({
+                    "fpl_id": fid,
                     "name": ps.name,
                     "position": pos,
                     "kickoff_time": next_kickoff.get(ps.current_team),
+                    # Marked so the page can say WHY someone who wasn't picked to start
+                    # is listed as still to play.
+                    "sub": fid in subbed_in,
                 })
         remaining_players.sort(
             key=lambda p: (p["kickoff_time"] is None, p["kickoff_time"])

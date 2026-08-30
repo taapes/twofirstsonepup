@@ -52,7 +52,7 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   naming the host it refused. **A plain `pytest` is now safe** — the old convention of
   hand-typing three `--ignore` flags is obsolete, and shouldn't be revived: it failed on
   2026-08-24 because zsh doesn't word-split an unquoted `$IG`, and they hit prod twice.
-  A full run is `1012 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
+  A full run is `1050 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
@@ -484,6 +484,35 @@ Write tests for these. They are custom and non-obvious:
   retroactively reseed a bracket.
 - **Scoreboard:** `GET /scoreboard` (`services.get_scoreboard`) — current-GW H2H live
   scores; 'Scores' nav link in-season.
+  **The score shown is PROJECTED, not FPL's raw live total.** FPL applies bench
+  substitutions only when a gameweek is FINALISED, so its mid-week number shows a
+  manager carrying a hole it will later fill — measured 2026-08-30, four of ten managers
+  were understated, one by six points. `rules.project_auto_subs` (pure) fills it;
+  `services.projected_points_by_manager` resolves the inputs.
+  **The substitution rule is deliberately NOT FPL's literal one.** FPL says the incoming
+  player must have PLAYED, which is only equivalent at gameweek end. Applied live it
+  skips a bench player whose match is tomorrow, promotes the man behind him, then
+  reverses — the projection thrashes. The test here is "can this player still score?"
+  (0 minutes AND his club finished, or a blank GW ⇒ ruled out), which is stable and
+  **converges on FPL's rule exactly** once every match is over. That convergence is the
+  verification: **on a finalised gameweek the projection must equal
+  `GameweekPoints.total_points`**, pinned by a test and confirmed against production GW1.
+  **The goalkeeper rule needs no special case** — with GKP pinned to exactly 1 in
+  `XI_POSITION_MAXIMUMS`, swapping the keeper for an outfielder leaves 0 and swapping an
+  outfielder for the bench keeper leaves 2. Both illegal. The outfield ceilings are
+  unreachable while a squad is FPL-legal (squad limit == XI limit for DEF/MID/FWD), so
+  only the keeper ceiling ever binds.
+  `players_remaining_by_manager` runs on the **effective** XI, so a projected sub whose
+  own match is still to come counts as left to play (flagged `sub: True`) — on the picked
+  XI he appeared nowhere, understating exactly the managers this helps.
+  **Matchup analysis** (`services.matchup_analysis`) is a deterministic sentence per tie,
+  four states, draws called out ("9 to draw, 10 to win"). The contingency does NOT
+  explode: what's uncertain is *which* player fills a slot, not how many slots there are,
+  so it is one clause naming the cover, never a tree. Cover is keyed **by the at-risk
+  player** and answered by re-running the projection with him hypothetically ruled out —
+  naming "the next bench player" is wrong nearly every time, since slot 12 is almost
+  always the backup keeper and he can only replace the keeper. The arithmetic lives in
+  Python so the later pundit layer (Item 19) dresses up facts rather than computing them.
 - **Waiver window:** `services.waiver_window` surfaces waivers-vs-free-agency on
   `/transactions` (informational; add/drops happen in FPL).
 - **Injury / International lists:** IL (same-position replacement, 4-GW min stay,

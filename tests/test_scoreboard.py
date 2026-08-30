@@ -394,3 +394,295 @@ def test_scoreboard_page_groups_finished_fixtures_and_shows_progress(test_sessio
     assert r.status_code == 200
     assert b"1 of 2 PL fixtures finished" in r.content
     assert b"finished fixture" in r.content  # the collapsed <details> summary
+
+
+# ---- projected auto-subs, end to end ------------------------------------------
+# The pure rule is covered in tests/test_auto_subs.py. These cover the DB layer:
+# resolving who is ruled out, and that the score, the leader and the "left to play"
+# count all move together.
+
+def _squad_rows(session, lg, shape, *, gw_number=GW):
+    """Create players for a squad shape and return {label: Player}.
+
+    `shape` is a list of (label, position, club) in pick order, slots 1-15.
+    """
+    made = {}
+    for i, (label, pos, club) in enumerate(shape, start=1):
+        made[label] = _player(session, lg, 500 + i, label, pos, club)
+    return made
+
+
+def _entries(shape, made, *, minutes=None, points=None):
+    minutes, points = minutes or {}, points or {}
+    return [
+        {"fpl_id": made[label].fpl_id, "position": slot, "is_starting": slot <= 11,
+         "minutes": minutes.get(label, 90), "points": points.get(label, 0)}
+        for slot, (label, _pos, _club) in enumerate(shape, start=1)
+    ]
+
+
+# 1 GKP, 4 DEF, 4 MID, 2 FWD starting; bench = GK, DEF, MID, FWD.
+_SHAPE = [
+    ("gk", "GKP", "AAA"),
+    ("d1", "DEF", "BBB"), ("d2", "DEF", "BBB"), ("d3", "DEF", "CCC"), ("d4", "DEF", "CCC"),
+    ("m1", "MID", "DDD"), ("m2", "MID", "DDD"), ("m3", "MID", "EEE"), ("m4", "MID", "EEE"),
+    ("f1", "FWD", "FFF"), ("f2", "FWD", "FFF"),
+    ("bgk", "GKP", "GGG"), ("bd", "DEF", "GGG"), ("bm", "MID", "HHH"), ("bf", "FWD", "HHH"),
+]
+
+
+def test_a_blanking_starter_is_replaced_and_the_score_rises(test_session):
+    """The whole feature: FPL would show 0 for the blank until it finalises."""
+    lg, gw = _league(test_session)
+    mgr = _manager(test_session, lg, "A", "1")
+    made = _squad_rows(test_session, lg, _SHAPE)
+    for club in ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH"):
+        _fixture(test_session, lg, hash(club) % 10000, club, "ZZZ", finished=True)
+    entries = _entries(_SHAPE, made, minutes={"m1": 0}, points={"m2": 5, "bd": 8})
+    _gwpoints(test_session, gw, mgr, entries)
+    test_session.commit()
+
+    proj = services.projected_points_by_manager(test_session, lg, GW)[mgr.id]
+    # The DEFENDER at slot 13 covers the blanking midfielder: he is ahead of the bench
+    # midfielder and four defenders becoming five is legal.
+    assert [s["in"]["name"] for s in proj["subs"]] == ["bd"]
+    assert proj["points"] == 13, "5 from m2 plus the sub's 8"
+
+
+def test_a_zero_minute_starter_whose_match_is_unfinished_is_not_subbed(test_session):
+    """He may yet play. Subbing him now is the thrash the bench rule exists to avoid."""
+    lg, gw = _league(test_session)
+    mgr = _manager(test_session, lg, "A", "1")
+    made = _squad_rows(test_session, lg, _SHAPE)
+    for club in ("AAA", "BBB", "CCC", "EEE", "FFF", "GGG", "HHH"):
+        _fixture(test_session, lg, hash(club) % 10000, club, "ZZZ", finished=True)
+    _fixture(test_session, lg, 7777, "DDD", "ZZZ", finished=False, started=True)
+    entries = _entries(_SHAPE, made, minutes={"m1": 0}, points={"bm": 8})
+    _gwpoints(test_session, gw, mgr, entries)
+    test_session.commit()
+
+    proj = services.projected_points_by_manager(test_session, lg, GW)[mgr.id]
+    assert proj["subs"] == []
+
+
+def test_a_gameweek_with_no_fixture_rows_rules_out_nobody(test_session):
+    """Missing data, not twenty blank clubs. Without this guard an unsynced fixture
+    table would blank every squad and the projection would report nonsense."""
+    lg, gw = _league(test_session)
+    mgr = _manager(test_session, lg, "A", "1")
+    made = _squad_rows(test_session, lg, _SHAPE)
+    entries = _entries(_SHAPE, made, minutes={"m1": 0, "m2": 0})
+    _gwpoints(test_session, gw, mgr, entries)
+    test_session.commit()
+
+    proj = services.projected_points_by_manager(test_session, lg, GW)[mgr.id]
+    assert proj["subs"] == []
+
+
+def test_a_projected_sub_who_has_not_kicked_off_counts_as_left_to_play(test_session):
+    """The commissioner's rule made visible. On the picked XI he appears nowhere,
+    because the bench is excluded — so the count used to understate exactly the
+    managers this feature exists to help."""
+    lg, gw = _league(test_session)
+    mgr = _manager(test_session, lg, "A", "1")
+    made = _squad_rows(test_session, lg, _SHAPE)
+    for club in ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG"):
+        _fixture(test_session, lg, hash(club) % 10000, club, "ZZZ", finished=True)
+    # The bench midfielder's club hasn't kicked off.
+    _fixture(test_session, lg, 8888, "HHH", "ZZZ", finished=False, started=False,
+             kickoff=datetime.datetime(2025, 5, 1, 19, 0, tzinfo=datetime.timezone.utc))
+    # bd blanked for real (GGG has finished), so he is skipped and the midfielder
+    # whose club hasn't kicked off takes the slot.
+    entries = _entries(_SHAPE, made, minutes={"m1": 0, "bd": 0, "bm": 0, "bf": 0})
+    _gwpoints(test_session, gw, mgr, entries)
+    test_session.commit()
+
+    rem = services.players_remaining_by_manager(test_session, lg, GW)[mgr.id]
+    subs = [p for p in rem["remaining_players"] if p["sub"]]
+    assert [p["name"] for p in subs] == ["bm"]
+    assert rem["remaining"] == 1
+
+
+def test_the_scoreboard_score_is_the_projection(test_session):
+    """The leader arrow follows the projected number, not FPL's raw live one."""
+    lg, gw = _league(test_session)
+    home = _manager(test_session, lg, "H", "1")
+    away = _manager(test_session, lg, "A", "2")
+    made = _squad_rows(test_session, lg, _SHAPE)
+    for club in ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH"):
+        _fixture(test_session, lg, hash(club) % 10000, club, "ZZZ", finished=True)
+    # Home blanks a midfielder but has an 8-point sub; stored total says otherwise.
+    _gwpoints(test_session, gw, home,
+              _entries(_SHAPE, made, minutes={"m1": 0}, points={"bd": 8}))
+    _gwpoints(test_session, gw, away, _entries(_SHAPE, made, points={"m2": 3}))
+    test_session.add(Match(league_id=lg.id, gameweek_id=gw.id,
+                           home_manager_id=home.id, away_manager_id=away.id))
+    test_session.commit()
+
+    board = services.get_scoreboard(test_session, lg, GW)
+    m = board["matches"][0]
+    assert m["home_score"] == 8 and m["away_score"] == 3
+    assert m["leader"] == "H"
+    assert [s["in"]["name"] for s in m["home_subs"]] == ["bd"]
+
+
+def test_a_finalised_gameweek_reproduces_fpls_own_total(test_session):
+    """THE INVARIANT, and the reason this feature is verifiable at all.
+
+    Once FPL finalises a gameweek its own total already includes auto-subs, while our
+    stored `is_starting` still reflects the ORIGINAL XI. So on a finalised gameweek the
+    projection must land on exactly FPL's number. Confirmed against production GW1 while
+    this was written — all ten managers, zero delta.
+    """
+    lg, gw = _league(test_session)
+    mgr = _manager(test_session, lg, "A", "1")
+    made = _squad_rows(test_session, lg, _SHAPE)
+    for club in ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH"):
+        _fixture(test_session, lg, hash(club) % 10000, club, "ZZZ", finished=True)
+    entries = _entries(_SHAPE, made, minutes={"m1": 0}, points={"m2": 5, "bd": 8})
+    # What FPL would store once finalised: the XI sum WITH the sub applied.
+    test_session.add(GameweekPoints(manager_id=mgr.id, gameweek_id=gw.id,
+                                    total_points=13, player_points=entries))
+    test_session.commit()
+
+    proj = services.projected_points_by_manager(test_session, lg, GW)[mgr.id]
+    stored = test_session.query(GameweekPoints).filter_by(manager_id=mgr.id).one()
+    assert proj["points"] == stored.total_points
+
+
+# ---- matchup analysis ---------------------------------------------------------
+# Deterministic, and the arithmetic is pinned here so that when the pundit layer
+# arrives (backlog Item 19) a number in the sentence is never something it inferred.
+
+def _match(hs, as_, *, home_left=(), away_left=(), home_cover=None, away_cover=None):
+    """A get_scoreboard match row, reduced to what the analysis reads."""
+    def side(names):
+        players = [{"fpl_id": 1000 + i, "name": n} for i, n in enumerate(names)]
+        return {"remaining": len(players), "remaining_players": players}
+
+    return {
+        "home": "Scott", "away": "John", "home_score": hs, "away_score": as_,
+        "home_remaining": side(home_left), "away_remaining": side(away_left),
+        "home_cover": home_cover or {}, "away_cover": away_cover or {},
+    }
+
+
+def test_analysis_settled_names_the_winner_and_the_score():
+    assert services.matchup_analysis(_match(63, 43)) == "Scott wins 63–43."
+
+
+def test_analysis_a_level_finish_is_a_draw():
+    """Draws are real in this league, so this is a result, not a pending state."""
+    assert services.matchup_analysis(_match(41, 41)) == "41–41 — a draw."
+
+
+def test_analysis_a_trailing_manager_with_nobody_left_has_already_lost():
+    """Points only go up, so the leader cannot be caught. Saying "needs 11 from
+    nobody" would be technically true and useless."""
+    out = services.matchup_analysis(_match(43, 63, home_left=()))
+    assert out == "John wins 63–43."
+
+
+def test_analysis_when_the_leader_is_done_it_is_a_plain_target():
+    out = services.matchup_analysis(_match(38, 42, home_left=("Sesko", "White")))
+    assert out == "Scott needs 5 from Sesko and White to win, 4 to draw."
+
+
+def test_analysis_when_both_have_players_left_it_is_a_comparison():
+    """The shape the commissioner asked for."""
+    out = services.matchup_analysis(
+        _match(38, 48, home_left=("Sesko", "White"), away_left=("Bruno",))
+    )
+    assert out == ("Scott needs Sesko and White to outscore Bruno by 11 to win, "
+                   "10 to draw.")
+
+
+def test_analysis_level_with_players_left_is_not_a_result_yet():
+    out = services.matchup_analysis(
+        _match(40, 40, home_left=("Sesko",), away_left=("Bruno",))
+    )
+    assert out == "Level at 40 — Scott has Sesko left, John has Bruno left."
+
+
+def test_analysis_level_with_one_side_out_of_players():
+    out = services.matchup_analysis(_match(40, 40, home_left=("Sesko",)))
+    assert out == "Level at 40 — Scott has Sesko left, John has nobody left."
+
+
+def test_analysis_draw_arithmetic_is_one_less_than_the_win():
+    """A one-point trail needs 2 to win and 1 to draw — the case where getting this
+    off by one actually changes what a manager does."""
+    out = services.matchup_analysis(_match(40, 41, home_left=("Sesko",)))
+    assert "needs 2 from Sesko to win, 1 to draw" in out
+
+
+def test_analysis_caps_a_long_list_of_names():
+    out = services.matchup_analysis(
+        _match(10, 20, home_left=("A", "B", "C", "D", "E"))
+    )
+    assert "A, B, C +2 more" in out
+
+
+def test_analysis_cover_clause_quotes_banked_points():
+    cover = {1000: {"name": "Hall", "points": 11, "played": True}}
+    out = services.matchup_analysis(
+        _match(38, 48, home_left=("Sesko",), away_left=("Bruno",), home_cover=cover)
+    )
+    assert out.endswith("— Hall covers Sesko from the bench (11 pts)")
+
+
+def test_analysis_cover_clause_quotes_the_fixture_when_he_has_not_played():
+    """More useful than "0 pts": it says when the uncertainty resolves."""
+    cover = {1000: {"name": "Hall", "points": 0, "played": False, "opponent": "SPU",
+                    "kickoff_time": datetime.datetime(2025, 5, 5, 19, 0,
+                                                      tzinfo=datetime.timezone.utc)}}
+    out = services.matchup_analysis(
+        _match(38, 48, home_left=("Sesko",), away_left=("Bruno",), home_cover=cover)
+    )
+    assert "Hall covers Sesko from the bench (vs SPU, Mon 19:00)" in out
+
+
+def test_analysis_singular_point_is_not_pluralised():
+    cover = {1000: {"name": "Hall", "points": 1, "played": True}}
+    out = services.matchup_analysis(
+        _match(38, 48, home_left=("Sesko",), away_left=("Bruno",), home_cover=cover)
+    )
+    assert "(1 pt)" in out and "1 pts" not in out
+
+
+def test_analysis_says_nothing_without_scores():
+    """A gameweek with no points synced yet must not produce a sentence about None."""
+    assert services.matchup_analysis(_match(None, None)) == ""
+
+
+def test_the_scoreboard_page_renders_the_analysis_and_marks_a_sub(test_session):
+    """Both new pieces of UI. A template error here loses the whole feature silently,
+    since the page would still render the scores."""
+    from auth import hash_password
+    from fastapi.testclient import TestClient
+    from main import app
+
+    lg, gw = _league(test_session)
+    home = _manager(test_session, lg, "Scott", "1")
+    away = _manager(test_session, lg, "John", "2")
+    made = _squad_rows(test_session, lg, _SHAPE)
+    for club in ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG"):
+        _fixture(test_session, lg, hash(club) % 10000, club, "ZZZ", finished=True)
+    _fixture(test_session, lg, 8888, "HHH", "ZZZ", finished=False, started=False,
+             kickoff=datetime.datetime(2025, 5, 5, 19, 0, tzinfo=datetime.timezone.utc))
+    # m1 blanks, bd blanked too, so the not-yet-kicked-off bench midfielder covers.
+    _gwpoints(test_session, gw, home,
+              _entries(_SHAPE, made, minutes={"m1": 0, "bd": 0, "bm": 0, "bf": 0}))
+    _gwpoints(test_session, gw, away, _entries(_SHAPE, made, points={"m2": 9}))
+    test_session.add(Match(league_id=lg.id, gameweek_id=gw.id,
+                           home_manager_id=home.id, away_manager_id=away.id))
+    home.password_hash = hash_password("pw")
+    test_session.commit()
+
+    client = TestClient(app, follow_redirects=False)
+    assert client.post("/login", data={"manager_id": "1", "password": "pw"}).status_code == 303
+    r = client.get(f"/scoreboard?gw={GW}")
+    assert r.status_code == 200, r.text
+    body = r.text
+    assert "Scott needs" in body, "the analysis line rendered"
+    assert ">sub<" in body, "the projected substitute is marked as one"

@@ -590,6 +590,124 @@ SQUAD_POSITION_LIMITS = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}   # sums to ROS
 # The floor a starting XI has to satisfy; what a manager must still have room for when
 # their remaining picks run down.
 XI_POSITION_MINIMUMS = {"GKP": 1, "DEF": 3, "MID": 2, "FWD": 1}
+# The ceiling. GKP is pinned to exactly 1 by having the same min and max, which is what
+# makes "a keeper can only be replaced by the bench keeper" fall out of the formation
+# check instead of needing its own branch: swapping the keeper for an outfielder leaves
+# 0 keepers and swapping an outfielder for the bench keeper leaves 2. Both illegal.
+# The outfield ceilings equal SQUAD_POSITION_LIMITS, so they can only bind when a squad
+# is already at the limit for a position.
+XI_POSITION_MAXIMUMS = {"GKP": 1, "DEF": 5, "MID": 5, "FWD": 3}
+XI_SIZE = sum(XI_POSITION_MINIMUMS.values()) + 4   # 11
+
+
+
+# ---- Projected auto-substitutions ----
+# FPL applies bench substitutions only when a gameweek is FINALISED, so a live score
+# shows a manager carrying a hole that FPL will later fill. Measured on 2026-08-30
+# during GW2: 8 of 10 managers had a blanking starter, and one was shown 12 points
+# below his real score. This projects the subs so the live number is true.
+#
+# PURE, like zero_minute_count and fixture_status. The caller resolves who is ruled out
+# and what position everyone plays; this only decides who comes on.
+
+
+def _formation_of(xi, positions) -> dict:
+    counts = {p: 0 for p in XI_POSITION_MINIMUMS}
+    for fid in xi:
+        pos = positions.get(fid)
+        if pos in counts:
+            counts[pos] += 1
+    return counts
+
+
+def _formation_legal(xi, positions) -> bool:
+    """Is this a legal XI? Exactly 1 GKP, 3-5 DEF, 2-5 MID, 1-3 FWD.
+
+    A player with no known position is counted in neither direction — an unresolvable
+    element id must not silently make a legal XI look illegal (or vice versa).
+    """
+    counts = _formation_of(xi, positions)
+    return all(
+        XI_POSITION_MINIMUMS[p] <= counts[p] <= XI_POSITION_MAXIMUMS[p]
+        for p in XI_POSITION_MINIMUMS
+    )
+
+
+def project_auto_subs(entries, *, positions, ruled_out=frozenset()) -> dict:
+    """Apply FPL's auto-substitution rules to a gameweek's picks.
+
+    `entries` is the `player_points` JSONB list: dicts with `fpl_id`, `position` (the
+    PICK SLOT, 1-15 — not GKP/DEF/MID/FWD), `is_starting`, `minutes`, `points`.
+    `positions` maps fpl_id -> 'GKP'|'DEF'|'MID'|'FWD'. `ruled_out` holds the fpl_ids
+    that definitively cannot score any more this gameweek.
+
+    Returns {"xi": [fpl_id...], "subs": [{"out","in"}], "points": int, "short": bool}.
+
+    Note the outfield CEILINGS are unreachable while a squad is FPL-legal, because the
+    squad limit and the XI limit are the same number for DEF, MID and FWD (5/5/3). Only
+    the goalkeeper ceiling ever binds in practice. They are still checked, because an
+    out-of-shape squad is exactly what the quota enforcement elsewhere exists to prevent
+    and this must not depend on that having worked.
+
+    THE RULE, and why it is not FPL's literal one. FPL says the incoming player must
+    have PLAYED. That is only equivalent at gameweek end, when every match is over.
+    Applied live it skips a bench player whose match is tomorrow, promotes the man
+    behind him, then reverses itself hours later — the projection thrashes. So the test
+    here is "can this player still score?" (i.e. not in `ruled_out`), which is stable,
+    surfaces that a manager has someone still to come, and CONVERGES ON FPL'S RULE
+    EXACTLY once every match has finished, because at that point "not ruled out" and
+    "played > 0 minutes" are the same predicate. That convergence is testable: on a
+    finalised gameweek this must reproduce FPL's own total.
+
+    Bench priority is the stored pick slot (12, 13, 14, 15) — `entries` already arrives
+    sorted by it from sync, but this sorts defensively rather than trusting order.
+
+    `short` is True when a ruled-out starter could not be legally replaced. FPL does not
+    field ten men in that case: the blanking player simply stays in the XI on 0 points,
+    which is what happens here too. The flag exists for diagnostics, not for display.
+    """
+    rows = sorted(
+        (e for e in (entries or []) if e.get("fpl_id") is not None),
+        key=lambda e: (e.get("position") or 99),
+    )
+    xi = [e["fpl_id"] for e in rows if e.get("is_starting")]
+    bench = [e["fpl_id"] for e in rows if not e.get("is_starting")]
+    points = {e["fpl_id"]: (e.get("points") or 0) for e in rows}
+
+    subs = []
+    short = False
+    used = set()
+    # Pick order, so an earlier slot gets first call on the bench — matching FPL.
+    for out_id in list(xi):
+        if out_id not in ruled_out:
+            continue
+        if positions.get(out_id) not in XI_POSITION_MINIMUMS:
+            # We don't know what we'd be removing, so we can't tell whether any
+            # replacement keeps the XI legal. Leave him — the same "can't resolve,
+            # don't guess" guard players_remaining_by_manager uses. The real caller
+            # never gets here (it skips unresolvable ids before building `ruled_out`),
+            # so this is a backstop against a caller that doesn't.
+            continue
+        for in_id in bench:
+            if in_id in used or in_id in ruled_out:
+                continue
+            candidate = [in_id if f == out_id else f for f in xi]
+            if not _formation_legal(candidate, positions):
+                continue
+            xi = candidate
+            used.add(in_id)
+            subs.append({"out": out_id, "in": in_id})
+            break
+        else:
+            # No legal cover. He stays, on zero. See the docstring.
+            short = True
+
+    return {
+        "xi": xi,
+        "subs": subs,
+        "points": sum(points.get(f, 0) for f in xi),
+        "short": short,
+    }
 
 
 # ---- Conditional pick trades ----

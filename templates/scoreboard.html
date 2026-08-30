@@ -5,7 +5,7 @@
 <details style="margin-top:2px"><summary class="sub">remaining players</summary>
   <ul style="margin:4px 0 0 16px;padding:0">
     {% for p in r.remaining_players %}
-    <li class="sub">{{ p.name }} ({{ p.position }}){% if p.kickoff_time %} — kicks off {{ p.kickoff_time.strftime('%a %H:%M') }}{% endif %}</li>
+    <li class="sub">{{ p.name }} ({{ p.position }}){% if p.sub %} <span class="pill" title="Projected substitute — covering a starter whose club has finished without him">sub</span>{% endif %}{% if p.kickoff_time %} — kicks off {{ p.kickoff_time.strftime('%a %H:%M') }}{% endif %}</li>
     {% endfor %}
   </ul>
 </details>
@@ -81,7 +81,7 @@
 
 <div class="card">
   <table>
-    <thead><tr><th>Home</th><th class="num">Score</th><th>Away</th><th>H2H scoring</th></tr></thead>
+    <thead><tr><th>Home</th><th class="num" title="Bench substitutions projected, which FPL only applies once a gameweek is finalised — so this can read higher than the FPL app until then">Score</th><th>Away</th><th>H2H scoring</th></tr></thead>
     <tbody>
       {% for m in board.matches %}
       <tr>
@@ -103,6 +103,10 @@
         </td>
         <td class="sub">{% if m.finished %}finalized{% else %}in progress{% endif %}</td>
       </tr>
+      {% if m.analysis %}
+      {# Spans the row so the sentence has room to read as a sentence. #}
+      <tr><td colspan="4" class="sub" style="padding-top:0;border-top:0">{{ m.analysis }}</td></tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>
