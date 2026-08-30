@@ -195,12 +195,42 @@ def test_an_unmapped_author_stages_with_the_gap_reported(test_session, monkeypat
     assert services.unmapped_discord_authors(test_session, lg)[0]["name"] == "Sir Hefty Boy"
 
 
-def test_the_replacement_is_suggested_from_roster_diffs(test_session, monkeypatch):
+def test_the_replacement_is_suggested_for_a_GW1_post(test_session, monkeypatch):
+    """EVERY real IL post says "1-4", i.e. start_gw=1 — and at GW1 there is no previous
+    snapshot to diff against.
+
+    A diff-only implementation therefore returns nothing for exactly the messages that
+    motivated this feature, while passing a test written at GW2. That is what the first
+    cut did, and it is the silent-inert shape this repo keeps finding: healthy-looking,
+    tested, and inert on real data. The squad tier is what makes it work.
+    """
+    lg, m = _seed(test_session)
+    saliba = _player(test_session, lg, "Saliba", 500)
+    gabriel = _player(test_session, lg, "Gabriel", 502)
+    haaland = _player(test_session, lg, "Haaland", 503, position="FWD")
+    gws = {g.number: g for g in test_session.query(Gameweek)}
+    for p in (saliba, gabriel, haaland):
+        test_session.add(Roster(manager_id=m["John"].id, player_id=p.id,
+                                gameweek_id=gws[1].id))
+    test_session.commit()
+
+    _poll(test_session, lg, monkeypatch, [_raw(1, IL_MSG)])   # the real "1-4" text
+    ing = test_session.query(DiscordIngest).one()
+    names = [s["name"] for s in ing.resolution["replacement_suggestions"]]
+    assert names, "a GW1 post must still offer candidates"
+    # Narrowed to the injured player's position, which is all place_on_il accepts.
+    assert "Haaland" not in names, "a FWD can't replace a DEF"
+    assert "Gabriel" in names
+
+
+def test_the_replacement_prefers_whoever_was_actually_added(test_session, monkeypatch):
     """The missing field is filled in with a real default: whoever this manager
     actually added that gameweek. This is what makes confirming one click."""
     lg, m = _seed(test_session)
     saliba = _player(test_session, lg, "Saliba", 500)
-    wissa = _player(test_session, lg, "Wissa", 501, position="FWD")
+    # Same position as Saliba: place_on_il only accepts a like-for-like swap,
+    # so a FWD here would be an unrealistic fixture.
+    wissa = _player(test_session, lg, "Wissa", 501)
     gws = {g.number: g for g in test_session.query(Gameweek)}
     john = m["John"]
     test_session.add(Roster(manager_id=john.id, player_id=saliba.id,
@@ -213,7 +243,12 @@ def test_the_replacement_is_suggested_from_roster_diffs(test_session, monkeypatc
 
     _poll(test_session, lg, monkeypatch, [_raw(1, "Saliba IL 2-5")])
     ing = test_session.query(DiscordIngest).one()
-    assert [s["name"] for s in ing.resolution["replacement_suggestions"]] == ["Wissa"]
+    suggestions = ing.resolution["replacement_suggestions"]
+    assert suggestions[0] == {"fpl_id": 501, "name": "Wissa", "position": "DEF",
+                              "reason": "added"}
+    # And never the injured player himself — he is on his own squad, and place_on_il
+    # refuses "replace Saliba with Saliba".
+    assert "Saliba" not in [s["name"] for s in suggestions]
 
 
 # ---- trades -------------------------------------------------------------------

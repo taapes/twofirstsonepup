@@ -84,8 +84,12 @@ test files can commit to the PRODUCTION database" and "Audit for the silent-iner
 pattern."
 
 **Open, added during the 5a work and not yet in `SESSION_PLANS.md`:**
-- **Model/DB index drift: two declared indexes don't exist** (`P3`, found 2026-08-25
-  while generating the Item 17 migration). `alembic revision --autogenerate` proposes
+- ~~**Model/DB index drift: two declared indexes don't exist**~~ — **done 2026-08-30**
+  (`c6d7e8f9a0b1`). `CREATE INDEX IF NOT EXISTS` for both, since production and a
+  freshly-migrated schema were not guaranteed to agree (production turned out to have
+  neither). Verified: `alembic revision --autogenerate` against a migrated schema now
+  detects nothing, so a diff contains only what its author changed. Original entry:
+  (`P3`, found 2026-08-25 while generating the Item 17 migration). `alembic revision --autogenerate` proposes
   `ix_draft_queue_season_year` (`draft_queue.season_year`) and
   `ix_side_payouts_manager_id` (`side_payouts.manager_id`) on a schema built from
   migrations — so the models declare `index=True` on both and no revision ever created
@@ -98,8 +102,10 @@ pattern."
   `DATABASE_URL`. Deliberate (they test code that commits internally) but unguarded,
   and the reason every regression summary here says "green excluding those three".
   Confirmed to have actually written to prod on 2026-08-18.
-- **Audit for the silent-inert pattern** (`P2`, suggested 2026-08-20) — **first sweep run
-  2026-08-24; see "Silent-inert sweep #1" below for its six findings.** Now THREE
+- **Audit for the silent-inert pattern** (`P2`, suggested 2026-08-20) — **sweep #1 run
+  2026-08-24 (six findings); sweep #2 run 2026-08-30 (two findings, both in code written
+  the day before, one of them with a passing test — see "Silent-inert sweep #2" below).**
+  Now THREE
   findings sharing a shape, the last one a live production outage: a guard or an
   implicit invariant that held only because of how something else behaved, going quiet
   the moment that something else changed, with the empty/wrong case looking legitimate
@@ -2146,6 +2152,58 @@ A second one, found the same way: `resolve_player_by_label` round-tripped throug
 `fpl_id`, which is NULL for every departed player — `WHERE fpl_id IS NULL` matched them
 all and raised `MultipleResultsFound` (a 500). It now resolves the row directly, sharing
 `_picker_label` with `list_players`, so no element id is involved.
+
+---
+
+### Silent-inert sweep #2
+
+**Priority:** `P2` — the standing audit.
+**Status:** `done` — 2026-08-30. Two findings, both in code written the day before.
+
+**The pattern** (see the "Audit for the silent-inert pattern" bullet up top): a guard or
+an implicit invariant that holds only because of how something else behaves, going quiet
+the moment that changes, with the empty/wrong case looking legitimate everywhere it is
+checked.
+
+**Finding 1 — `suggest_il_replacement` was inert on every real message.** The IL review
+queue pre-fills the replacement player (the field no announcement contains) by diffing
+this manager's roster between `start_gw` and `start_gw - 1`. But **every real IL post in
+the sample says "1-4"**, i.e. `start_gw=1`, and at GW1 there is no previous snapshot — so
+the dropdown was empty for exactly the messages that motivated the feature.
+
+It had a passing test. The test used `"Saliba IL 2-5"`, written that way so the diff
+would work — the limitation was designed around rather than found. That is the whole
+shape in one line: healthy-looking, tested, inert on real data.
+
+Fixed by adding a second tier (the rest of the manager's squad) and narrowing to the
+injured player's position. Two bugs fell out of the fix: the injured player was being
+offered as his own replacement (`place_on_il` refuses that outright), and the test
+fixture had a FWD replacing a DEF, which `place_on_il` would also have refused — an
+unrealistic fixture hiding behind an assertion that only checked a name. Now pinned by a
+test using the REAL message text, and both fixes verified to bite.
+
+**Finding 2 — a dead trade webhook was undetectable.** A rotated, revoked or
+deleted-channel webhook fails *exactly* the way a healthy one fails on a network blip:
+`post_message` returns False, the row stays unstamped, the sweep retries next sync. That
+is correct behaviour and also indistinguishable from working; the only evidence was a log
+line nobody reads, so trades would quietly stop being announced forever.
+
+Fixed with a `data_health` check that asserts **the queue, not the sender** — a backlog
+older than a day means the sweep has been failing, whatever the reason. Zero pending is
+healthy; a trade recorded minutes ago is not yet a problem; and the check is absent
+entirely when the webhook is unconfigured, because a permanent backlog is the correct
+state there.
+
+**Checked and clear:** the 24 existing `data_health` checks (the documented "draft-day
+player pool captured" one does exist — an earlier grep missed it only because its `add(`
+call spans lines); `pick_ownership` / `player_ownership`'s silent `continue` on an
+unresolvable manager, both already covered by checks 11 and 23; `advance_season`'s
+identity carries, which now include `discord_user_id`.
+
+**Worth noting for sweep #3.** Both findings were in code less than 24 hours old, and one
+of them had a green test. The lesson is not "write more tests" — it is that a fixture
+chosen to make the code work is evidence about the fixture, not the code. Prefer real
+inputs, verbatim, even when they are inconvenient.
 
 ---
 

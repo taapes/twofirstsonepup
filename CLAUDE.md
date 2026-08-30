@@ -52,7 +52,7 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   naming the host it refused. **A plain `pytest` is now safe** — the old convention of
   hand-typing three `--ignore` flags is obsolete, and shouldn't be revived: it failed on
   2026-08-24 because zsh doesn't word-split an unquoted `$IG`, and they hit prod twice.
-  A full run is `999 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
+  A full run is `1003 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
@@ -730,9 +730,14 @@ the write is structurally incomplete however confident the parse. A trade post i
 written by someone who isn't a party to it, never says whose pick a traded pick
 originally was, and uses two pick notations. So the goal is not to remove the human —
 it is to make confirming an announcement **one click instead of a form**.
-`services.suggest_il_replacement` supplies the missing field by diffing roster snapshots
-(who did this manager ADD that GW), pre-selected in the queue; a suggestion only, for
-the same reason `docs/DESIGN_IL_OWNERSHIP.md` refuses to derive the season-end release.
+`services.suggest_il_replacement` supplies the missing field, pre-selected in the queue:
+players this manager ADDED that GW first (roster-snapshot diff), then the rest of their
+squad, narrowed to the injured player's position and excluding him. **The squad tier is
+load-bearing, not a nicety** — every real IL post says "1-4", so `start_gw=1` and there
+is no prior snapshot to diff; a diff-only version returns nothing for exactly the
+messages that motivated the feature while passing a test written at GW2. A suggestion
+only, for the same reason `docs/DESIGN_IL_OWNERSHIP.md` refuses to derive the season-end
+release.
 **`managers.discord_user_id` is the single highest-value piece of setup** — with it the
 AUTHOR of an IL post is a known manager at certainty 1.0 and no name matching happens at
 all, and it is the only way to resolve a handle like "Sir Hefty Boy". UNIQUE is

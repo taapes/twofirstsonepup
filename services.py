@@ -8906,14 +8906,37 @@ def data_health(db: Session, league: League) -> list[dict]:
         if gaps else "ok",
     )
 
+    # A webhook that has been rotated, revoked or pointed at a deleted channel fails
+    # exactly the way a healthy one fails on a blip: post_message returns False, the
+    # row stays unstamped, the sweep retries next sync. That is correct behaviour and
+    # it is also indistinguishable from working — the only evidence is a log line
+    # nobody reads, so trades quietly stop being announced forever.
+    #
+    # So assert the QUEUE, not the sender: a backlog older than a day means the sweep
+    # has been failing, whatever the reason. Zero pending is the healthy state and a
+    # trade recorded minutes ago is not yet a problem. Skipped when the feature is off,
+    # since a permanent backlog is the correct state for an unconfigured webhook.
+    import discord_bridge
+
+    if discord_bridge.webhook_url():
+        import datetime as _dt
+
+        cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=1)
+        stale = (
+            db.query(Trade)
+            .filter(Trade.announced_at.is_(None), Trade.created_at < cutoff)
+            .count()
+        )
+        add("trades announced to Discord", stale == 0,
+            f"{stale} trade(s) unannounced for over a day — check the webhook URL"
+            if stale else "")
+
     # Discord bridge. Both of its silent failure modes look exactly like a quiet
     # channel — a missing Read Message History permission returns an empty array
     # rather than a 403, and a disabled MESSAGE CONTENT intent returns blank content
     # with a 200 — so this asserts the INPUT, the same way the draft-day pool check
     # does. Skipped entirely when the feature is off: "not configured" is a supported
     # state, not a failure.
-    import discord_bridge
-
     if discord_bridge.bot_token():
         for label, env in (("trades", discord_bridge.TRADE_CHANNEL_ENV),
                            ("IL", discord_bridge.IL_CHANNEL_ENV)):

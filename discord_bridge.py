@@ -492,18 +492,36 @@ def resolve_player(db, name: str) -> dict:
     return {"player": top[2], "method": top[1], "score": top[0], "why": ""}
 
 
-def suggest_il_replacement(db, league, manager, start_gw: int) -> list[dict]:
+def suggest_il_replacement(
+    db, league, manager, start_gw: int, position: str | None = None,
+    exclude_fpl_id: int | None = None,
+) -> list[dict]:
     """Who probably came in for the absentee — the field the announcement never has.
 
-    Derived the same way `get_transactions` derives add/drops: diff this manager's
-    roster between consecutive gameweek snapshots. Whoever they ADDED at `start_gw` is
-    offered first, which turns "read Discord, remember it, open the site, fill four
-    fields" into "confirm one dropdown".
+    Ranked, best first, each with the reason it is being offered:
 
-    A suggestion only. FPL records no paired add/drop, so which arrival replaced which
-    departure is genuinely unknowable from a diffed snapshot — the same reason
-    docs/DESIGN_IL_OWNERSHIP.md gives for making the season-end release
-    manager-designated rather than derived. Do not promote this to automatic.
+      1. `added` — this manager gained this player at `start_gw`, derived the same way
+         `get_transactions` derives add/drops (diff consecutive roster snapshots).
+      2. `squad` — everyone else they hold. Not a guess about the swap, just the set of
+         players it could legally have been.
+
+    THE SECOND TIER IS NOT A NICETY. Every real IL post in the sample says "1-4", i.e.
+    start_gw=1, and at GW1 there is no previous snapshot to diff — so a diff-only
+    version returns nothing for exactly the messages that motivated the feature, while
+    looking perfectly healthy in a test written at GW2. That is the silent-inert shape
+    this repo keeps finding, and it is why this function must return SOMETHING useful
+    whenever the manager holds anyone at all.
+
+    `position` narrows to what `place_on_il` will actually accept (its same-position
+    rule), turning a fifteen-item dropdown into a three-item one, and `exclude_fpl_id`
+    drops the injured player himself — he is on his own squad, so without this the
+    top suggestion is frequently "replace Saliba with Saliba", which place_on_il
+    refuses outright.
+
+    A suggestion only, never applied. FPL records no paired add/drop, so which arrival
+    replaced which departure is genuinely unknowable from a diffed snapshot — the same
+    reason docs/DESIGN_IL_OWNERSHIP.md refuses to derive the season-end release. Do not
+    promote this to automatic.
     """
     from models import Gameweek, Roster
 
@@ -515,14 +533,41 @@ def suggest_il_replacement(db, league, manager, start_gw: int) -> list[dict]:
                     Roster.manager_id == manager.id)
         }
 
-    added = squad(start_gw) - squad(start_gw - 1) if start_gw > 1 else set()
+    held = squad(start_gw)
+    if not held:
+        # No snapshot for that GW (a backfilled historical absence, or a post that
+        # arrived before the first sync of the season). Fall back to the latest roster
+        # we do have rather than returning nothing.
+        latest = (
+            db.query(Gameweek.number)
+            .join(Roster, Roster.gameweek_id == Gameweek.id)
+            .filter(Gameweek.league_id == league.id, Roster.manager_id == manager.id)
+            .order_by(Gameweek.number.desc())
+            .limit(1)
+            .scalar()
+        )
+        held = squad(latest) if latest else set()
+    added = (held - squad(start_gw - 1)) if start_gw > 1 else set()
+
     import services
 
-    ident = services.season_identity(db, league, list(added)) if added else {}
-    return [
-        {"fpl_id": row.fpl_id, "name": row.name, "position": row.position}
-        for row in (ident.get(pid) for pid in added) if row is not None
-    ]
+    ident = services.season_identity(db, league, list(held))
+    out = []
+    for pid in held:
+        row = ident.get(pid)
+        if row is None:
+            continue
+        if position and row.position != position:
+            continue
+        if exclude_fpl_id is not None and row.fpl_id == exclude_fpl_id:
+            continue
+        out.append({
+            "fpl_id": row.fpl_id, "name": row.name, "position": row.position,
+            "reason": "added" if pid in added else "squad",
+        })
+    # Additions first, then alphabetical inside each tier so the list is stable.
+    out.sort(key=lambda r: (r["reason"] != "added", (r["name"] or "").lower()))
+    return out
 
 
 # ---- the ingest pipeline ------------------------------------------------------
@@ -729,8 +774,14 @@ def ingest_message(db, league, msg) -> str:
             "manager": {"method": author["method"],
                         "display": manager.display if manager else None},
             "end_gw": il["end_gw"],
+            # Narrowed to the injured player's position, which is what place_on_il
+            # will actually accept.
             "replacement_suggestions": (
-                suggest_il_replacement(db, league, manager, il["start_gw"])
+                suggest_il_replacement(
+                    db, league, manager, il["start_gw"],
+                    position=hit["player"].position if hit["player"] else None,
+                    exclude_fpl_id=hit["player"].fpl_id if hit["player"] else None,
+                )
                 if manager else []
             ),
             "needs": ["replacement_fpl_id"],

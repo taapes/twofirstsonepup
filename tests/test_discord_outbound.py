@@ -19,6 +19,7 @@ import datetime as dt
 import pytest
 
 import discord_bridge
+import services
 from models import DiscordAlert, Gameweek, League, Manager, Player, Trade
 
 T1 = dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.timezone.utc)
@@ -382,3 +383,43 @@ def test_run_outbound_runs_both_sweeps_through_the_real_wiring(
 
     test_session.refresh(t)
     assert t.announced_at is not None
+
+
+# ---- the queue must not back up silently --------------------------------------
+def test_a_stale_announce_queue_is_reported_on_health(test_session, monkeypatch):
+    """A rotated or revoked webhook fails exactly the way a healthy one fails on a
+    blip: post returns False, the row stays unstamped, the sweep retries. Correct, and
+    indistinguishable from working — the only evidence is a log line nobody reads. So
+    the QUEUE is asserted, not the sender."""
+    monkeypatch.setenv(discord_bridge.WEBHOOK_ENV, "https://example.invalid/hook")
+    lg, a, b = _seed(test_session)
+    old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
+    _player_trade(test_session, lg, a, b, created_at=old)
+
+    check = next(c for c in services.data_health(test_session, lg)
+                 if c["check"] == "trades announced to Discord")
+    assert check["ok"] is False and "webhook" in check["detail"]
+
+
+def test_a_freshly_recorded_trade_is_not_yet_a_backlog(test_session, monkeypatch):
+    """It just hasn't been swept yet. Flagging it would make the check cry wolf on
+    every trade the commissioner enters."""
+    monkeypatch.setenv(discord_bridge.WEBHOOK_ENV, "https://example.invalid/hook")
+    lg, a, b = _seed(test_session)
+    _player_trade(test_session, lg, a, b,
+                  created_at=dt.datetime.now(dt.timezone.utc))
+
+    check = next(c for c in services.data_health(test_session, lg)
+                 if c["check"] == "trades announced to Discord")
+    assert check["ok"] is True
+
+
+def test_the_check_is_absent_when_the_webhook_is_off(test_session, monkeypatch):
+    """A permanent backlog is the CORRECT state for an unconfigured webhook, so
+    flagging it would be noise on every install that doesn't use the feature."""
+    monkeypatch.delenv(discord_bridge.WEBHOOK_ENV, raising=False)
+    lg, a, b = _seed(test_session)
+    _player_trade(test_session, lg, a, b)
+
+    names = [c["check"] for c in services.data_health(test_session, lg)]
+    assert "trades announced to Discord" not in names
