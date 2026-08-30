@@ -13,6 +13,17 @@ Small private league app (≈10 users) on Render + Neon, session-cookie auth.
 - `SYNC_AUTH_TOKEN` — `X-Auth-Token` for the cron `POST /admin/sync` and programmatic
   `/admin/*` JSON. Compared timing-safe.
 - `APP_ENV` — `prod` (default) / `test`. `test` shows a site-wide banner.
+- `DISCORD_WEBHOOK_URL` — optional. Incoming webhook for the public trade-announcement
+  channel. **The URL is the whole credential** — anyone holding it can post to that
+  channel as the app, so treat it exactly like a password and never commit it. Rotate
+  by deleting the webhook in Channel Settings → Integrations and making a new one.
+- `DISCORD_ALERT_WEBHOOK_URL` — optional. Incoming webhook for the PRIVATE commissioner
+  channel. Point it somewhere only the commissioner can read: it carries flagged
+  actions and failed health checks, i.e. named managers and their infractions.
+
+Both Discord features are OFF when their variable is unset — no config UI, no database
+flag — so a fresh checkout, the test suite and the demo sandbox are silent by default.
+Neither needs a bot, a Developer Portal app, a privileged intent or Manage Server.
 
 ## Rotate exposed secrets (do once)
 The `.env` file's values were committed in early history (`ccb61a9`, `dd92cd6`) — it's

@@ -96,3 +96,75 @@ def test_a_query_matching_nothing_still_returns_nothing(test_session):
     everything — a filter that never excludes is worse than the original bug."""
     lg = _seed(test_session)
     assert _names(test_session, lg, "Ronaldo") == set()
+
+
+# ---- datalist pickers (accent-insensitive via alias) ----
+
+def test_list_players_includes_alias_for_accented_names(test_session):
+    """The list_players response includes an 'alias' field for names with accents,
+    so <datalist> pickers can emit a second <option> for browser-side matching."""
+    lg = _seed(test_session)
+    players = services.list_players(test_session, lg)
+
+    # Find the accented-name entries
+    sesko = next(p for p in players if p["label"].startswith("Šeško"))
+    odeegaard = next(p for p in players if p["label"].startswith("Ødegaard"))
+    kadioglu = next(p for p in players if p["label"].startswith("Kadıoğlu"))
+    haaland = next(p for p in players if p["label"].startswith("Haaland"))
+
+    # Accented names get an alias
+    assert sesko["alias"] == "sesko · mun", "š must fold to s"
+    assert odeegaard["alias"] == "odegaard · ars", "ø must fold to o"
+    assert kadioglu["alias"] == "kadioglu · ful", "ı and ğ must fold to i and g"
+
+    # Plain ASCII names do NOT get an alias (no duplicate options)
+    assert haaland["alias"] is None, "Unaccented names should not have an alias"
+
+
+def test_list_players_alias_differs_from_label(test_session):
+    """Aliases are only emitted when they differ from the label, to avoid
+    duplicate options for unaccented names."""
+    lg = _seed(test_session)
+    players = services.list_players(test_session, lg)
+
+    for p in players:
+        if p["alias"] is not None:
+            # If an alias exists, it must be different from the label
+            assert p["alias"] != p["label"], (
+                f"Alias should only exist when it differs from label: {p}"
+            )
+
+
+def test_list_players_alias_preserves_spaces(test_session):
+    """The alias folding for datalist should preserve spaces and separators
+    (unlike the script's _norm which strips them for key matching), so the
+    alias reads as human-typeable text like 'sesko · mun' not 'seskom'."""
+    lg = _seed(test_session)
+    players = services.list_players(test_session, lg)
+
+    sesko = next(p for p in players if p["label"].startswith("Šeško"))
+    assert " · " in sesko["alias"], (
+        f"Alias should preserve the · separator: {sesko['alias']}"
+    )
+    assert sesko["alias"] == "sesko · mun", (
+        f"Expected 'sesko · mun', got {sesko['alias']}"
+    )
+
+
+def test_fold_name_folds_one_part_and_never_invents_a_separator():
+    """`_fold_name` folds a SINGLE part; `list_players` rejoins with the real ' · '.
+
+    An earlier draft folded the whole "Name · Team" label at once. The ascii encode
+    drops the · (U+00B7) and leaves the two spaces around it, so the separator was
+    restored with re.sub(r' {2,}', ' · ') — correct only because the dropped
+    character happened to sit between two spaces, and wrong for any name that
+    itself contains a double space, which it silently turned into a separator.
+    """
+    assert services._fold_name("Šeško") == "sesko"
+    assert services._fold_name("Ødegaard") == "odegaard"
+    assert services._fold_name("Kadıoğlu") == "kadioglu"
+    # A double space stays a double space — no separator conjured out of spacing.
+    assert services._fold_name("São  Paulo") == "sao  paulo"
+    # And folding a whole label does NOT produce a usable separator, which is
+    # exactly why callers must fold part-wise.
+    assert " · " not in services._fold_name("Šeško · MUN")

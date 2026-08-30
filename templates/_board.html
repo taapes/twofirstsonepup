@@ -18,7 +18,7 @@
         <tr class="{% if on_clock and b.pick == on_clock.pick %}on-clock{% endif %}">
           <td class="rank">{{ b.pick }}</td>
           <td class="num">{{ b.round }}</td>
-          <td>{{ b.owner }}{% if b.traded %} <span class="pill">via {{ b.original_owner }}</span>{% endif %}</td>
+          <td>{{ b.owner }}{% if b.traded %} <span class="pill">via {{ b.original_owner }}</span>{% endif %}{% if b.conditional %} <span class="pill" title="{{ b.condition_note }}">conditional{% if b.condition_status != "pending" %} · {{ b.condition_status.replace("_", " ") }}{% endif %}</span>{% endif %}</td>
           <td>{% if b.player %}{{ b.player }}{% if b.is_goalie_team %} <span class="pill">goalie team</span>{% endif %}{% elif on_clock and b.pick == on_clock.pick %}<span class="sub">on the clock</span>{% else %}<span class="sub">—</span>{% endif %}</td>
         </tr>
         {% endfor %}

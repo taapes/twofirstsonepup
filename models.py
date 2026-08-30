@@ -352,7 +352,40 @@ class Trade(Base):
     pick_original_manager: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("managers.id"), nullable=True
     )
+    # Free text as written by the commissioner. Was write-only for years; now it is
+    # also where a clause that no metric can express gets recorded verbatim, so the
+    # words of a deal are never lost just because the schema can't evaluate them.
     conditions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ---- Structured pick CONDITION (commissioner-entered; NULL on every ordinary
+    # row). The TERMS live in `trade_condition_terms`; these two columns say how they
+    # combine and what being met actually does.
+    #
+    # Resolved fresh on every read (services.pick_ownership) and never written back
+    # onto pick_round — a condition can flip when a season is re-scored or a
+    # standings adjustment lands, and a materialized round would silently disagree
+    # with the standings page.
+    #
+    # ONE clause per row, deliberately: a Trade row moves ONE pick, so a deal with
+    # three conditional clauses is three rows (which is what a multi-pick deal
+    # already is). That is why there is no clause/group table — the grouping concept
+    # the Trade row itself provides is sufficient.
+    #
+    # `condition_logic` NULL is the discriminator: NULL means this is an ordinary
+    # pick trade, and every read path takes exactly the branch it always did.
+    condition_logic: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # 'all' | 'any'
+    # What being met DOES. Two effects, and they are the only two shapes that fit the
+    # ownership fold without leaving a value to undo:
+    #   'escalate_round'  — the pick moves either way, but as pick_round_if_met once
+    #                       met. Changes the KEY the fold writes.
+    #   'transfer_if_met' — the pick moves ONLY if met. Changes WHETHER it writes.
+    condition_effect: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # 'escalate_round' | 'transfer_if_met'
+    # The round this pick becomes when the condition is met. Required by
+    # 'escalate_round' and meaningless (so NULL) for 'transfer_if_met'.
+    pick_round_if_met: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Set when the commissioner corrects this row by hand. sync_trades then leaves it
     # alone: its reconciliation matches on an exact (player, from, to) triple, so a
     # corrected direction would otherwise come back as a DUPLICATE on the next sync,
@@ -366,6 +399,125 @@ class Trade(Base):
     # (a trade and a trade-back must resolve to where the player actually ended up,
     # which no amount of graph-walking can determine without a time).
     created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # When this trade was announced to Discord. NULL = not yet, which is the whole
+    # queue: the sweep is `WHERE announced_at IS NULL`.
+    #
+    # PERSISTED rather than held in memory because trades also arrive from the FPL
+    # feed, and sync is idempotent and re-runs constantly — an in-process guard would
+    # re-announce every synced trade on every run, and a historical backfill would
+    # dump the entire trade history into the channel at once. The migration that adds
+    # this column back-stamps every existing row for exactly that reason.
+    #
+    # League-custom metadata on a table that also holds FPL-sourced rows: sync never
+    # writes it, and `manually_edited` one field up sets the same precedent.
+    announced_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class TradeConditionTerm(Base):
+    """One LEAF of a pick trade's condition. Terms combine under `Trade.condition_logic`.
+
+    Split out of `trades` because a real deal needed a four-way OR ("one of KS winning
+    the cup, KS winning the league, Cunha scoring 190, or pick 12 scoring 225") and a
+    two-way AND, neither of which a fixed column set can hold. The clause itself — how
+    these combine and what being met does — stays on the Trade row, because a Trade row
+    moves exactly one pick and therefore carries exactly one clause.
+
+    `metric` is one of `rules.CONDITION_METRICS` plus **`'manual'`**, and that extra
+    value is what makes the schema closed under conditions it cannot evaluate. A manual
+    term stores the clause verbatim in `note` and resolves only when the commissioner
+    says so via `manual_state`. The alternative — modelling every metric a league might
+    ever invent (red cards, a pick's eventual points) — is unbounded, and refusing to
+    store the clause at all would silently drop terms from a real agreement.
+
+    Manual terms are per-TERM rather than per-clause on purpose: in that four-way OR
+    exactly one branch was unevaluable, and the other three still resolve. `any` can go
+    met on a known branch while an unknown one is outstanding; only `all` has to wait.
+
+    `season_year` is per term, not per clause — nothing stops one branch resolving on
+    2026 and another on 2027, and `_condition_league` already resolves per term.
+
+    `ondelete="CASCADE"` — the second cascade in this schema, for the same reason as
+    `DiscoveryMatchSuggestion`'s: a term is wholly derived from its trade and has no
+    meaning once the trade is gone, so the alternative is `delete_trade` failing on an
+    FK to a table it knows nothing about.
+    """
+
+    __tablename__ = "trade_condition_terms"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    trade_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("trades.id", ondelete="CASCADE"), index=True
+    )
+    # rules.CONDITION_METRICS + 'manual'
+    metric: Mapped[str] = mapped_column(String)
+    # Set for rules.CONDITION_PLAYER_METRICS only.
+    player_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("players.id"), nullable=True
+    )
+    # A PERSON NAME (Manager.display), deliberately not a managers.id FK and
+    # deliberately not fpl_manager_id. `managers` holds one row per manager PER
+    # SEASON, and a condition entered today resolves against a FUTURE season whose
+    # Manager rows do not exist yet — so an FK would have nothing to point at. Same
+    # reason FuturePick.owner/original_owner are free text, and _historical_cup_winners
+    # already matches a stored name against Manager.display for cross-season work.
+    # fpl_manager_id is not an option: it was proven unstable across the 2026 rollover.
+    manager_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    # The season this term resolves in. NULL only for a manual term, which resolves
+    # when a human says so rather than when a season freezes.
+    season_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Meaningful only for rules.CONDITION_THRESHOLD_METRICS; NULL and ignored for the
+    # two cup metrics, which are boolean facts rather than comparisons.
+    comparison: Mapped[str | None] = mapped_column(String, nullable=True)
+    threshold: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # The clause as written. Required for a manual term (it IS the term), optional
+    # elsewhere as a note.
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Commissioner's verdict on a manual term. NULL = still undecided, which resolves
+    # as pending — never as not_met, per the module-wide rule that an unanswered
+    # condition leaves the base round in force.
+    manual_state: Mapped[str | None] = mapped_column(
+        String, nullable=True
+    )  # NULL | 'met' | 'not_met'
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DiscordAlert(Base):
+    """One commissioner alert already pushed to Discord. Purely a dedupe ledger.
+
+    `flagged_actions` and `data_health` are recomputed from scratch on every sync and
+    carry no ids, so "have I already said this?" has to be answered by content. The
+    fingerprint is a hash of (category, manager, detail) — the whole rendered alert.
+
+    That choice sets the re-alert cadence, and it is the reason no special-casing is
+    needed: an alert whose text is unchanged never posts twice, while one whose text
+    moves ("on the IL 4 GWs" -> "5 GWs") is genuinely new information and posts again.
+    Since that text only changes when the gameweek does, an unresolved item nags about
+    once a GW rather than once a sync — which is the cadence you'd hand-write anyway.
+
+    Rows are never deleted. A resolved-then-recurring alert SHOULD be silent if it
+    recurs identically; keeping the row is what guarantees that.
+    """
+
+    __tablename__ = "discord_alerts"
+    __table_args__ = (
+        UniqueConstraint("league_id", "fingerprint", name="uq_discord_alert"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    # sha256 of the rendered alert; see the class docstring for why content-addressed.
+    fingerprint: Mapped[str] = mapped_column(String, index=True)
+    # Kept for a human reading the table directly — the fingerprint alone is opaque.
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 

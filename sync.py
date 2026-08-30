@@ -1027,4 +1027,17 @@ def run_sync(force: bool = False) -> dict:
     # "full" run calls sync_players first, so the global player pool refreshes once a
     # day even while every season is frozen — that's what keeps promoted clubs and new
     # signings arriving between seasons.
-    return {"ok": True, "plan": plan, "phase_advanced": advanced}
+
+    # Outbound Discord, OUTSIDE the plan branch: a trade entered on the site at noon
+    # shouldn't wait for tomorrow's 06:00 full sync to be announced, and both sweeps
+    # are cheap no-ops (one indexed query each) when there is nothing new. Deliberately
+    # last, and it cannot raise — see discord_bridge's module docstring.
+    #
+    # Its own session: `league` above belongs to a session that has already closed, and
+    # the announcer commits per row. run_outbound applies the frozen-season skip and
+    # the feature-off check itself, so there is nothing to guard here.
+    import discord_bridge
+
+    with SessionLocal() as db:
+        discord = discord_bridge.run_outbound(db, services.current_league(db))
+    return {"ok": True, "plan": plan, "phase_advanced": advanced, "discord": discord}

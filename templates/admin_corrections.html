@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_condition_form.html" as cond with context %}
 {% block title %}Corrections{% endblock %}
 {% block content %}
 <h1>Corrections <span class="tag">commissioner</span></h1>
@@ -43,12 +44,57 @@
             <input type="hidden" name="trade_id" value="{{ t.id }}">
             <button class="mini" type="submit">Delete</button>
           </form>
+          {% if t.kind == "pick" %}
+          {# A separate form, not extra fields on the row above: a clause and its
+             terms are validated as a SET, and an HTML form can't span table rows. #}
+          <details style="margin-top:4px">
+            <summary class="sub">{% if t.conditional %}Condition ({{ t.condition_status.replace("_", " ") }}){% else %}Add condition{% endif %}</summary>
+            {% if t.conditional %}<p class="sub">{{ t.condition_note }}</p>{% endif %}
+            {% if t.manual_terms %}
+            {# The escape valve's other half: a term nothing can compute is settled
+               here, by the person whose words it is. #}
+            <div class="sub" style="margin:4px 0">Written-out terms — rule on each:</div>
+            {% for term in t.manual_terms %}
+            <form method="post" action="/admin/corrections/trade/term-state"
+                  style="display:flex;gap:6px;align-items:center;margin-bottom:3px">
+              <input type="hidden" name="term_id" value="{{ term.id }}">
+              <span class="sub" style="flex:1">{{ term.note }}</span>
+              <select name="manual_state">
+                <option value=""{% if not term.manual_state %} selected{% endif %}>undecided</option>
+                <option value="met"{% if term.manual_state == "met" %} selected{% endif %}>met</option>
+                <option value="not_met"{% if term.manual_state == "not_met" %} selected{% endif %}>not met</option>
+              </select>
+              <button class="mini" type="submit">Save</button>
+            </form>
+            {% endfor %}
+            {% endif %}
+            <form method="post" action="/admin/corrections/trade/condition">
+              <input type="hidden" name="trade_id" value="{{ t.id }}">
+              <p class="sub">Saving REPLACES every term on this trade. Submitting with
+                no term chosen clears the condition entirely.</p>
+              <div class="cond-wrap">
+                {{ cond.term_row(managers, "condition_player_name", "condPlayersFix", "condManagersFix") }}
+                <button type="button" class="mini" onclick="condAddTerm(this)">+ another condition</button>
+              </div>
+              {{ cond.clause_fields(15) }}
+              <button class="mini" type="submit">Save condition</button>
+            </form>
+          </details>
+          {% endif %}
         </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
   {% else %}<p class="empty">No trades recorded.</p>{% endif %}
+  <datalist id="condManagersFix">
+    {% for m in managers %}<option value="{{ m.name }}"></option>{% endfor %}
+  </datalist>
+  <datalist id="condPlayersFix">
+    {% for p in players %}<option value="{{ p.label }}"></option>
+    {% if p.alias %}<option value="{{ p.alias }}"></option>{% endif %}
+    {% endfor %}
+  </datalist>
 </div>
 
 <h2>Unmatched discovery picks
@@ -235,4 +281,5 @@
   <p class="empty">No discovery results imported.</p>
   {% endfor %}
 </div>
+{{ cond.condition_js() }}
 {% endblock %}

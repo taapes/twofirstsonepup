@@ -592,6 +592,176 @@ SQUAD_POSITION_LIMITS = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}   # sums to ROS
 XI_POSITION_MINIMUMS = {"GKP": 1, "DEF": 3, "MID": 2, "FWD": 1}
 
 
+# ---- Conditional pick trades ----
+# A traded draft pick can carry a CONDITION: "you get my 2nd, upgraded to my 1st if
+# Kevin T finishes top 3", or "you get my 2027 1st discovery pick IF Cunha stays under
+# three red cards". The league has actually done both shapes.
+#
+# A condition is a CLAUSE (on the Trade row: how its terms combine, and what being met
+# does) over one or more TERMS (rows in trade_condition_terms). One clause per Trade
+# row, because a Trade row moves exactly one pick — a deal with three conditional
+# clauses is three rows, which is what a multi-pick deal already was.
+#
+# Two of the four evaluable metrics are PLAYER-subject or MANAGER-subject, and two are
+# boolean facts rather than threshold comparisons — that split is why a term carries a
+# subject pair and a scoped comparison rather than one "player + threshold" shape.
+CONDITION_METRICS = ("total_points", "league_finish", "cup_win", "pup_cup_win")
+# The escape valve, and the reason this schema is closed under conditions it cannot
+# evaluate. A `manual` term stores the clause verbatim and resolves only when the
+# commissioner rules on it. Modelling every metric a league might invent (red cards, a
+# pick's eventual points) is unbounded; refusing to store the clause would silently
+# drop terms from a real agreement. Deliberately NOT in CONDITION_METRICS, so nothing
+# that enumerates the evaluable metrics picks it up by accident.
+CONDITION_MANUAL = "manual"
+CONDITION_TERM_METRICS = CONDITION_METRICS + (CONDITION_MANUAL,)
+# Metrics whose subject is a PLAYER. Everything else names a manager.
+CONDITION_PLAYER_METRICS = ("total_points",)
+# Metrics that compare a number against a threshold. `cup_win`/`pup_cup_win` are
+# boolean — "did this manager win it" — so comparison/threshold are meaningless
+# there and are ignored rather than defaulted, which would invent a rule.
+CONDITION_THRESHOLD_METRICS = ("total_points", "league_finish")
+# All four are needed, not just the ">" family: "finishes top 3" is rank <= 3.
+CONDITION_COMPARISONS = (">", ">=", "<", "<=")
+
+# How a clause's terms combine. `all` = AND, `any` = OR. NULL on the Trade row means
+# the row carries no condition at all.
+CONDITION_LOGIC_ALL, CONDITION_LOGIC_ANY = "all", "any"
+CONDITION_LOGIC = (CONDITION_LOGIC_ALL, CONDITION_LOGIC_ANY)
+
+# What a met clause DOES. These two are the only shapes that fit the ownership fold
+# without leaving a value that has to be undone:
+#   escalate_round  — the pick moves either way, but as `pick_round_if_met` once met.
+#                     Changes the KEY the fold writes.
+#   transfer_if_met — the pick moves ONLY if met. Changes WHETHER the fold writes.
+CONDITION_EFFECT_ESCALATE, CONDITION_EFFECT_TRANSFER = "escalate_round", "transfer_if_met"
+CONDITION_EFFECTS = (CONDITION_EFFECT_ESCALATE, CONDITION_EFFECT_TRANSFER)
+
+# A condition's three resolution states. "pending" is not a synonym for "not_met":
+# an unresolved condition leaves the BASE round in force, and saying "not met" of a
+# season that hasn't finished would read as a settled answer.
+CONDITION_PENDING, CONDITION_MET, CONDITION_NOT_MET = "pending", "met", "not_met"
+
+
+def compare_condition(comparison: str, value, threshold) -> bool:
+    """`value <comparison> threshold` for the two threshold metrics. False (never a
+    raise) on a missing value: an absent player-season row or an unranked manager is
+    a condition that hasn't come true, not a crash on the draft board."""
+    if value is None or threshold is None:
+        return False
+    if comparison == ">":
+        return value > threshold
+    if comparison == ">=":
+        return value >= threshold
+    if comparison == "<":
+        return value < threshold
+    if comparison == "<=":
+        return value <= threshold
+    return False
+
+
+def combine_condition_states(logic: str, states) -> str:
+    """Fold resolved TERM states into the clause's state under `all`/`any`.
+
+    Short-circuits on the decisive answer BEFORE considering pending terms, which is
+    the whole point of putting `manual` at term level: a four-way OR with one
+    unevaluable branch still goes `met` the moment a knowable branch comes true, and a
+    two-way AND still goes `not_met` the moment one branch fails. Only when the known
+    terms leave the answer genuinely open does an outstanding term hold it `pending`.
+
+    An empty term list is `pending`, never `met`: `all([])` is True in Python and
+    would silently apply a clause whose terms failed to load.
+    """
+    states = list(states)
+    if not states:
+        return CONDITION_PENDING
+    if logic == CONDITION_LOGIC_ANY:
+        if any(s == CONDITION_MET for s in states):
+            return CONDITION_MET
+        if any(s == CONDITION_PENDING for s in states):
+            return CONDITION_PENDING
+        return CONDITION_NOT_MET
+    # `all` (the default, and what every pre-v2 single-term condition becomes)
+    if any(s == CONDITION_NOT_MET for s in states):
+        return CONDITION_NOT_MET
+    if any(s == CONDITION_PENDING for s in states):
+        return CONDITION_PENDING
+    return CONDITION_MET
+
+
+def validate_condition_term(
+    *, metric, player_subject: bool, manager_subject: bool,
+    season_year, comparison, threshold, note,
+) -> None:
+    """Reject a malformed condition TERM. Raises RuleViolation; returns None if fine.
+
+    Enforced here rather than as DB CHECK constraints, matching how every other
+    Trade/DraftPick invariant in this repo is enforced. `*_subject` are booleans, not
+    the ids themselves, so this stays pure and knows nothing about the ORM.
+    """
+    if metric not in CONDITION_TERM_METRICS:
+        raise RuleViolation(
+            f"unknown condition metric {metric!r} "
+            f"(expected one of {', '.join(CONDITION_TERM_METRICS)})"
+        )
+    if metric == CONDITION_MANUAL:
+        # A manual term IS its text. Without it there is nothing for the commissioner
+        # to rule on later, and the clause would be an unlabelled permanent pending.
+        if not (note or "").strip():
+            raise RuleViolation(
+                "a manual condition needs the clause written out, since nothing can "
+                "evaluate it automatically"
+            )
+        return
+
+    if season_year is None:
+        raise RuleViolation("a conditional pick needs the season the condition resolves in")
+
+    wants_player = metric in CONDITION_PLAYER_METRICS
+    if player_subject and manager_subject:
+        raise RuleViolation("a condition names a player or a manager, not both")
+    if wants_player and not player_subject:
+        raise RuleViolation(f"the {metric} condition needs a player")
+    if not wants_player and not manager_subject:
+        raise RuleViolation(f"the {metric} condition needs a manager")
+
+    if metric in CONDITION_THRESHOLD_METRICS:
+        if comparison not in CONDITION_COMPARISONS:
+            raise RuleViolation(
+                f"the {metric} condition needs a comparison "
+                f"({', '.join(CONDITION_COMPARISONS)})"
+            )
+        if threshold is None:
+            raise RuleViolation(f"the {metric} condition needs a threshold")
+
+
+def validate_pick_condition(*, logic, effect, round_if_met, term_count: int) -> None:
+    """Reject a malformed CLAUSE — the part that lives on the Trade row.
+
+    Separate from validate_condition_term because the two fail for different reasons
+    and at different times: a term is wrong on its own, a clause is only wrong once
+    you know how many terms it has and what it claims to do.
+    """
+    if logic not in CONDITION_LOGIC:
+        raise RuleViolation(
+            f"unknown condition logic {logic!r} (expected one of {', '.join(CONDITION_LOGIC)})"
+        )
+    if effect not in CONDITION_EFFECTS:
+        raise RuleViolation(
+            f"unknown condition effect {effect!r} "
+            f"(expected one of {', '.join(CONDITION_EFFECTS)})"
+        )
+    if term_count < 1:
+        raise RuleViolation("a conditional pick needs at least one condition")
+    if effect == CONDITION_EFFECT_ESCALATE and round_if_met is None:
+        raise RuleViolation("a conditional pick needs the round it upgrades to")
+    # Stored NULL rather than ignored: a leftover round from a previous effect would
+    # read as part of the rule to anyone looking at the row later.
+    if effect == CONDITION_EFFECT_TRANSFER and round_if_met is not None:
+        raise RuleViolation(
+            "a pick that only transfers when the condition is met has no upgrade round"
+        )
+
+
 # ---- Goalie teams ----
 # From 2026 the league drafts a CLUB instead of individual goalkeepers: a manager
 # takes one Premier League club and owns every keeper at it. A squad is then 13

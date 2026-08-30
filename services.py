@@ -41,6 +41,16 @@ from models import (
 from rules import (
     ANTI_TANKING_MIN_WEEKS,
     ANTI_TANKING_MIN_ZERO_PLAYERS,
+    CONDITION_MET,
+    CONDITION_NOT_MET,
+    CONDITION_PENDING,
+    CONDITION_PLAYER_METRICS,
+    CONDITION_MANUAL,
+    CONDITION_LOGIC_ALL,
+    CONDITION_LOGIC_ANY,
+    CONDITION_EFFECT_ESCALATE,
+    CONDITION_EFFECT_TRANSFER,
+    CONDITION_THRESHOLD_METRICS,
     CUP_SEED_THROUGH_GW,
     CUP_SIZE,
     CUP_START_GW,
@@ -59,11 +69,15 @@ from rules import (
     TRADE_DEADLINE_DAY,
     TRADE_DEADLINE_MONTH,
     LIVE_FIXTURE_WINDOW_HOURS,
+    combine_condition_states,
+    compare_condition,
     compute_payouts,
     current_tanking_streak,
     decide_sync,
     fixture_status,
     keepers_revealed as _keepers_revealed_rule,
+    validate_condition_term,
+    validate_pick_condition,
     next_phase,
     phase_features,
     h2h_standings,
@@ -5328,27 +5342,216 @@ def draft_order_context(
     }
 
 
+# Lowercase keys only — see _fold_name for why the application order matters.
+_FOLD_TRANSLIT = str.maketrans({"ø": "o", "đ": "d", "ı": "i", "ł": "l",
+                                "æ": "ae", "ß": "ss", "þ": "th"})
+
+
+def _fold_name(s: str) -> str:
+    """One name (or team) -> its ASCII-folded spelling, for <datalist> aliases.
+
+    The order is load-bearing: lower() FIRST (the translation table has lowercase
+    keys only), translate SECOND, NFKD THIRD. NFKD has no decomposition for ø or ı,
+    which is why the table exists at all.
+
+    Ported from scripts/import_projections.py:_norm, with one deliberate difference:
+    that one ends in re.sub(r"[^a-z]", "", s) because it builds a match KEY. This
+    builds text a human types into a picker, so spaces and punctuation stay.
+
+    Fold each part SEPARATELY and rejoin — never fold a "Name . Team" label whole.
+    The separator (U+00B7) is dropped by the ascii encode, so folding the whole
+    label leaves a double space that merely LOOKS like a separator; restoring it by
+    regex would also invent one inside any name containing two spaces.
+
+    Deliberately NOT unified with history_import._norm (plain NFKD), which is
+    load-bearing for keeper seeds that are already imported."""
+    s = (s or "").lower().translate(_FOLD_TRANSLIT)
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+
+
+def _picker_label(p: Player) -> tuple[str, str | None]:
+    """(label, alias) for one player in a name picker. `label` disambiguates duplicate
+    names by club; `alias` is its ASCII-folded spelling, or None when folding changes
+    nothing — emitting an alias option for "Haaland" would just duplicate every row.
+
+    Fold part-wise and rejoin with the real separator; see _fold_name for why folding
+    the joined label instead is wrong."""
+    parts = [p.name, p.current_team] if p.current_team else [p.name]
+    label = " · ".join(parts)
+    alias = " · ".join(_fold_name(x) for x in parts)
+    # _fold_name lowercases, so compare lowered: casing alone is not a difference the
+    # browser's <datalist> matching cares about.
+    return label, (alias if alias != label.lower() else None)
+
+
 def list_players(db: Session, league: League) -> list[dict]:
-    """All players as [{fpl_id, label}] for name-based pickers (label disambiguates
-    duplicate names by team)."""
-    rows = db.query(Player).order_by(Player.name).all()
-    return [
-        {"fpl_id": p.fpl_id,
-         "label": f"{p.name} · {p.current_team}" if p.current_team else p.name}
-        for p in rows
-    ]
+    """All players as [{fpl_id, label, alias}] for name-based pickers.
+
+    NOTE `fpl_id` is THIS SEASON's element id and is None for anyone who has left the
+    PL — so this list can name a player the form then can't submit. That's the open
+    "IL backfill form must search by player name, not FPL id" backlog item; until it
+    lands, callers that must handle departed players resolve by LABEL instead (see
+    resolve_player_by_label), which needs no element id at all.
+    """
+    out = []
+    for p in db.query(Player).order_by(Player.name).all():
+        label, alias = _picker_label(p)
+        out.append({"fpl_id": p.fpl_id, "label": label, "alias": alias})
+    return out
+
+
+def _condition_spec(
+    db: Session, *, condition_logic, condition_effect, pick_round_if_met, condition_terms,
+) -> tuple[dict, list[dict]]:
+    """Validate a proposed pick CLAUSE plus its TERMS.
+
+    Returns `(clause_columns, term_kwargs)` — the three columns to set on the Trade row
+    and the rows to create in trade_condition_terms. Returns all-NULL and an empty list
+    when no condition is being set, so an ordinary pick trade takes exactly the path it
+    always did.
+
+    Purity split, matching the rest of this module: the shape rules live in
+    rules.validate_condition_term / rules.validate_pick_condition, and the only work
+    done here is what genuinely needs the database (resolving a player id).
+
+    `condition_terms` is a list of dicts, one per term. A single-term clause — still by
+    far the common case — is a one-element list; nothing about the API special-cases it.
+    """
+    blank = {
+        "condition_logic": None, "condition_effect": None, "pick_round_if_met": None,
+    }
+    terms = [t for t in (condition_terms or []) if t]
+    if not terms and not condition_logic and not condition_effect:
+        return blank, []
+
+    # Default rather than require: `all` over one term is what every pre-terms
+    # condition was, and escalate_round is what every one of them did.
+    logic = condition_logic or CONDITION_LOGIC_ALL
+    effect = condition_effect or CONDITION_EFFECT_ESCALATE
+    validate_pick_condition(
+        logic=logic, effect=effect,
+        round_if_met=pick_round_if_met, term_count=len(terms),
+    )
+
+    out: list[dict] = []
+    for raw in terms:
+        metric = raw.get("metric")
+        name = (raw.get("manager_name") or "").strip() or None
+        note = (raw.get("note") or "").strip() or None
+        player_id = raw.get("player_id")
+        validate_condition_term(
+            metric=metric,
+            player_subject=player_id is not None,
+            manager_subject=name is not None,
+            season_year=raw.get("season_year"),
+            comparison=raw.get("comparison"),
+            threshold=raw.get("threshold"),
+            note=note,
+        )
+        if player_id is not None and not db.get(Player, player_id):
+            raise RuleViolation("the condition names a player who isn't in the pool")
+        # Comparison/threshold are meaningless for the two boolean cup metrics, and a
+        # manual term has no structured subject at all. Stored as NULL rather than as
+        # whatever the form happened to submit, so a later reader can't mistake a
+        # leftover ">= 1" for part of the rule.
+        scoped = metric in CONDITION_THRESHOLD_METRICS
+        manual = metric == CONDITION_MANUAL
+        out.append({
+            "metric": metric,
+            "player_id": None if manual else player_id,
+            "manager_name": None if manual else name,
+            "season_year": None if manual else raw.get("season_year"),
+            "comparison": raw.get("comparison") if scoped else None,
+            "threshold": raw.get("threshold") if scoped else None,
+            "note": note,
+            "manual_state": raw.get("manual_state") if manual else None,
+        })
+    return (
+        {
+            "condition_logic": logic,
+            "condition_effect": effect,
+            # NULL for transfer_if_met, which validate_pick_condition has already
+            # refused to accept a round for.
+            "pick_round_if_met": pick_round_if_met,
+        },
+        out,
+    )
+
+
+def _write_condition_terms(db: Session, trade, term_kwargs: list[dict]) -> None:
+    """Replace a trade's condition terms with `term_kwargs`.
+
+    Delete-then-insert rather than a per-row diff: a clause is validated as a SET, and
+    there is no stable identity for "the same term, edited" that a form could send
+    back. The CASCADE on the FK is for trade deletion, not this.
+    """
+    from models import TradeConditionTerm
+
+    db.query(TradeConditionTerm).filter(
+        TradeConditionTerm.trade_id == trade.id
+    ).delete(synchronize_session=False)
+    for kw in term_kwargs:
+        db.add(TradeConditionTerm(trade_id=trade.id, **kw))
+
+
+def condition_term_from_flat(
+    *, metric, player_id=None, manager_name=None, season_year=None,
+    comparison=None, threshold=None, note=None,
+) -> dict:
+    """One term as a dict, for callers that collect a form's flat fields.
+
+    Exists so the routes don't each hand-assemble a dict and drift on key names.
+    """
+    return {
+        "metric": metric, "player_id": player_id, "manager_name": manager_name,
+        "season_year": season_year, "comparison": comparison,
+        "threshold": threshold, "note": note,
+    }
+
+
+def resolve_player_by_label(db: Session, league: League, label: str):
+    """A picker label ("Name · Team") or its folded alias -> the Player row.
+
+    The counterpart to list_players, for the forms that post a NAME rather than a
+    hidden id. Accepts either spelling, so the accent alias works here too. Raises
+    RuleViolation rather than returning None: every caller is a write path, and
+    silently dropping an unmatched subject would save a condition with no subject.
+    """
+    want = (label or "").strip().lower()
+    if not want:
+        raise RuleViolation("no player named")
+    for p in db.query(Player).order_by(Player.name).all():
+        lab, alias = _picker_label(p)
+        if want in (lab.strip().lower(), (alias or "").strip().lower()):
+            return p
+    raise RuleViolation(f"no player matching {label!r}")
 
 
 def trade_pick(
     db: Session, league: League, *, from_fpl: str, to_fpl: str, original_fpl: str,
     round: int, season_year: int, draft_type: str = "main",
+    condition_logic: str | None = None,
+    condition_effect: str | None = None,
+    pick_round_if_met: int | None = None,
+    condition_terms: list[dict] | None = None,
+    conditions: str | None = None,
 ) -> dict:
     """Record a draft-pick trade (commissioner-entered, live). Reassigns ownership
     of the (season, draft_type, round) slot originally belonging to original_fpl.
 
     Refuses to leave the seller with no way to get a goalie team. Trading away your
     last slot after thirteen outfielders is the same dead end `record_pick` guards
-    against, reached by a different door."""
+    against, reached by a different door.
+
+    `condition_terms` (with `condition_logic` / `condition_effect`) makes the pick
+    CONDITIONAL. Under `escalate_round`, `round` stays the base round and the pick
+    becomes `pick_round_if_met` once the condition resolves met; under
+    `transfer_if_met` the pick moves only once it does. All optional — omitting them
+    is byte-identical to before.
+
+    `conditions` is the deal's free text, kept verbatim so the words of an agreement
+    survive even when a clause is only partly expressible in terms.
+    """
     frm = _resolve_manager(db, league, from_fpl)
     to = _resolve_manager(db, league, to_fpl)
     orig = _resolve_manager(db, league, original_fpl)
@@ -5358,18 +5561,36 @@ def trade_pick(
     )
     if stranded:
         raise RuleViolation(f"{stranded} — trading it away would strand them")
-    label = f"{season_year} {draft_type} R{round} (orig {orig.name})"
-    db.add(
-        Trade(
-            league_id=league.id, from_manager=frm.id, to_manager=to.id,
-            pick_original_manager=orig.id, pick_round=round,
-            pick_season_year=season_year, pick_draft_type=draft_type, draft_pick=label,
-        )
+    cond, terms = _condition_spec(
+        db, condition_logic=condition_logic, condition_effect=condition_effect,
+        pick_round_if_met=pick_round_if_met, condition_terms=condition_terms,
     )
+    label = f"{season_year} {draft_type} R{round} (orig {orig.name})"
+    if cond["condition_effect"] == CONDITION_EFFECT_ESCALATE:
+        label += f" -> R{cond['pick_round_if_met']} if met"
+    elif cond["condition_effect"] == CONDITION_EFFECT_TRANSFER:
+        label += " if met"
+    row = Trade(
+        league_id=league.id, from_manager=frm.id, to_manager=to.id,
+        pick_original_manager=orig.id, pick_round=round,
+        pick_season_year=season_year, pick_draft_type=draft_type, draft_pick=label,
+        conditions=(conditions or "").strip() or None,
+        **cond,
+    )
+    db.add(row)
+    # Flush before writing terms: `Trade.id` uses a PYTHON-side `default=uuid.uuid4`,
+    # which SQLAlchemy applies at INSERT time, not at construction — so `row.id` is
+    # still None here without this, and every term would fail the NOT NULL on trade_id.
+    db.flush()
+    _write_condition_terms(db, row, terms)
     record_audit(db, league, action="trade.pick",
                  summary=f"Pick trade: {frm.display} → {to.display} ({label})",
                  manager_ids=[frm.id, to.id, orig.id],
-                 details={"round": round, "season_year": season_year, "draft_type": draft_type})
+                 details={"round": round, "season_year": season_year,
+                          "draft_type": draft_type,
+                          "terms": len(terms) or None,
+                          **{k: (str(v) if v is not None else None)
+                             for k, v in cond.items() if v is not None}})
     db.commit()
     return {"from": frm.display, "to": to.display, "pick": label}
 
@@ -5807,6 +6028,356 @@ def approve_queued_pick(
     raise RuleViolation(f"{owner.display}'s queued players are all unavailable")
 
 
+# ---- conditional pick trades ------------------------------------------------
+# A traded pick can carry a condition with one of two effects: ESCALATE its round
+# ("my 2nd, upgraded to my 1st if Kevin T finishes top 3 in 2027") or gate the
+# TRANSFER itself ("my 2027 1st discovery pick, but only if Cunha stays under three
+# red cards"). Resolved fresh on every read here and never written back onto
+# pick_round (see the Trade model comment for why).
+#
+# A condition is a CLAUSE on the Trade row (condition_logic + condition_effect) over
+# TERMS in trade_condition_terms. Both effects fold cleanly into pick_ownership
+# because neither writes a value that would later have to be undone: escalate_round
+# changes the KEY, transfer_if_met changes WHETHER the fold writes at all.
+#
+# Everything below reads. The write path is trade_pick/edit_trade + the pure
+# rules.validate_condition_term / rules.validate_pick_condition.
+
+
+def _condition_league(db: Session, season_year: int | None) -> League | None:
+    """The league row a condition resolves against — the row FOR that season, which
+    is not the row the trade was entered on. A condition entered in 2026 about the
+    2027 season resolves against the 2027 row, which may not exist yet."""
+    if season_year is None:
+        return None
+    return db.query(League).filter_by(season_year=season_year).first()
+
+
+def _resolve_cup_winner_name(db: Session, league: League, cup_name: str) -> str | None:
+    """Winner of "Cup" / "Pup Cup" for `league`'s season, as a Manager.display name.
+
+    Mirrors get_payouts' cup resolution exactly — live bracket first, then the
+    imported season_history fallback for a season whose cups were never run in-app.
+    Returns None while a bracket exists but its decisive match is unscored, which is
+    what keeps a condition `pending` rather than answering "didn't win it".
+
+    Kept separate from get_payouts rather than shared with it: that function resolves
+    FOUR recipients (cup 1st/2nd/3rd + pup) into manager IDS for money, this one
+    resolves one champion into a NAME for a text comparison. A future fifth metric
+    (the Pupmunity Shield) extends this helper, not get_payouts.
+    """
+    t = _get_tournament(db, league, cup_name)
+    winner_id = None
+    if t:
+        if cup_name == "Cup":
+            final, _third = _cup_final_and_third(db, t)
+            winner_id = final.winner_id if final else None
+        else:
+            r3 = _round_matches(db, t, 3)
+            winner_id = r3[0].winner_id if r3 else None
+        if not winner_id:
+            return None          # bracket exists, not decided yet -> pending
+    else:
+        # No live bracket at all: fall back to the imported history, exactly as
+        # get_payouts does for a past season.
+        hist_cup, hist_pup = _historical_cup_winners(db, league)
+        winner_id = hist_cup if cup_name == "Cup" else hist_pup
+    if not winner_id:
+        return None
+    m = db.get(Manager, winner_id)
+    return m.display if m else None
+
+
+def _same_person(a: str | None, b: str | None) -> bool:
+    """Person-name equality for a stored condition subject. Case/space-insensitive,
+    the same rule _historical_cup_winners already uses to match a sheet name to a
+    Manager across seasons."""
+    if not a or not b:
+        return False
+    return a.strip().lower() == b.strip().lower()
+
+
+def set_condition_term_state(db: Session, league: League, term_id: str, state) -> dict:
+    """Rule on a `manual` condition term. `state` is 'met', 'not_met', or None (undecided).
+
+    Only manual terms are settable: an evaluable metric is answered by the data, and
+    letting a human override it would make the draft board disagree with the standings
+    page for reasons nothing records.
+    """
+    from models import TradeConditionTerm
+
+    if state not in (None, CONDITION_MET, CONDITION_NOT_MET):
+        raise RuleViolation(f"unknown condition state {state!r}")
+    term = db.get(TradeConditionTerm, term_id)
+    if not term:
+        raise RuleViolation("condition term not found")
+    if term.metric != CONDITION_MANUAL:
+        raise RuleViolation(
+            f"a {term.metric} condition resolves from the data, not by hand"
+        )
+    previous = term.manual_state
+    term.manual_state = state
+    record_audit(
+        db, league, action="trade.condition.term",
+        summary=f"Ruled a manual trade condition {state or 'undecided'}",
+        details={"term_id": str(term.id), "trade_id": str(term.trade_id),
+                 "note": term.note, "previous": previous, "state": state},
+    )
+    db.commit()
+    return {"term": str(term.id), "state": state}
+
+
+def _condition_terms(db: Session, t: Trade) -> list:
+    """This trade's condition terms, oldest first so a note reads in entry order."""
+    from models import TradeConditionTerm
+
+    return (
+        db.query(TradeConditionTerm)
+        .filter(TradeConditionTerm.trade_id == t.id)
+        .order_by(TradeConditionTerm.created_at, TradeConditionTerm.id)
+        .all()
+    )
+
+
+def _resolve_term(db: Session, term, cache: dict | None = None) -> dict:
+    """{"state": pending|met|not_met, "current": <provisional reading or None>} for ONE
+    condition term.
+
+    An evaluable term is resolved ONLY once its season's league row is frozen
+    (`sync_locked`), uniformly for all four metrics — a mid-season points total, an
+    in-progress bracket and a live table are all equally provisional, and the
+    `stats_season` split already draws this line elsewhere. Until then the state is
+    `pending` and the BASE round stands.
+
+    A `manual` term has no season to freeze and no metric to read: it is whatever the
+    commissioner has ruled, and `pending` until they rule. That is the same "an
+    unanswered condition leaves the base round in force" rule, reached a different way.
+
+    `current` is a human string for the note ("5th", "142 pts") read even while
+    pending, so the board can say what a condition is currently tracking without
+    implying it has resolved. `cache` memoizes the standings/cup/player lookups across
+    the terms of one clause and across the rows of one multi-row deal.
+    """
+    cache = cache if cache is not None else {}
+    metric = term.metric
+
+    if metric == CONDITION_MANUAL:
+        # No auto-resolution by design — see the TradeConditionTerm docstring.
+        return {"state": term.manual_state or CONDITION_PENDING, "current": None}
+
+    lg = _condition_league(db, term.season_year)
+    if lg is None:
+        return {"state": CONDITION_PENDING, "current": None}
+
+    def _cached(key, fn):
+        if key not in cache:
+            cache[key] = fn()
+        return cache[key]
+
+    resolved = None      # True/False once we can answer
+    current = None
+    if metric == "total_points":
+        ps = _cached(
+            ("ident", lg.id, term.player_id),
+            lambda: season_identity(db, lg, [term.player_id]).get(term.player_id),
+        )
+        pts = ps.total_points if ps else None
+        current = f"{pts} pts" if pts is not None else None
+        resolved = compare_condition(term.comparison, pts, term.threshold)
+    elif metric == "league_finish":
+        rows = _cached(("standings", lg.id), lambda: get_standings(db, lg))
+        row = next(
+            (r for r in rows if _same_person(r.get("manager"), term.manager_name)),
+            None,
+        )
+        rank = row.get("rank") if row else None
+        current = _ordinal(rank) if rank else None
+        resolved = compare_condition(term.comparison, rank, term.threshold)
+    elif metric in ("cup_win", "pup_cup_win"):
+        name = "Cup" if metric == "cup_win" else "Pup Cup"
+        winner = _cached(("cup", lg.id, name), lambda: _resolve_cup_winner_name(db, lg, name))
+        current = winner
+        # An undecided bracket is NOT "didn't win it" — hold at pending. Distinct
+        # from a decided cup somebody else won, which is a real not_met.
+        if winner is None:
+            return {"state": CONDITION_PENDING, "current": None}
+        resolved = _same_person(winner, term.manager_name)
+    else:
+        # Unknown metric (hand-edited row / a metric added and later removed). Never
+        # guess: leave the base round in force.
+        return {"state": CONDITION_PENDING, "current": None}
+
+    if not lg.sync_locked:
+        return {"state": CONDITION_PENDING, "current": current}
+    return {"state": CONDITION_MET if resolved else CONDITION_NOT_MET, "current": current}
+
+
+def _resolve_condition(db: Session, t: Trade, cache: dict | None = None) -> dict:
+    """{"state": pending|met|not_met, "current": <provisional reading or None>} for a
+    conditional pick trade — its terms folded under the row's `condition_logic`.
+
+    Signature and return shape are unchanged from the single-condition version, so
+    every caller is untouched by the move to terms.
+
+    The fold short-circuits on the decisive answer before considering pending terms
+    (rules.combine_condition_states), which is what lets a four-way OR with one
+    unevaluable branch still resolve.
+    """
+    cache = cache if cache is not None else {}
+    if not t.condition_logic:
+        return {"state": CONDITION_PENDING, "current": None}
+    results = [_resolve_term(db, term, cache) for term in _condition_terms(db, t)]
+    currents = [r["current"] for r in results if r["current"]]
+    return {
+        "state": combine_condition_states(t.condition_logic, [r["state"] for r in results]),
+        # Joined rather than picked: with one term this is byte-identical to before,
+        # and with several the reader wants every live number, not an arbitrary one.
+        "current": ", ".join(currents) or None,
+    }
+
+
+def _ordinal(n: int) -> str:
+    if 10 <= (n % 100) <= 20:
+        return f"{n}th"
+    return f"{n}{ {1: 'st', 2: 'nd', 3: 'rd'}.get(n % 10, 'th') }"
+
+
+def _term_subject_name(db: Session, term) -> str:
+    """A term's subject as a display string — a player name for total_points, the
+    stored person name otherwise."""
+    if term.metric in CONDITION_PLAYER_METRICS:
+        if not term.player_id:
+            return "?"
+        p = db.get(Player, term.player_id)
+        return p.name if p else "?"
+    return term.manager_name or "?"
+
+
+_FINISH_PHRASE = {
+    "<=": lambda n: f"finishes top {n}",
+    "<": lambda n: f"finishes better than {_ordinal(n)}",
+    ">=": lambda n: f"finishes {_ordinal(n)} or worse",
+    ">": lambda n: f"finishes worse than {_ordinal(n)}",
+}
+_POINTS_PHRASE = {
+    ">=": lambda n: f"scores {n}+ points",
+    ">": lambda n: f"scores more than {n} points",
+    "<=": lambda n: f"scores {n} or fewer points",
+    "<": lambda n: f"scores fewer than {n} points",
+}
+
+
+def _term_phrase(db: Session, term) -> str:
+    """One term as human text: "Kevin T finishes top 3 in 2026".
+
+    A manual term is quoted as written rather than paraphrased — the commissioner's
+    words are the rule, and rewording them would misstate an agreement between people.
+    """
+    if term.metric == CONDITION_MANUAL:
+        return (term.note or "").strip() or "an unrecorded condition"
+    who = _term_subject_name(db, term)
+    metric = term.metric
+    if metric == "total_points":
+        what = _POINTS_PHRASE.get(term.comparison, lambda n: f"reaches {n} points")(
+            term.threshold
+        )
+    elif metric == "league_finish":
+        what = _FINISH_PHRASE.get(term.comparison, lambda n: f"finishes {n}")(term.threshold)
+    elif metric == "cup_win":
+        what = "wins the Cup"
+    elif metric == "pup_cup_win":
+        what = "wins the Pup Cup"
+    else:
+        what = "meets an unrecognized condition"
+    return f"{who} {what} in {term.season_year}"
+
+
+def _condition_note(db: Session, t: Trade, state: str, current: str | None) -> str:
+    """One human sentence describing the condition and where it stands.
+
+    The single-term `escalate_round` wording is preserved exactly as it was before
+    terms existed — that is the overwhelmingly common shape, and its phrasing is
+    pinned by test_condition_note_is_phrased_per_metric.
+    """
+    terms = _condition_terms(db, t)
+    joiner = " or " if t.condition_logic == CONDITION_LOGIC_ANY else " and "
+    what = joiner.join(_term_phrase(db, term) for term in terms) or "an empty condition"
+    if t.condition_effect == CONDITION_EFFECT_TRANSFER:
+        note = f"transfers only if {what}"
+    else:
+        note = f"upgrades to R{t.pick_round_if_met} if {what}"
+    label = {CONDITION_MET: "met", CONDITION_NOT_MET: "not met"}.get(state, "pending")
+    note += f" — {label}"
+    if current and state == CONDITION_PENDING:
+        note += f" (currently {current})"
+    return note
+
+
+def _effective_pick_round(db: Session, t: Trade, cache: dict | None = None) -> int | None:
+    """The round this pick trade actually moves — `pick_round_if_met` once the
+    condition is met, the base `pick_round` otherwise (including while pending).
+
+    Only the `escalate_round` effect touches the round. `transfer_if_met` leaves it
+    alone and is applied by pick_ownership skipping the row entirely.
+
+    Note this changes the KEY the ownership fold writes to, not a value: the
+    base-round slot simply never gets reassigned, so it stays with its original owner
+    with nothing to undo.
+    """
+    if t.condition_effect != CONDITION_EFFECT_ESCALATE or t.pick_round_if_met is None:
+        return t.pick_round
+    state = _resolve_condition(db, t, cache)["state"]
+    return t.pick_round_if_met if state == CONDITION_MET else t.pick_round
+
+
+def _condition_applies(db: Session, t: Trade, cache: dict | None = None) -> bool:
+    """Does this pick trade move the pick AT ALL?
+
+    True for every ordinary row and for `escalate_round` (which moves the pick either
+    way, just into a different round). False only for an unmet `transfer_if_met`,
+    whose whole point is that the transfer is contingent.
+    """
+    if t.condition_effect != CONDITION_EFFECT_TRANSFER:
+        return True
+    return _resolve_condition(db, t, cache)["state"] == CONDITION_MET
+
+
+def pick_conditions(
+    db: Session, league: League, season_year: int, draft_type: str = "main"
+) -> dict:
+    """{(effective_round, original_owner_person): {...}} for CONDITIONAL pick trades
+    in this draft — the display sibling of pick_ownership.
+
+    Keyed the same way pick_ownership is, and on the EFFECTIVE round, so a slot's
+    pill lands on the slot the pick actually occupies right now: the base round while
+    pending or unmet, the upgraded round once met. Latest entry wins on a collision,
+    the same created_at rule as the ownership fold.
+    """
+    person_by_id = {m.id: m.display for m in db.query(Manager)}
+    cache: dict = {}
+    out: dict = {}
+    for t in (
+        db.query(Trade)
+        .filter(Trade.pick_round.isnot(None),
+                Trade.condition_logic.isnot(None),
+                Trade.pick_season_year == season_year,
+                Trade.pick_draft_type == draft_type)
+        .order_by(Trade.created_at, Trade.id)
+        .all()
+    ):
+        orig = person_by_id.get(t.pick_original_manager)
+        if not orig:
+            continue
+        res = _resolve_condition(db, t, cache)
+        rnd = _effective_pick_round(db, t, cache)
+        out[(rnd, orig)] = {
+            "conditional": True,
+            "condition_status": res["state"],
+            "condition_note": _condition_note(db, t, res["state"], res["current"]),
+        }
+    return out
+
+
 def pick_ownership(
     db: Session, league: League, season_year: int, draft_type: str = "main"
 ) -> dict:
@@ -5850,6 +6421,12 @@ def pick_ownership(
     # then live pick trades, in entry order (latest wins). Ordered on created_at:
     # this used to sort on Trade.id, which is a random uuid4 — so "latest wins" was
     # actually "whichever id sorted higher" the moment a pick changed hands twice.
+    #
+    # The round used is the EFFECTIVE one: a conditional trade whose condition is met
+    # moves the upgraded round instead of the base round. That is a change of KEY, not
+    # of value — the base-round slot is simply never written, so it stays with its
+    # original owner. A row with pick_round_if_met NULL takes the same path as always.
+    cond_cache: dict = {}
     for t in (
         db.query(Trade)
         .filter(Trade.pick_round.isnot(None),
@@ -5859,7 +6436,12 @@ def pick_ownership(
     ):
         orig, to = person_by_id.get(t.pick_original_manager), person_by_id.get(t.to_manager)
         if orig and to:
-            reassigned[(t.pick_round, orig)] = to
+            # An unmet `transfer_if_met` row moves nothing at all — skipping it is the
+            # WHOLE effect, and it leaves the slot with its original owner without any
+            # entry to undo. `escalate_round` and ordinary rows always fall through.
+            if not _condition_applies(db, t, cond_cache):
+                continue
+            reassigned[(_effective_pick_round(db, t, cond_cache), orig)] = to
     return reassigned
 
 
@@ -6419,10 +7001,14 @@ def get_draft_board(
 
     # apply the unified pick ownership (baseline + trades)
     own = pick_ownership(db, league, season_year, draft_type)
+    # ...and the display-only condition metadata, keyed the same (round, original
+    # owner) way, on the round the pick EFFECTIVELY occupies right now.
+    conds = pick_conditions(db, league, season_year, draft_type)
     for b in board:
         orig_person = names.get(b["original_owner_id"])
         cur_person = own.get((b["round"], orig_person), orig_person)
         b["owner_id"] = id_by_person.get(cur_person, b["original_owner_id"])
+        b["condition"] = conds.get((b["round"], orig_person))
 
     # overlay recorded picks by pick number
     picks = {
@@ -6446,7 +7032,7 @@ def get_draft_board(
         recorded_owner_id = dp.manager_id if dp and dp.manager_id else None
         if recorded_owner_id:
             owner_id = recorded_owner_id
-        out.append({
+        row = {
             "pick": b["pick"],
             "round": b["round"],
             "owner": names.get(owner_id),
@@ -6472,7 +7058,14 @@ def get_draft_board(
                 or (dp.player_label if dp else None)
             ),
             "is_goalie_team": bool(dp and dp.team_id),
-        })
+        }
+        # Display only — the round this slot IS already reflects a met condition.
+        # Attached ONLY for a conditional pick, so an ordinary row's dict is byte
+        # -identical to what it was before this feature (an exact-equality test one
+        # module over depends on that, and so does every consumer that iterates keys).
+        if b.get("condition"):
+            row.update(b["condition"])
+        out.append(row)
     return out
 
 
@@ -6515,8 +7108,11 @@ def get_future_picks(db: Session, league: League) -> list[dict]:
         entry = {"year": y}
         for dt in ("main", "discovery"):
             merged = pick_ownership(db, league, y, dt)
+            conds = pick_conditions(db, league, y, dt)
             entry[dt] = [
-                {"round": rnd, "original_owner": orig, "owner": owner}
+                {"round": rnd, "original_owner": orig, "owner": owner,
+                 # Same rule as the draft board: present only when conditional.
+                 **(conds.get((rnd, orig)) or {})}
                 for (rnd, orig), owner in sorted(merged.items(), key=lambda kv: (kv[0][0], kv[0][1]))
             ]
         if entry["main"] or entry["discovery"]:
@@ -6798,6 +7394,7 @@ def get_trades(db: Session) -> list[dict]:
     pl_teams = {t.id: t.name for t in db.query(PlTeam)}
 
     by_year: dict = {}
+    cond_cache: dict = {}
     for t in db.query(Trade).all():
         if t.team_id is not None:
             # A goalie-team trade (team_id set, pick_round and player_id both
@@ -6818,6 +7415,23 @@ def get_trades(db: Session) -> list[dict]:
             "source": "FPL" if t.fpl_trade_id else "site",
             "edited": bool(t.manually_edited),
         }
+        if t.condition_logic is not None:
+            # Resolved per row here rather than via pick_conditions: this listing is
+            # cross-season and cross-league, so there is no one (season, draft_type)
+            # to key a batch on.
+            res = _resolve_condition(db, t, cond_cache)
+            row["conditional"] = True
+            row["condition_status"] = res["state"]
+            row["condition_note"] = _condition_note(db, t, res["state"], res["current"])
+            # Only the MANUAL terms, and only here: they're the ones the commissioner
+            # has to rule on, and the corrections editor is the only surface that can.
+            # Attached as a key rather than folded into the note so the template can
+            # render one control per term.
+            row["manual_terms"] = [
+                {"id": str(term.id), "note": term.note, "manual_state": term.manual_state}
+                for term in _condition_terms(db, t)
+                if term.metric == CONDITION_MANUAL
+            ]
         by_year.setdefault(_trade_season_year(t, leagues_by_id), []).append((t, row))
 
     out = []
@@ -6858,19 +7472,36 @@ def _trade_or_404(db: Session, league: League, trade_id: str) -> Trade:
     return row
 
 
+_CONDITION_COLUMNS = ("condition_logic", "condition_effect", "pick_round_if_met")
+
+
 def edit_trade(
     db: Session, league: League, trade_id: str, *,
     from_fpl: str | None = None, to_fpl: str | None = None,
     event_gw: int | None = None, conditions: str | None = None,
+    set_condition: bool = False,
+    condition_logic: str | None = None,
+    condition_effect: str | None = None,
+    pick_round_if_met: int | None = None,
+    condition_terms: list[dict] | None = None,
 ) -> dict:
     """Correct a trade. Only the fields passed are changed.
 
     Sets `manually_edited`, which stops sync_trades rewriting it back or, worse,
     re-inserting the uncorrected version as a duplicate (its reconciliation matches
     an exact from/to pair, so a flipped direction sails straight past it).
+
+    The pick CONDITION is edited as a unit behind `set_condition`, not field by
+    field: a clause and its terms only make sense together (a metric without a
+    threshold, or a threshold left over from a previous metric, is not a state worth
+    being able to save), and validation is over the whole set. `set_condition=True`
+    with no terms CLEARS the condition, which is how a conditional pick is made
+    ordinary again — terms included, since a clause-less term row would be
+    unreachable and would still show up in a note.
     """
     row = _trade_or_404(db, league, trade_id)
-    prev = _previous(row, ["from_manager", "to_manager", "event_gw", "conditions"])
+    prev = _previous(row, ["from_manager", "to_manager", "event_gw", "conditions",
+                           *_CONDITION_COLUMNS])
 
     if from_fpl:
         row.from_manager = _resolve_manager(db, league, from_fpl).id
@@ -6880,6 +7511,16 @@ def edit_trade(
         row.event_gw = event_gw
     if conditions is not None:
         row.conditions = conditions or None
+    if set_condition:
+        if row.pick_round is None and condition_terms:
+            raise RuleViolation("only a pick trade can carry a condition")
+        cond, terms = _condition_spec(
+            db, condition_logic=condition_logic, condition_effect=condition_effect,
+            pick_round_if_met=pick_round_if_met, condition_terms=condition_terms,
+        )
+        for col, val in cond.items():
+            setattr(row, col, val)
+        _write_condition_terms(db, row, terms)
     if row.from_manager == row.to_manager:
         raise RuleViolation("a trade needs two different managers")
 
@@ -7608,6 +8249,9 @@ def corrections_data(db: Session, league: League) -> dict:
             for m in db.query(Manager).filter_by(league_id=league.id)
             .order_by(Manager.display_name)
         ],
+        # For the pick-condition editor's player subject. Same accent-aliased picker
+        # the draft and IL forms use.
+        "players": list_players(db, league),
     }
 
 

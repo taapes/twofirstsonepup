@@ -45,6 +45,17 @@ plans + copy-paste session prompts live in **`docs/SESSION_PLANS.md`**.
 9. ~~**Item 10** — make the test-DB skip loud~~ — **done 2026-08-24**. Also produced
    the refuse-guard that makes a plain `pytest` unable to reach production (see the
    "Three test files can commit to the PRODUCTION database" entry, now `mitigated`).
+13. ~~**Item 17** — conditional / tiered draft-pick trades~~ — **done 2026-08-25**;
+   **superseded 2026-08-29 by conditions v2** (terms table, `any`/`all`, a second
+   effect, and a `manual` escape valve) after five real Discord trade posts showed the
+   flat seven-column version could hold only a third of one actual deal. See the
+   "Trade conditions v2" entry below.
+   Schema + read-path + write-path + display + 40 tests. See "As built" in the entry
+   below for the four deliberate deltas from the plan. Next in order is **Item 9**
+   (IL backfill form search by name).
+12. ~~**Item 12** — accent-insensitive `<datalist>` matching~~ — **done 2026-08-25**.
+   Option 1 (folded alias) as planned; see the entry below for the part-wise-folding
+   trap the first cut hit. Next in order is **Item 17** (conditional pick trades).
 8. ~~**Item 8** — verify `goalie_team_owner` self-healed at the rollover~~ — **done
    2026-08-24**. Confirmed self-healed (the 26/27 row's `season_year` now matches the
    `DraftPick.season_year` on goalie-team picks); regression test added
@@ -59,20 +70,29 @@ reflects the commissioner's explicit request to move conditional pick trades and
 
 | # | Item | Why this slot |
 |---|---|---|
-| 1 | **Item 12** — accent-insensitive `<datalist>` matching | Small, mechanical, already-designed (ASCII-folded alias). Same "quick win" tier as the two above. |
-| 2 | **Item 17** — conditional / tiered draft-pick trades | Moved up per commissioner request, ahead of the remaining mid-tier fixes — reflects a real, recurring league mechanic (finish-position and cup-win conditions have actually been used in past trades), not a hypothetical. |
+| ~~1~~ | ~~**Item 12** — accent-insensitive `<datalist>` matching~~ | **Done 2026-08-25.** |
+| ~~2~~ | ~~**Item 17** — conditional / tiered draft-pick trades~~ | **Done 2026-08-25.** |
 | 3 | **Item 9** — IL backfill form search by name | Self-service IL/international placement (done 2026-08-24) now covers the common case, lowering urgency, but this is still the right fix for the admin-only historical path. |
 | 4 | **Item 16** — historical GK IL backfill refused once goalie teams are on | **Premise settled 2026-08-24: `goalie_team_mode` is `off` for 26/27 and the commissioner confirmed that is deliberate.** So `_refuse_goalkeeper_list_move` cannot fire this season and this is latent, not live — safe to leave here or drop further. |
 | 5 | **Item 11** — preflight "rollover NOT done" detection fix | Matters most right before the *next* draft (2027), not urgently now. |
 | 6 | **Item 19** — AI enhancements epic, sub-item 1 (GW review/banter) | Largest, most novel item on this list (new dependency, new outbound integration pattern) — sequenced after the smaller/safer items and after the pick-trade item has proven the newer trade-related surface, but has the highest ceiling for visible payoff. |
 | 7 | **Item 14** — scheduled keeper lock / draft open | Not time-critical until closer to the *next* draft/keeper-lock cycle. |
-| 8 | **Item 15** — Discord webhook trade announcements | P3, designed but not built; nice-to-have, no urgency. |
+| ~~8~~ | ~~**Item 15** — Discord webhook trade announcements~~ | **Done 2026-08-29**, plus commissioner alerts. Built as session 2 of the Discord bridge. |
 
 Still open with no session prompt yet (see the two bullets immediately below): "Three
 test files can commit to the PRODUCTION database" and "Audit for the silent-inert
 pattern."
 
 **Open, added during the 5a work and not yet in `SESSION_PLANS.md`:**
+- **Model/DB index drift: two declared indexes don't exist** (`P3`, found 2026-08-25
+  while generating the Item 17 migration). `alembic revision --autogenerate` proposes
+  `ix_draft_queue_season_year` (`draft_queue.season_year`) and
+  `ix_side_payouts_manager_id` (`side_payouts.manager_id`) on a schema built from
+  migrations — so the models declare `index=True` on both and no revision ever created
+  them. Harmless (a missing index is slow, not wrong) but it means every future
+  autogenerate carries two unrelated `create_index` calls that have to be stripped by
+  hand, and someone will eventually miss one. Fix: one revision creating both, so the
+  next autogenerate is clean. Check production separately — it may or may not have them.
 - **Three test files can commit to the production database** (`P3`) —
   `test_audit.py` / `test_demo.py` / `test_sync_freeze.py` resolve their session from
   `DATABASE_URL`. Deliberate (they test code that commits internally) but unguarded,
@@ -1815,8 +1835,44 @@ old_league, year, "main")`. No data migration needed — the picks are already t
 
 ### Post a message to Discord when a trade is recorded
 
-**Priority:** `P3` — new feature, requested 2026-08-15. **To explore, not yet designed.**
-**Status:** `open`
+**Priority:** `P3` — new feature, requested 2026-08-15.
+**Status:** `done` — 2026-08-29, as session 2 of the Discord bridge.
+
+**Shipped.** `discord_bridge.py`; `trades.announced_at` + `discord_alerts` (migration
+`a4b5c6d7e8f9`); the post-sync hook in `sync.run_sync`. 21 tests, no network in any of
+them. Suite 933 passed / 18 skipped (was 912).
+
+**Every question in the "things to think about" list below was answered as written**,
+with three additions the list didn't anticipate:
+
+1. **It grew commissioner alerts** — the list warned against quietly becoming "a
+   notifications feature", and this is that, deliberately and on request. Scoped to a
+   SECOND webhook pointing at a private channel, so league-visible announcements and
+   commissioner business can never cross. A test asserts each sweep uses its own URL.
+2. **Alerts needed a different marker shape than trades.** `flagged_actions` and
+   `data_health` are recomputed from scratch every sync and carry no ids, so there is no
+   row to stamp — hence content-addressed dedupe on a hash of the rendered alert. That
+   turned out to set a sensible re-alert cadence for free (see the `DiscordAlert`
+   docstring): identical text is silent, text that moves with the gameweek re-posts.
+3. **Long batches must be SPLIT, not truncated.** Discord rejects a message over 2000
+   characters outright, so a truncating renderer would lose the tail of an alert list
+   silently.
+
+**Settled by research, not assumption** (docs.discord.com, Aug 2026): an incoming
+webhook needs no bot, no Developer Portal app, no privileged intent and no Manage Server
+permission. That is why this session has effectively zero Discord setup cost and why the
+bot token is deferred to the inbound half — a webhook can post, but it **cannot reply to
+a message** (`message_reference` is not among Execute Webhook's params), and threaded
+echo replies are an inbound-half concern.
+
+**The seam for that.** Both announcers take an injectable `send`; only `_webhook_sender`
+gets replaced when a bot token arrives. The sweep logic, both markers and the rendering
+are untouched by that change.
+
+**One thing the entry got right that mattered.** It flagged `record_audit` as a trap
+("audit is a write-path primitive"), and that is exactly why the hook is in
+`sync.run_sync` instead. It also flagged `sync_trades` as the sharp edge; the persisted
+marker plus the migration's back-stamp are the two halves of that fix.
 
 **The ask.** When a trade is posted in the app, announce it in the league's Discord.
 
@@ -1860,28 +1916,35 @@ it to an outbound HTTP call gives every future audited action a network dependen
 
 **Priority:** `P3` — the live draft search is already fixed; these are admin/manager
 forms, not the draft.
-**Status:** `open`
+**Status:** `done` — 2026-08-25
 
-**Symptom.** `search_players` now unaccents both sides, so typing "Sesko" finds Šeško on
-the draft board. The `<datalist>` pickers do **not** benefit: they render every player as
-an `<option>` and the *browser* does the matching, against the literal label. So "Sesko"
-still finds nothing in the IL place/return forms (`templates/my_team.html`) and the
-trade-player form (`templates/draft.html`).
+**Shipped.** Option 1 (ASCII-folded alias): `services.list_players` now emits an `alias`
+field (matching when folded form differs from label, case-insensitive). Three datalist
+pickers (`ilPlayers`, `intlPlayers`, `playerList`) now emit a second `<option>` with the
+folded alias when present, so the browser matches either "Sesko" or "Šeško". The resolver
+functions (ilResolve, intlResolve, resolvePlayer) work unchanged — both options carry the
+same `data-fpl` value.
 
-**Why it can't reuse the same fix.** The server-side query isn't involved — matching is
-client-side against `services.list_players`' `label` (`"Name · Team"`).
+**Implementation.** The folding logic is ported (never imported) from
+`scripts/import_projections.py:_norm` into `services._fold_name` — lowercase →
+`_FOLD_TRANSLIT` → NFKD, in that order — minus the script's closing
+`re.sub(r"[^a-z]", "", s)`: that one builds a match KEY, this one builds text a human
+types into a picker, so punctuation stays. `history_import._norm` was left alone
+(plain NFKD, load-bearing for already-imported keeper seeds).
 
-**Fix sketch.** Two options, both cheap:
-- Emit an ASCII-folded alias in the option text so the browser matches either form —
-  e.g. keep `value` as the real name and append the folded spelling, or render a
-  `data-*` attribute and do the matching in the existing small resolver function.
-- Or replace the datalist with the HTMX typeahead already used for the discovery keeper
-  search (`templates/_discovery_search.html` + its route), which goes through
-  `search_players` and therefore inherits the unaccent fix for free. Heavier, but it
-  deletes a second matching mechanism rather than patching it.
+**A trap worth keeping.** `_fold_name` folds ONE part; `list_players` folds `name` and
+`current_team` separately and rejoins with `" · "`. Folding the whole `"Name · Team"`
+label at once looks equivalent and is not: the ascii encode DROPS the · (U+00B7) and
+leaves the two spaces that surrounded it, so the separator has to be restored by regex
+— which is right only because the dropped character happened to sit between two spaces,
+and silently invents a separator inside any name containing a double space
+("São  Paulo" → "sao · paulo"). The first implementation did exactly that; pinned now by
+`test_fold_name_folds_one_part_and_never_invents_a_separator`.
 
-Reuse `scripts/import_projections.py`'s `_norm` + `_TRANSLIT` for the folding — it
-already handles ø/ı/ğ, which NFKD alone does not.
+Tests (`tests/test_accent_search.py`, the existing home for the server-side fix) assert
+the alias STRINGS for the š / ø / ı+ğ cases, that a plain-ASCII name gets **no** alias
+(so the common case emits no duplicate option), and the part-wise folding above. Both
+mutations bite. Full run: 840 passed, 18 skipped.
 
 ---
 
@@ -1937,8 +2000,9 @@ would have been scope creep. If this item is ever picked up, fold that picker in
 
 **Priority:** `P1` — real, recurring league mechanic (not hypothetical); no live trade is
 currently waiting on it, but the commissioner wants the infrastructure sooner rather than
-later. See `docs/SESSION_PLANS.md` for a full build session prompt.
-**Status:** `open`
+later. See `docs/SESSION_PLANS.md` for the build session prompt.
+**Status:** `done` — 2026-08-25. Built as designed below; the four deltas from the plan
+are recorded under "As built" at the end of this entry.
 
 **The gap.** `Trade` rows that move a pick (`pick_round`, `pick_season_year`,
 `pick_draft_type`, `pick_original_manager` set) store a single committed round with no
@@ -2035,6 +2099,113 @@ resolution; retroactive mutation of `pick_round`; the Pupmunity Shield as a fift
 **Open questions:** none currently blocking — the three metric families are confirmed. A
 genuinely new metric type later (head-to-head record, playoff appearance) extends the
 same `condition_metric` dispatch pattern.
+
+**As built (2026-08-25).** Migration `3fb3a45fea86`. Where the code lives:
+`rules.CONDITION_METRICS` / `compare_condition` / `validate_pick_condition` (pure);
+`services._resolve_condition` (the four-metric dispatch), `_effective_pick_round` (the
+one line `pick_ownership` calls), `pick_conditions` (display sibling),
+**`services._resolve_cup_winner_name(db, league, "Cup"|"Pup Cup")`** — that is the helper
+a future fifth metric (the Pupmunity Shield) extends, and the one to reuse rather than
+re-deriving from `get_payouts`.
+
+Four deltas from the plan above, all deliberate:
+1. **The condition keys are attached only to a CONDITIONAL row, not set to
+   `False`/`None` on every row.** `get_future_picks`' per-pick dict is compared for
+   exact equality by `test_cross_season_trades.py`, and three new keys on every row
+   broke it. "No new response shapes" is the stricter and better reading: an ordinary
+   row's dict is byte-identical to what it was before this feature.
+2. **The pure validation lives in `rules.validate_pick_condition`**, not inline in
+   `services`. The plan said "app-level, not DB CHECK" and this is still app-level —
+   it just sits where every other pure rule does. `services._condition_fields` does the
+   half that needs the database (resolving the player, NULLing comparison/threshold for
+   the two boolean metrics).
+3. **The entry form is in `templates/draft.html`, not `_board.html`** — that is where
+   the "Trade a pick" panel actually is; `_board.html` is the 7s-polled partial and
+   only got the pill.
+4. **The corrections editor is its own form + route**
+   (`POST /admin/corrections/trade/condition`, `edit_trade(set_condition=True)`) rather
+   than extra fields on the existing trade-edit row. An HTML form cannot span table
+   rows, and the seven columns validate as a SET — a field-by-field editor would let an
+   unrelated correction (fixing a gameweek) silently clear a condition, which
+   `test_edit_trade_leaves_the_condition_alone_when_not_asked` now pins.
+
+Also worth knowing: `alembic/env.py` does `load_dotenv()` and reads `DATABASE_URL`,
+i.e. **production Neon** on a dev machine. This revision was generated and round-tripped
+with `DATABASE_URL=$TEST_DATABASE_URL alembic ...`; never run it bare. Autogenerate also
+proposed `ix_draft_queue_season_year` and `ix_side_payouts_manager_id` — pre-existing
+model/DB index drift, left out of this revision and logged as its own item below.
+
+Tests: `tests/test_conditional_pick_trade.py` (43). Seven mutations verified to bite:
+condition never applied, freeze gate removed, undecided bracket reported as `not_met`,
+standings read from raw `Standing.rank`, route admin gate removed, template gate removed,
+and `_resolve_player` called with a spurious `league` arg. That last one was a REAL bug
+shipped in the first cut of this item and caught while planning Item 9: the route's
+player-subject path 500'd, and every service-level test passed straight over it because
+they pass `condition_player_id` directly. `_resolve_player(db, fpl_id)` takes no league.
+A second one, found the same way: `resolve_player_by_label` round-tripped through
+`fpl_id`, which is NULL for every departed player — `WHERE fpl_id IS NULL` matched them
+all and raised `MultipleResultsFound` (a 500). It now resolves the row directly, sharing
+`_picker_label` with `list_players`, so no element id is involved.
+
+---
+
+### Trade conditions v2 — terms, any/all, conditional transfer, manual escape valve
+
+**Priority:** `P1` — blocked the Discord ingest work, so it went first.
+**Status:** `done` — 2026-08-29.
+
+**Why it happened.** Planning the Discord bridge, five real `#trades` posts were
+sampled as the requirements list. One of them (KT<->KS, 2026-08-16) turned out to be
+**unrepresentable**: three separate conditional clauses, a four-way OR, a two-way AND, a
+metric with no column (`red_cards` — the schema has only `yellow_cards`, and that on
+`PlayerProjection`), and a condition on *a pick's* eventual points rather than a
+player's. Item 17's seven flat columns hold exactly one condition with exactly one
+effect, so the deal was being kept as free text nobody reads.
+
+**Shipped.** One new table and two new columns, not the clause/group table first
+sketched:
+
+- `trade_condition_terms` — the leaves. `metric` admits `'manual'`; `season_year` is
+  per term; `manual_state` is the commissioner's verdict. `ondelete="CASCADE"`, the
+  schema's second cascade, for the same reason as `discovery_match_suggestions`.
+- `Trade.condition_logic` (`all`/`any`, NULL = ordinary row and the discriminator every
+  read path checks) and `Trade.condition_effect` (`escalate_round` | `transfer_if_met`).
+  `pick_round_if_met` stays as `escalate_round`'s parameter.
+
+**Four things the plan got wrong or learned on the way:**
+1. **No grouping concept was needed.** A `Trade` row moves ONE pick, so three
+   conditional clauses are three rows — which is what a three-pick deal already was.
+   `test_a_multi_row_escalating_deal_resolves_each_row_independently` had already
+   pinned that shape. The planned `group_id` was deleted before it was written.
+2. **"+1 additional discovery" is a conditional TRANSFER, not a granted pick**
+   (confirmed with the commissioner). That collapsed the second effect from "emit a
+   board slot that isn't derived from order + keeper counts" — which would have meant
+   touching `generate_draft_slots` — to **one `continue`** in `pick_ownership`.
+3. **`manual` belongs on the TERM, not the clause.** In that four-way OR exactly one
+   branch is unevaluable; a clause-level flag would strand the whole thing at pending
+   forever, while the other three branches can decide it. `rules.combine_condition_states`
+   short-circuits on the decisive answer BEFORE considering pending terms.
+4. **`Trade.id` is not populated at construction.** The PK uses a Python-side
+   `default=uuid.uuid4`, which SQLAlchemy applies at INSERT — so `trade_pick` needs a
+   `db.flush()` before writing terms. The first cut asserted the opposite in a comment
+   and failed the NOT NULL on `trade_id`; the tests caught it.
+
+**Migration.** `3fb3a45fea86` was **rewritten in place** rather than superseded:
+production was still at its `down_revision` (`c9d0e1f2a3b4`, verified read-only), the
+file was untracked, and its docstring records it was only ever round-tripped against
+`TEST_DATABASE_URL`. So the six flat columns never existed anywhere and no data
+migration was needed. **This is only safe because it was never deployed** — do not
+rewrite a revision that has been.
+
+**Verified.** 912 passed / 18 skipped (was 883; +29). Four mutations confirmed to bite:
+flip `any`/`all`; drop the `transfer_if_met` skip; let a `manual` term default to met;
+let an empty term list satisfy `all([])`. The KT<->KS deal goes in as a fixture and
+round-trips in full (`test_the_kt_ks_trade_is_representable`) — 7 terms across 3 rows,
+one clause met by a knowable OR branch while a manual one is still undecided.
+
+**Not done, deliberately.** No new metrics. `red_cards` and "a pick's eventual points"
+ride as `manual` terms, which is the point of the escape valve: the schema is now closed
+under conditions it cannot evaluate, so no future clause is lost for lack of a column.
 
 ---
 

@@ -52,7 +52,7 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   naming the host it refused. **A plain `pytest` is now safe** — the old convention of
   hand-typing three `--ignore` flags is obsolete, and shouldn't be revived: it failed on
   2026-08-24 because zsh doesn't word-split an unquoted `$IG`, and they hit prod twice.
-  A full run is `816 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
+  A full run is `933 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
@@ -295,6 +295,52 @@ Write tests for these. They are custom and non-obvious:
 - **Trades:** Allowed only end of GW38 -> Jan 31. Player-for-player,
   pick-for-player, or pick-for-pick. Conditions free-text initially. Trades
   update keeper clocks and the draft board.
+  **A pick trade can carry a CONDITION**, as a CLAUSE on the `Trade` row over TERMS in
+  `trade_condition_terms`. Terms combine under `condition_logic` (`all`/`any`) and
+  `condition_effect` says what being met does: `escalate_round` (the pick moves either
+  way but as `pick_round_if_met`) or `transfer_if_met` (the pick moves ONLY if met).
+  Both fold into `pick_ownership` without leaving a value to undo — the first changes
+  the **KEY** (`_effective_pick_round`), the second changes **whether the fold writes**
+  (`_condition_applies`). `condition_logic IS NULL` is the discriminator for "ordinary
+  pick trade", checked by every read path.
+  **One clause per Trade row, deliberately** — a row moves one pick, so a deal with
+  three conditional clauses is three rows, which is what a multi-pick deal already was.
+  That is why there is no clause/group table.
+  Four evaluable metrics (`rules.CONDITION_METRICS`) — `total_points` names a PLAYER,
+  `league_finish`/`cup_win`/`pup_cup_win` name a MANAGER, and the two cup metrics are
+  boolean facts, so comparison/threshold are stored NULL rather than defaulted. The
+  subject is `manager_name`, **a person name and never a `managers.id` FK** — one
+  manager row exists per season, and a condition entered today resolves against a season
+  whose rows don't exist yet (the `FuturePick.owner` precedent).
+  **`metric='manual'` is the escape valve, and it lives on the TERM, not the clause.**
+  A real 2026 deal (KT<->KS) needed a four-way OR whose branches included "cunha less
+  than 3 red cards" (no such column) and "pick 12 scoring 225" (a subject that isn't a
+  player). A manual term stores the clause verbatim in `note` and resolves only via
+  `manual_state`, set by the commissioner on `/admin/corrections`
+  (`services.set_condition_term_state`, manual terms only — an evaluable metric is
+  answered by the data). Term-level is what makes that OR work: the three knowable
+  branches still decide it. `rules.combine_condition_states` short-circuits on the
+  decisive answer BEFORE considering pending terms, so `any` goes met on a known branch
+  with an unknown outstanding and `all` goes not_met on one failure; an EMPTY term list
+  is `pending`, never met, because `all([])` is True in Python.
+  Resolved fresh on every read (`services._resolve_condition` -> `_resolve_term`) and
+  **never written back to `pick_round`**. An evaluable term resolves ONLY once its
+  season's league row is `sync_locked`, uniformly for all four metrics — until then it
+  is `pending` and the BASE round stands, even when the live number already clears the
+  threshold; `pending` is deliberately not `not_met`, and an undecided bracket stays
+  pending too. `season_year` is per TERM, not per clause. `league_finish` reads
+  `get_standings` (adjusted + alphabetical tie-break), never `Standing.rank`. Cup
+  winners resolve through `services._resolve_cup_winner_name` — live bracket, then the
+  `season_history` fallback — which is the helper to extend for a fifth metric.
+  Entry is **commissioner-only** (route + template gate). The entry and correction forms
+  share `templates/_condition_form.html` (the metric/comparison lists had already
+  drifted between two copies) and post **parallel arrays**, one entry per term, zipped
+  back by `ui._condition_terms_from_form`; a repeater row with a blank metric is dropped
+  rather than validated. Display keys (`conditional`, `condition_status`,
+  `condition_note`, `manual_terms`) are attached only to conditional rows, so an
+  ordinary pick dict is unchanged — two tests assert that by exact dict equality.
+  `Trade.conditions` (free text) is finally read: it holds the deal as written, so the
+  wording survives a clause only partly expressible in terms.
   **A commissioner-entered player trade moves the player via an OVERLAY ON READ**
   (`services.player_ownership`, the sibling of `pick_ownership`), never by writing
   `rosters` — those are FPL-canonical, and a fabricated row would be indistinguishable
@@ -638,6 +684,39 @@ for a day. `sync._current_league_id()` now resolves the current row first and lo
 `resolve_league` SyncLog row naming the league it chose; the env is a bootstrap for a
 database with no league rows and nothing else. **Don't reintroduce an env read here** —
 flipping `is_current` is meant to be the only step a rollover needs.
+
+**Outbound Discord (`discord_bridge.py`).** The first OUTBOUND network call in the
+codebase. Two incoming **webhooks**, each its own env var and each OFF when unset:
+`DISCORD_WEBHOOK_URL` (public — announces every new trade once) and
+`DISCORD_ALERT_WEBHOOK_URL` (private — `flagged_actions` + failed `data_health` checks).
+A webhook needs no bot, no Developer Portal app, no privileged intent and no Manage
+Server permission; the URL IS the credential, so it is env-only (`SECURITY.md`).
+CLAUDE.md's "no live FPL calls in request handlers" rule is about inbound sync, but its
+reasoning applies identically outbound, so: called ONLY from the post-sync hook in
+`sync.run_sync` (outside the `plan` branch, so a site trade doesn't wait for tomorrow's
+full sync), never from a request handler, never inside a service transaction, and
+**never from `record_audit`** — audit is a write-path primitive and hanging HTTP off it
+would give every future audited action a network dependency. `post_message` never
+raises and `run_outbound` swallows even a bug in our own rendering: a trade is the real
+work, the announcement is a side effect.
+**Two markers, because "have I already said this?" has two shapes.** `trades.announced_at`
+is the announce queue (`WHERE announced_at IS NULL`), stamped **per success** so a
+partial failure leaves the rest queued; the migration **back-stamps every existing
+trade**, without which the first deploy would dump the league's whole history into the
+channel. It must be persisted, not in-process: trades also arrive from the FPL feed and
+sync re-runs constantly. Alerts have no row to stamp — `flagged_actions`/`data_health`
+are recomputed from scratch every sync and carry no ids — so `discord_alerts` dedupes on
+a **hash of the rendered alert**, with `UNIQUE(league_id, fingerprint)`. That choice sets
+the cadence and needs no special-casing: identical text never re-posts, while text that
+moves ("on the IL 4 GWs" → "5 GWs") is new information and does, so an unresolved item
+nags about once a GW rather than once a sync. The dedupe row is written only AFTER a
+confirmed send (the `confirm_discovery_suggestion` ordering). Rendering reuses
+`get_trades`' existing display shape rather than re-deriving it, and long alert batches
+are SPLIT at `MAX_MESSAGE_CHARS` — Discord rejects >2000 outright, so truncating would
+lose the tail silently. A `sync_locked` league is skipped (guard lives in
+`run_outbound`, not the call site, so it's testable). Both announcers take an injectable
+`send`; that seam is where a bot token replaces the webhook when the inbound half needs
+threaded replies.
 
 **Ineligible players:** a non-DEF added to FPL after the draft (i.e. not in the
 season's `player_pool_snapshot`, captured at rollover) is flagged in

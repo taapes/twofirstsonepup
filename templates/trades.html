@@ -23,7 +23,7 @@
       {% for t in season.trades %}
       <tr data-managers="|{{ t['from'] }}|{{ t['to'] }}|">
         <td class="tag">{{ t.kind }}</td>
-        <td>{{ t.what }}</td>
+        <td>{{ t.what }}{% if t.conditional %} <span class="pill" title="{{ t.condition_note }}">conditional{% if t.condition_status != "pending" %} · {{ t.condition_status.replace("_", " ") }}{% endif %}</span>{% endif %}</td>
         <td>{{ t['from'] }}</td>
         <td>{{ t['to'] }}</td>
         <td class="num">{% if t.gw %}GW{{ t.gw }}{% else %}—{% endif %}</td>

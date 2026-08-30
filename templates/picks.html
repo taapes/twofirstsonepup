@@ -10,7 +10,8 @@
   <tbody>
     {% for p in picks %}
     <tr data-managers="|{{ p.original_owner }}|{{ p.owner }}|">
-      <td class="num">{{ p.round }}</td><td>{{ p.original_owner }}</td><td>{{ p.owner }}</td>
+      <td class="num">{{ p.round }}</td><td>{{ p.original_owner }}</td>
+      <td>{{ p.owner }}{% if p.conditional %} <span class="pill" title="{{ p.condition_note }}">conditional{% if p.condition_status != "pending" %} · {{ p.condition_status.replace("_", " ") }}{% endif %}</span>{% endif %}</td>
     </tr>
     {% endfor %}
   </tbody>

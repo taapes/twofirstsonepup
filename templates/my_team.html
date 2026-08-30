@@ -84,7 +84,9 @@
       </form>
     </details>
     <datalist id="ilPlayers">
-      {% for p in players %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.label }}"></option>{% endfor %}
+      {% for p in players %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.label }}"></option>
+      {% if p.alias %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.alias }}"></option>{% endif %}
+      {% endfor %}
     </datalist>
     <script>
       function ilResolve(form){
@@ -174,7 +176,9 @@
     </form>
   </details>
   <datalist id="intlPlayers">
-    {% for p in players %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.label }}"></option>{% endfor %}
+    {% for p in players %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.label }}"></option>
+    {% if p.alias %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.alias }}"></option>{% endif %}
+    {% endfor %}
   </datalist>
   <script>
     function intlResolve(form){

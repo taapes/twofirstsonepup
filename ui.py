@@ -111,6 +111,49 @@ def _feature_allowed(
     return bool(services.phase_context(db, league).get(flag, False))
 
 
+def _condition_terms_from_form(
+    db, *, metrics, manager_names, player_refs, comparisons, thresholds,
+    season_years, notes, resolve_player,
+) -> list[dict]:
+    """Zip a condition sub-form's parallel arrays into term dicts.
+
+    The sub-form repeats each field name once per term, so the browser posts seven
+    equal-length lists rather than one object per term — the same repeated-key shape
+    `/trade` already uses for `a_players[]`. A row whose metric is blank is a term the
+    user added and left empty; it is dropped rather than validated, so an extra blank
+    repeater row can never fail a submission.
+
+    Every value arrives as a STRING (an empty input posts "", not null). Ints stay None
+    when blank so the pure validator can say which field the chosen metric actually
+    required, rather than this route guessing a default.
+
+    `resolve_player` is passed in because the two call sites identify a player
+    differently — the draft board by FPL element id, the corrections page by label.
+    """
+    def _opt(value, lo, hi, field):
+        return _safe_int(value, lo, hi, field=field) if str(value or "").strip() else None
+
+    def _at(seq, i):
+        return seq[i] if i < len(seq) else ""
+
+    out: list[dict] = []
+    for i, metric in enumerate(metrics or []):
+        metric = (metric or "").strip()
+        if not metric:
+            continue
+        ref = (_at(player_refs, i) or "").strip()
+        out.append(services.condition_term_from_flat(
+            metric=metric,
+            player_id=resolve_player(ref) if ref else None,
+            manager_name=(_at(manager_names, i) or "").strip() or None,
+            season_year=_opt(_at(season_years, i), 2000, 2100, "season"),
+            comparison=(_at(comparisons, i) or "").strip() or None,
+            threshold=_opt(_at(thresholds, i), 0, 10**6, "threshold"),
+            note=(_at(notes, i) or "").strip() or None,
+        ))
+    return out
+
+
 def _locked_response(what="Editing"):
     return PlainTextResponse(f"{what} is locked by the commissioner.", status_code=423)
 
@@ -1347,6 +1390,80 @@ def admin_corrections(
     })
 
 
+@router.post("/admin/corrections/trade/condition")
+def admin_trade_condition(
+    request: Request,
+    db: Session = Depends(get_db),
+    trade_id: str = Form(...),
+    condition_logic: str = Form("all"),
+    condition_effect: str = Form("escalate_round"),
+    pick_round_if_met: str = Form(""),
+    condition_metric: list[str] = Form(default=[]),
+    condition_manager_name: list[str] = Form(default=[]),
+    condition_player_name: list[str] = Form(default=[]),
+    condition_comparison: list[str] = Form(default=[]),
+    condition_threshold: list[str] = Form(default=[]),
+    condition_season_year: list[str] = Form(default=[]),
+    condition_note: list[str] = Form(default=[]),
+):
+    """Set or replace a pick trade's condition. Submitting with no term CLEARS it,
+    which is the only way to make a conditional pick ordinary again.
+
+    Unlike the draft board's form, this one names the condition's player subject by
+    LABEL rather than FPL element id — the corrections page has no board context to
+    resolve an id against, and `resolve_player_by_label` also finds a departed player,
+    whose `fpl_id` is NULL.
+    """
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        terms = _condition_terms_from_form(
+            db, metrics=condition_metric, manager_names=condition_manager_name,
+            player_refs=condition_player_name, comparisons=condition_comparison,
+            thresholds=condition_threshold, season_years=condition_season_year,
+            notes=condition_note,
+            resolve_player=lambda ref: services.resolve_player_by_label(db, league, ref).id,
+        )
+        services.edit_trade(
+            db, league, trade_id,
+            set_condition=True,
+            condition_logic=condition_logic or None,
+            condition_effect=condition_effect or None,
+            pick_round_if_met=_safe_int(
+                pick_round_if_met, 1, ROSTER_SIZE, field="upgrade round"
+            ) if str(pick_round_if_met).strip() else None,
+            condition_terms=terms,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/trade/term-state")
+def admin_condition_term_state(
+    request: Request,
+    db: Session = Depends(get_db),
+    term_id: str = Form(...),
+    manual_state: str = Form(""),
+):
+    """Rule on a `manual` condition term — the escape valve's other half.
+
+    A manual term is the commissioner's own words, so only they can say whether it
+    came true. Blank returns it to undecided, which resolves as pending rather than
+    not_met, per the module-wide rule that an unanswered condition leaves the base
+    round in force.
+    """
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.set_condition_term_state(db, league, term_id, manual_state or None)
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
 @router.post("/admin/corrections/trade/edit")
 def admin_trade_edit(
     request: Request, db: Session = Depends(get_db), trade_id: str = Form(...),
@@ -1951,10 +2068,28 @@ def draft_pick(
 @router.post("/draft/{year}/trade-pick", response_class=HTMLResponse)
 def draft_trade_pick(
     year: int, request: Request, pick: str = Form(...), to_fpl: str = Form(...),
-    draft_type: str = Form("main"), db: Session = Depends(get_db),
+    draft_type: str = Form("main"),
+    condition_logic: str = Form("all"),
+    condition_effect: str = Form("escalate_round"),
+    pick_round_if_met: str = Form(""),
+    conditions: str = Form(""),
+    condition_metric: list[str] = Form(default=[]),
+    condition_manager_name: list[str] = Form(default=[]),
+    condition_player_fpl_id: list[str] = Form(default=[]),
+    condition_comparison: list[str] = Form(default=[]),
+    condition_threshold: list[str] = Form(default=[]),
+    condition_season_year: list[str] = Form(default=[]),
+    condition_note: list[str] = Form(default=[]),
+    db: Session = Depends(get_db),
 ):
     """`pick` is the combined "<original_fpl>:<round>" slot id; the current holder
-    (from) is derived from live pick ownership so the form only needs pick + to."""
+    (from) is derived from live pick ownership so the form only needs pick + to.
+
+    The condition fields are all optional and commissioner-only. They arrive as
+    parallel STRING arrays, one entry per term, and are passed through only when at
+    least one term named a metric — omission has to behave exactly as it did before
+    this feature existed.
+    """
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "draft_available"):
         return _locked_response("The draft")
@@ -1973,10 +2108,37 @@ def draft_trade_pick(
     from_fpl = cur["owner_fpl"] if cur else original_fpl
     if not can_act_as(request, from_fpl, to_fpl):
         return _forbidden(request, "You must be one of the two managers in the pick trade.")
+    cond: dict = {}
+    if any((m or "").strip() for m in condition_metric):
+        # Commissioner-only: a condition binds a future season's result to a pick, and
+        # the two managers in the trade are not the only people it affects.
+        if not is_admin(request):
+            return _forbidden(request, "Only the commissioner can make a pick conditional.")
+        try:
+            terms = _condition_terms_from_form(
+                db, metrics=condition_metric, manager_names=condition_manager_name,
+                player_refs=condition_player_fpl_id, comparisons=condition_comparison,
+                thresholds=condition_threshold, season_years=condition_season_year,
+                notes=condition_note,
+                resolve_player=lambda ref: services._resolve_player(
+                    db, _safe_int(ref, 1, 10**9, field="condition player")
+                ).id,
+            )
+            cond = {
+                "condition_logic": condition_logic or None,
+                "condition_effect": condition_effect or None,
+                "pick_round_if_met": _safe_int(
+                    pick_round_if_met, 1, ROSTER_SIZE, field="upgrade round"
+                ) if str(pick_round_if_met).strip() else None,
+                "condition_terms": terms,
+                "conditions": conditions or None,
+            }
+        except RuleViolation as e:
+            return _err(e)
     try:
         services.trade_pick(
             db, league, from_fpl=from_fpl, to_fpl=to_fpl, original_fpl=original_fpl,
-            round=round, season_year=year, draft_type=draft_type,
+            round=round, season_year=year, draft_type=draft_type, **cond,
         )
     except RuleViolation as e:
         return _err(e)

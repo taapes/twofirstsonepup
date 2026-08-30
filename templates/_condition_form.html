@@ -1,0 +1,131 @@
+{# Condition entry, shared by the draft board's "trade a pick" form and the
+   corrections page's editor.
+
+   Both used to hard-code the metric list, the comparison list and the round bound,
+   so adding a metric meant editing four places and the two lists had already drifted
+   apart once. They live here now.
+
+   The sub-form posts PARALLEL ARRAYS: every term row emits one of each field name, so
+   the browser sends seven equal-length lists that ui._condition_terms_from_form zips
+   back into terms. That works only because each row contains exactly one input per
+   name — a hidden input still submits, which is what keeps the arrays aligned when a
+   metric hides a field it doesn't use. #}
+
+{% macro metric_options() %}
+  <option value="">— not conditional —</option>
+  <option value="league_finish">a manager finishes …</option>
+  <option value="total_points">a player scores …</option>
+  <option value="cup_win">a manager wins the Cup</option>
+  <option value="pup_cup_win">a manager wins the Pup Cup</option>
+  {# The escape valve: anything the four metrics above can't express is stored as
+     written and ruled on by hand later. #}
+  <option value="manual">something else (written out, ruled by hand)</option>
+{% endmacro %}
+
+{% macro comparison_options() %}
+  <option value="&lt;=">at or better than (rank) / at or below</option>
+  <option value="&lt;">better than / below</option>
+  <option value="&gt;=">at least</option>
+  <option value="&gt;">more than</option>
+{% endmacro %}
+
+{# `player_field` is the input name the receiving route resolves a player by:
+   "condition_player_fpl_id" on the draft board (element id, via the datalist) or
+   "condition_player_name" on the corrections page (label, which also finds a
+   departed player whose fpl_id is NULL). #}
+{% macro term_row(managers, player_field, player_list="playerList", manager_list="condManagers") %}
+<div class="cond-term">
+  <label>if
+    <select name="condition_metric" onchange="condToggle(this)" style="width:100%">
+      {{ metric_options() }}
+    </select></label>
+  <label class="cond-manager">manager (person name)
+    <input name="condition_manager_name" list="{{ manager_list }}" autocomplete="off"
+           placeholder="e.g. Kevin T" style="width:100%"></label>
+  <label class="cond-player">player
+    {% if player_field == "condition_player_fpl_id" %}
+      <input list="{{ player_list }}" name="condition_player_label" autocomplete="off"
+             placeholder="search by name" style="width:100%">
+      <input type="hidden" name="condition_player_fpl_id">
+    {% else %}
+      <input list="{{ player_list }}" name="condition_player_name" autocomplete="off"
+             placeholder="search by name" style="width:100%">
+    {% endif %}
+  </label>
+  <div class="cond-threshold">
+    <label>comparison
+      <select name="condition_comparison" style="width:100%">{{ comparison_options() }}</select></label>
+    <label>threshold
+      <input type="number" name="condition_threshold" min="0" style="width:100%"></label>
+  </div>
+  <label class="cond-season">in season (starting year)
+    <input type="number" name="condition_season_year" min="2020" max="2100"
+           style="width:100%"></label>
+  <label class="cond-note">the clause, as written
+    <input name="condition_note" autocomplete="off" style="width:100%"
+           placeholder="e.g. Cunha picks up fewer than 3 red cards"></label>
+</div>
+{% endmacro %}
+
+{# The clause: how the terms combine, and what being met does. #}
+{% macro clause_fields(roster_size=15) %}
+<label>terms combine as
+  <select name="condition_logic" style="width:100%">
+    <option value="all">ALL of them (and)</option>
+    <option value="any">ANY of them (or)</option>
+  </select></label>
+<label>when met, the pick
+  <select name="condition_effect" onchange="condEffect(this.form)" style="width:100%">
+    <option value="escalate_round">moves either way, but upgrades its round</option>
+    <option value="transfer_if_met">only transfers at all</option>
+  </select></label>
+<label class="cond-round">upgrades to round
+  <input type="number" name="pick_round_if_met" min="1" max="{{ roster_size }}"
+         style="width:100%"></label>
+{% endmacro %}
+
+{# Add/remove term rows, and per-metric field visibility. Vanilla, like the rest of
+   draft.html's helpers. The metric -> visible-fields mapping duplicates
+   rules.CONDITION_PLAYER_METRICS / CONDITION_THRESHOLD_METRICS, which is why the
+   server validates it again rather than trusting the form. #}
+{% macro condition_js() %}
+<script>
+function condToggle(sel) {
+  var row = sel.closest('.cond-term'), m = sel.value;
+  var show = function (cls, on) {
+    var el = row.querySelector(cls);
+    if (el) el.style.display = on ? '' : 'none';
+  };
+  show('.cond-player', m === 'total_points');
+  show('.cond-manager', m && m !== 'total_points' && m !== 'manual');
+  show('.cond-threshold', m === 'total_points' || m === 'league_finish');
+  show('.cond-season', !!m && m !== 'manual');
+  show('.cond-note', m === 'manual');
+}
+function condEffect(form) {
+  // transfer_if_met has no upgrade round; the server REFUSES one rather than
+  // ignoring it, so hiding the field here keeps the form from failing validation.
+  var sel = form.querySelector('[name=condition_effect]');
+  var round = form.querySelector('.cond-round');
+  if (!sel || !round) return;
+  var transfer = sel.value === 'transfer_if_met';
+  round.style.display = transfer ? 'none' : '';
+  var input = round.querySelector('input');
+  if (input && transfer) input.value = '';
+}
+function condAddTerm(btn) {
+  var wrap = btn.closest('.cond-wrap'), rows = wrap.querySelectorAll('.cond-term');
+  var copy = rows[rows.length - 1].cloneNode(true);
+  copy.querySelectorAll('input').forEach(function (i) { i.value = ''; });
+  copy.querySelectorAll('select').forEach(function (s) { s.selectedIndex = 0; });
+  rows[rows.length - 1].parentNode.insertBefore(copy, btn);
+  condToggle(copy.querySelector('[name=condition_metric]'));
+}
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('[name=condition_metric]').forEach(condToggle);
+  document.querySelectorAll('form').forEach(function (f) {
+    if (f.querySelector('[name=condition_effect]')) condEffect(f);
+  });
+});
+</script>
+{% endmacro %}
