@@ -8584,7 +8584,7 @@ def record_trade(
 # ---- data-quality health checks (commissioner ops) ----
 def data_health(db: Session, league: League) -> list[dict]:
     """Run lightweight data-integrity checks; returns [{check, ok, detail}]."""
-    from models import Gameweek, GameweekPoints, KeeperSeed
+    from models import Gameweek, GameweekPoints, KeeperSeed, Roster
 
     checks = []
 
@@ -8698,6 +8698,30 @@ def data_health(db: Session, league: League) -> list[dict]:
         .count()
     )
     add("gameweek points populated", gwp > 0, f"{gwp} rows")
+
+    # "Some rows exist" is not the question. `sync_rosters`/`sync_gameweek_points`
+    # resolved the gameweek through FPL's /pl/event-status, which has no `status` key,
+    # so both silently pinned to gameweek 1 — and this check passed the whole time on
+    # GW1's rows while /scoreboard, /transactions and the keeper derivation all asked
+    # for GW2 and found nothing. Assert the CURRENT gameweek specifically, the same
+    # number every reader uses, or the check confirms only that sync once worked.
+    cur_gw = current_gameweek(db, league)
+    if cur_gw:
+        gw_row = (
+            db.query(Gameweek).filter_by(league_id=league.id, number=cur_gw).one_or_none()
+        )
+        for label, model in (("rosters", Roster), ("gameweek points", GameweekPoints)):
+            n = (
+                db.query(model).filter_by(gameweek_id=gw_row.id).count()
+                if gw_row else 0
+            )
+            add(
+                f"{label} synced for the current gameweek",
+                n > 0,
+                f"GW{cur_gw}: {n} rows"
+                + ("" if n else " — sync is writing a different gameweek than the "
+                              "site reads"),
+            )
 
     gw = latest_gameweek(db, league)
     bad_rosters = []

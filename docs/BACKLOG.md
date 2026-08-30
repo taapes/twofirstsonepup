@@ -2155,6 +2155,56 @@ all and raised `MultipleResultsFound` (a 500). It now resolves the row directly,
 
 ---
 
+### Sync was pinned to gameweek 1 (live production bug)
+
+**Priority:** `P0` — live, affecting every gameweek-scoped page.
+**Status:** `done` — 2026-08-30, found and fixed the same day.
+
+**Reported as:** "I thought we built more into 'score' to show how many players a
+manager had left. I don't see that now." The feature was built and correct; it was
+rendering nothing because the data it reads was never written.
+
+**Root cause.** `sync.get_current_gw` filtered FPL's `/pl/event-status` entries on
+`s.get("status") in ("L", "F")`. **That payload has no `status` key** — each entry is
+`{bonus_added, date, event, leagues_updated, points}` — so the filter matched nothing
+and the function returned its `default=1` on every call, most likely since it was
+written. `sync_rosters` and `sync_gameweek_points` both defaulted to it.
+
+It was invisible for exactly as long as the correct answer was 1. The moment GW2 began,
+both tasks kept writing GW1 while `services.current_gameweek` (derived from our own
+stored dates) correctly said GW2. Production held 150 roster rows and 10
+gameweek_points rows, **all GW1**, a week into GW2.
+
+**Blast radius** — everything gameweek-scoped: the scoreboard's "left to play" (the
+reported symptom), `get_transactions` (needs consecutive roster snapshots to diff, so
+with one gameweek there are no adds/drops at all), anti-tanking (needs minutes across
+gameweeks), and the keeper drop derivation (roster continuity across snapshots). My Team
+looked fine while silently being a week stale.
+
+**Why nothing caught it.** Both sub-tasks logged `ok=True` — they had synced a gameweek
+successfully, just the wrong one. And `data_health`'s "gameweek points populated"
+asserted `count > 0` across ALL gameweeks, so GW1's ten rows kept it green. That is the
+"asserts the guard behaved rather than the input exists" shape this repo keeps writing
+down, for the third time in a week.
+
+**Fixed in three places, deliberately:**
+1. `get_current_gw` reads what the payload actually contains — the highest `event` it
+   names — keeping the L/F branch ahead of it in case FPL restores the field.
+2. Both callers now prefer `services.current_gameweek`, so **sync and its readers cannot
+   disagree**. That kills the class, not just this instance; fix (1) alone would have
+   left the next divergence just as silent.
+3. Two `data_health` checks assert the CURRENT gameweek has rosters and points.
+
+**Pinned** by `tests/test_current_gameweek_sync.py`, using the real payload captured
+live during GW2. Both fixes verified to bite.
+
+**Still to do by hand:** production has no GW2 rosters or points, and sync only ever
+writes the current gameweek. Backfill with
+`sync_rosters(gw_number=2)` / `sync_gameweek_points(gw_number=2)` — both already take an
+explicit gameweek for exactly this.
+
+---
+
 ### Silent-inert sweep #2
 
 **Priority:** `P2` — the standing audit.

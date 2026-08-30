@@ -171,14 +171,33 @@ def _get_or_create_gameweek(session: Session, league_id, number: int) -> Gamewee
 
 # ---------- current GW ----------
 async def get_current_gw() -> int:
+    """FPL's view of the current gameweek, from `/pl/event-status`.
+
+    **`status` is not in that payload.** As of 2026-08-30 each entry carries
+    `{bonus_added, date, event, leagues_updated, points}` and no `status` key at all,
+    so the original `s.get("status") in ("L", "F")` filter matched nothing and this
+    returned its `default=1` — forever. It looked correct for exactly as long as the
+    real answer was 1, which is why it survived a whole preseason and GW1 unnoticed
+    while pinning `sync_rosters` and `sync_gameweek_points` to gameweek 1.
+
+    So the highest `event` named in the payload is the signal: FPL only lists days
+    belonging to the gameweek it currently considers in play. The L/F branch is kept
+    ahead of it in case those values return, since an explicit marker beats an
+    inference — but it can no longer be the only source of an answer.
+
+    Callers should prefer `services.current_gameweek`, which derives the same number
+    from our own stored dates; this exists as the fallback for a league whose calendar
+    hasn't synced yet.
+    """
     async with httpx.AsyncClient() as client:
         st = await _get_json(client, f"{API_BASE}/pl/event-status")
-    statuses = st.get("status", [])
-    # Last gameweek that is live ("L") or finished ("F"); default to 1 preseason.
-    return max(
-        (s.get("event", 0) for s in statuses if s.get("status") in ("L", "F")),
-        default=1,
-    )
+    statuses = st.get("status", []) or []
+    flagged = [s.get("event") for s in statuses if s.get("status") in ("L", "F")]
+    if any(e for e in flagged):
+        return max(e for e in flagged if e)
+    events = [s.get("event") for s in statuses if s.get("event")]
+    # Default 1 only when the payload names no gameweek at all (true preseason).
+    return max(events) if events else 1
 
 
 # ---------- players ----------
@@ -683,7 +702,13 @@ async def sync_rosters(gw_number: int | None = None, fpl_league_id: str | None =
             return
 
         if gw_number is None:
-            gw_number = await get_current_gw()
+            # The app's canonical answer, derived from stored gameweek dates — the
+            # same one /scoreboard, /my-team and the transactions diff all read. Sync
+            # must not resolve this differently from its readers: when it did, it
+            # wrote gameweek 1 forever while every page asked for gameweek 2 and found
+            # nothing. `get_current_gw` remains the fallback for a league whose
+            # calendar hasn't been synced yet.
+            gw_number = services.current_gameweek(session, league) or await get_current_gw()
         gameweek = _get_or_create_gameweek(session, league.id, gw_number)
         managers = session.query(Manager).filter_by(league_id=league.id).all()
 
@@ -740,7 +765,13 @@ async def sync_gameweek_points(gw_number: int | None = None, fpl_league_id: str 
             return
 
         if gw_number is None:
-            gw_number = await get_current_gw()
+            # The app's canonical answer, derived from stored gameweek dates — the
+            # same one /scoreboard, /my-team and the transactions diff all read. Sync
+            # must not resolve this differently from its readers: when it did, it
+            # wrote gameweek 1 forever while every page asked for gameweek 2 and found
+            # nothing. `get_current_gw` remains the fallback for a league whose
+            # calendar hasn't been synced yet.
+            gw_number = services.current_gameweek(session, league) or await get_current_gw()
         gameweek = _get_or_create_gameweek(session, league.id, gw_number)
         managers = session.query(Manager).filter_by(league_id=league.id).all()
 

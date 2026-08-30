@@ -52,7 +52,7 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   naming the host it refused. **A plain `pytest` is now safe** — the old convention of
   hand-typing three `--ignore` flags is obsolete, and shouldn't be revived: it failed on
   2026-08-24 because zsh doesn't word-split an unquoted `$IG`, and they hit prod twice.
-  A full run is `1003 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
+  A full run is `1009 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
@@ -670,6 +670,22 @@ Points-per-million is derived on read, never stored. Read path:
 column LETTER because Excel omits empty cells, and lowercases before transliterating
 because NFKD has no decomposition for ø/ı. **Owner-only** — deliberately absent from the
 draft board search all managers see, with a test enforcing it.
+
+**Which GAMEWEEK gets synced must match what the site reads.** `sync_rosters` and
+`sync_gameweek_points` now resolve it through `services.current_gameweek` (derived from
+stored GW dates — the same number `/scoreboard`, `/transactions`, the keeper derivation
+and anti-tanking all use), falling back to `sync.get_current_gw` only for a league whose
+calendar hasn't synced yet. **They must never resolve it differently from their
+readers.** `get_current_gw` filtered FPL's `/pl/event-status` on
+`s.get("status") in ("L","F")`, and **that payload has no `status` key** — entries are
+`{bonus_added, date, event, leagues_updated, points}` — so it returned its `default=1`
+forever. It looked right for exactly as long as the real answer was 1, then GW2 began
+and both tasks kept writing GW1 while every page asked for GW2 and found nothing, both
+logging `ok=True` because they had synced *a* gameweek successfully. Found 2026-08-30
+from "the scoreboard doesn't show players left to play". `get_current_gw` now falls back
+to the highest `event` the payload names. Two `data_health` checks assert **the current
+GW specifically** has rosters and points — the old "gameweek points populated" asserted
+`count > 0` across all GWs and stayed green on GW1's rows throughout.
 
 **Sync cadence** is fixture-aligned + code-gated: `/admin/sync` runs
 `services.sync_plan` (pure `rules.decide_sync`) → `full | live | skip` from
