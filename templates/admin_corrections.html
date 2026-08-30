@@ -97,6 +97,98 @@
   </datalist>
 </div>
 
+<h2>From Discord
+  <span class="sub">({{ discord_queue|length }} awaiting review)</span></h2>
+{# Nothing here has been applied. A proposal is deliberately PARTIAL — an IL post
+   never names the replacement player place_on_il requires — so this form is where a
+   human finishes it. One click, not a blank form. #}
+<div class="card" style="padding:10px;overflow-x:auto">
+{% if discord_queue %}
+  <table class="stats">
+    <thead><tr>
+      <th>Posted</th><th>As written</th><th>Read as</th><th>Needs</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for d in discord_queue %}
+      <tr>
+        <td class="sub" style="white-space:nowrap">
+          {{ d.posted_at.strftime("%-m/%-d") if d.posted_at else "—" }}<br>
+          {{ d.author or "—" }}
+        </td>
+        <td class="sub" style="max-width:22em"><em>{{ d.content }}</em></td>
+        <td>
+          {% if d.kind == "il_place" %}
+            <strong>Injury list</strong><br>
+            <span class="sub">
+              {{ d.resolution.manager.display or "—" }} ·
+              {{ d.resolution.player.name or d.resolution.player.typed }}
+              {% if d.resolution.player.method %}
+                <span class="tag">{{ d.resolution.player.method }}</span>
+              {% endif %}
+              · from GW{{ d.payload.start_gw }}
+            </span>
+          {% else %}
+            <strong>Trade</strong><br>
+            <span class="sub">
+              {{ d.resolution.a.display or d.resolution.a.typed }}
+              {% if d.resolution.a.method %}<span class="tag">{{ d.resolution.a.method }}</span>{% endif %}
+              ⇄
+              {{ d.resolution.b.display or d.resolution.b.typed }}
+              {% if d.resolution.b.method %}<span class="tag">{{ d.resolution.b.method }}</span>{% endif %}
+              <br>
+              {{ d.payload.a_players|length }} + {{ d.payload.a_picks|length }} for
+              {{ d.payload.b_players|length }} + {{ d.payload.b_picks|length }}
+            </span>
+          {% endif %}
+          {% if d.error %}<br><span class="sub" style="color:#c33">{{ d.error }}</span>{% endif %}
+        </td>
+        <td class="sub">
+          {# The questions the parser refused to guess at. Each one, guessed wrong,
+             reassigns a different manager's slot. #}
+          {% for u in d.resolution.unresolved or [] %}
+            <div>⚠ <code>{{ u.text }}</code> — {{ u.why }}</div>
+          {% endfor %}
+          {% if d.kind == "trade" %}
+            {# Nothing in any sampled message says whose pick a traded pick originally
+               was, so the giver is assumed — and the assumption is shown, not hidden. #}
+            {% for side in ["a", "b"] %}
+              {% for p in (d.resolution.picks or {}).get(side) or [] %}
+                <div class="sub">assumes {{ p.assumed_owner }}'s own pick:
+                  <code>{{ p.text }}</code></div>
+              {% endfor %}
+            {% endfor %}
+          {% endif %}
+          {% if not d.resolution.unresolved %}—{% endif %}
+        </td>
+        <td style="white-space:nowrap">
+          <form method="post" action="/admin/corrections/discord/apply"
+                style="display:inline">
+            <input type="hidden" name="ingest_id" value="{{ d.id }}">
+            {% if d.kind == "il_place" %}
+            {# The field the announcement never contains. Pre-filled with whoever this
+               manager actually added that gameweek, derived from roster snapshots. #}
+            <select name="replacement_fpl_id" style="max-width:14em">
+              <option value="">— replacement? —</option>
+              {% for r in d.resolution.replacement_suggestions or [] %}
+                <option value="{{ r.fpl_id }}">{{ r.name }} ({{ r.position }})</option>
+              {% endfor %}
+            </select>
+            {% endif %}
+            <button class="mini" type="submit">Apply</button>
+          </form>
+          <form method="post" action="/admin/corrections/discord/reject"
+                style="display:inline">
+            <input type="hidden" name="ingest_id" value="{{ d.id }}">
+            <button class="mini" type="submit">Dismiss</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}<p class="empty">Nothing waiting from Discord.</p>{% endif %}
+</div>
+
 <h2>Unmatched discovery picks
   <span class="sub">({{ unlinked_discovery|length }})</span></h2>
 <div class="card" style="padding:10px;overflow-x:auto">

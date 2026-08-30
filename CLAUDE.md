@@ -52,7 +52,7 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   naming the host it refused. **A plain `pytest` is now safe** — the old convention of
   hand-typing three `--ignore` flags is obsolete, and shouldn't be revived: it failed on
   2026-08-24 because zsh doesn't word-split an unquoted `$IG`, and they hit prod twice.
-  A full run is `933 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
+  A full run is `999 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
@@ -717,6 +717,50 @@ lose the tail silently. A `sync_locked` league is skipped (guard lives in
 `run_outbound`, not the call site, so it's testable). Both announcers take an injectable
 `send`; that seam is where a bot token replaces the webhook when the inbound half needs
 threaded replies.
+
+**Inbound Discord (`discord_bridge.py` + `discord_parse.py`).** Reads `#trades` and the
+IL channel and stages what it finds for review. **NOTHING is ever applied
+automatically** — every parsed announcement becomes a `DiscordIngest` row the
+commissioner confirms on `/admin/corrections`, the same rule as
+`discovery_match_suggestions` and for the same reason (a wrong player match moves a
+keeper clock and nothing downstream would flag it).
+**That is permanent, not a cautious v1**, and the real messages are why: an IL post
+("`ekitike IL 1-4`") names **no replacement player**, and `place_on_il` requires one, so
+the write is structurally incomplete however confident the parse. A trade post is often
+written by someone who isn't a party to it, never says whose pick a traded pick
+originally was, and uses two pick notations. So the goal is not to remove the human —
+it is to make confirming an announcement **one click instead of a form**.
+`services.suggest_il_replacement` supplies the missing field by diffing roster snapshots
+(who did this manager ADD that GW), pre-selected in the queue; a suggestion only, for
+the same reason `docs/DESIGN_IL_OWNERSHIP.md` refuses to derive the season-end release.
+**`managers.discord_user_id` is the single highest-value piece of setup** — with it the
+AUTHOR of an IL post is a known manager at certainty 1.0 and no name matching happens at
+all, and it is the only way to resolve a handle like "Sir Hefty Boy". UNIQUE is
+**(league_id, discord_user_id)**, never global (one row per manager PER SEASON), and
+`advance_season` carries it forward beside `display_name`/`password_hash` or the map
+silently empties at the next rollover.
+`discord_parse.py` is **PURE and deterministic — no LLM.** The fuzzy half is deciding
+which human "Cunha" is, and `_score_match` already does that; once split, finding the
+fields is a regex. `🚨 TRADE ALERT` is on every trade post and nothing else, so
+classification is exact. Manager resolution is `discord_id` → exact `display` →
+**unambiguous initials** ("KT" = "Kevin T"; the league has two K-managers, so that check
+is load-bearing) with **no fuzzy tier** — ten candidates means asking is cheap and
+guessing is not. **`Pick N` is the overall position and a bare ordinal is the round**
+(confirmed, not assumed); `2026 4th 1st` and `6-9 Discoveries` are staged **unresolved**
+rather than guessed, because either reading reassigns a different manager's slot. The
+assumed pick owner (the giver) is shown as an assumption.
+Raw messages are stored BEFORE parsing (`discord_messages`), so a parser bug is fixed by
+re-running over rows rather than re-fetching, and an uninterpretable message is still
+*visible*. The poll cursor is `MAX(discord_message_id)` ordered **numerically** — they
+are strings (snowflakes exceed 2^53), so a lexical max puts "9" above "10" and the
+cursor walks backwards. Rejected proposals are KEPT and never revived.
+**Two Discord misconfigurations fail SILENTLY** and both look exactly like a quiet
+channel: the `MESSAGE_CONTENT` intent gates **REST as well as the gateway** (blank
+`content`, HTTP 200), and a missing `READ_MESSAGE_HISTORY` returns an **empty array, not
+a 403** — on a private channel that needs an explicit permission overwrite, since
+guild-level roles don't reach it. `discord_bridge.probe_channel` distinguishes them and
+`data_health` surfaces both. Never retry a 401: 401/403/429 count toward a Cloudflare ban
+at 10,000 per 10 minutes, so a bad token disables the sweep.
 
 **Ineligible players:** a non-DEF added to FPL after the draft (i.e. not in the
 season's `player_pool_snapshot`, captured at rollover) is flagged in

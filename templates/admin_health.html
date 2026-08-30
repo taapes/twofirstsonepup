@@ -121,6 +121,40 @@
   </table>
 </div>
 
+<h2>Discord accounts</h2>
+<div class="card" style="padding:12px;max-width:640px">
+  <p class="sub">Mapping a manager's Discord account is the single highest-value bit of
+    setup for the inbound bridge: with it, the <em>author</em> of "Saliba IL 1-4" is a
+    known manager with certainty and no name matching happens at all. It is also the
+    only way to resolve a poster whose handle looks nothing like their name.
+    Right-click a user in Discord → Copy User ID (needs Developer Mode on).
+    Leave blank to unmap.</p>
+  <table>
+    <tbody>
+      {% for m in managers %}
+      <tr>
+        <td>{{ m.name }}</td>
+        <td>
+          <form method="post" action="/admin/discord/map" style="display:flex;gap:6px">
+            <input type="hidden" name="fpl_manager_id" value="{{ m.fpl }}">
+            <input name="discord_user_id" value="{{ m.discord_user_id or '' }}"
+                   placeholder="Discord user id" autocomplete="off" style="width:16em">
+            <button class="mini" type="submit">Save</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if unmapped_discord %}
+  <p class="sub" style="margin-top:8px">Seen posting but unmapped:
+    {% for u in unmapped_discord %}
+      <code>{{ u.discord_user_id }}</code> ({{ u.name or "?" }}, {{ u.messages }} msg){% if not loop.last %}, {% endif %}
+    {% endfor %}
+  </p>
+  {% endif %}
+</div>
+
 <h2>Checks</h2>
 <div class="card">
   <table>

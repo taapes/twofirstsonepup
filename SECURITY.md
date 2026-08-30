@@ -21,7 +21,22 @@ Small private league app (≈10 users) on Render + Neon, session-cookie auth.
   channel. Point it somewhere only the commissioner can read: it carries flagged
   actions and failed health checks, i.e. named managers and their infractions.
 
-Both Discord features are OFF when their variable is unset — no config UI, no database
+- `DISCORD_BOT_TOKEN` — optional, for INBOUND (reading announcements). A bearer secret
+  with no scoping beyond the permissions granted at invite: anyone holding it can act
+  as the bot in every guild it has joined. Rotate by regenerating in the Developer
+  Portal, which invalidates the old one immediately. Discord also scans public repos
+  for leaked tokens and auto-invalidates. Note it is NOT tied to your user account —
+  the bot stays if you leave the server.
+- `DISCORD_TRADE_CHANNEL_ID` / `DISCORD_IL_CHANNEL_ID` — optional. Not secret, but kept
+  in env alongside the token so the whole feature is configured in one place.
+
+Reading requires the **MESSAGE CONTENT** privileged intent (it gates the REST API, not
+just the gateway) plus `VIEW_CHANNEL` + `READ_MESSAGE_HISTORY` on each channel — and on
+a private channel that means an explicit permission overwrite, since guild-level roles
+do not reach it. Both misconfigurations fail SILENTLY (blank content, or an empty array
+instead of a 403), so `/admin/health` probes for them.
+
+All Discord features are OFF when their variable is unset — no config UI, no database
 flag — so a fresh checkout, the test suite and the demo sandbox are silent by default.
 Neither needs a bot, a Developer Portal app, a privileged intent or Manage Server.
 

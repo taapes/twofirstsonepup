@@ -102,6 +102,11 @@ class League(Base):
 
 class Manager(Base):
     __tablename__ = "managers"
+    __table_args__ = (
+        UniqueConstraint(
+            "league_id", "discord_user_id", name="uq_manager_discord_user"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     league_id: Mapped[uuid.UUID] = mapped_column(
@@ -122,6 +127,19 @@ class Manager(Base):
     # Per-manager UI login password (league-custom). NULL = not set yet -> the
     # manager sets one on first login; an admin reset clears it back to NULL.
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Discord snowflake, mapped once by the commissioner. League-custom identity, in
+    # the same family as display_name and password_hash — and carried across the
+    # rollover by advance_season for exactly the same reason.
+    #
+    # This is what makes the inbound bridge safe: the AUTHOR of "Saliba IL 1-4" is then
+    # a known manager at certainty 1.0, with no name matching involved. It is also the
+    # only way to resolve a poster whose Discord handle is nothing like their name
+    # ("Sir Hefty Boy").
+    #
+    # UNIQUE is (league_id, discord_user_id), NOT global: `managers` holds one row per
+    # manager PER SEASON, so one human legitimately owns a row in every season and a
+    # global unique index would break the first rollover after this shipped.
+    discord_user_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
 
     @property
     def display(self) -> str:
@@ -482,6 +500,114 @@ class TradeConditionTerm(Base):
     manual_state: Mapped[str | None] = mapped_column(
         String, nullable=True
     )  # NULL | 'met' | 'not_met'
+    created_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class DiscordMessage(Base):
+    """A raw message pulled from a Discord channel. Stored BEFORE anything parses it.
+
+    That ordering is the whole design. A parser bug is then fixed by re-running over
+    stored rows rather than re-asking Discord, and the league's message history only
+    has to be fetched once. It also means the fetch and the interpretation fail
+    independently: a message we cannot understand is still *visible*, which is strictly
+    better than the status quo where an announcement nobody re-types is simply lost.
+
+    `discord_message_id` is UNIQUE and doubles as the poll cursor (Discord snowflakes
+    are monotonic, so "newest seen" is just the max). Stored as a String, not an int:
+    a snowflake exceeds 2^53 and JSON/JS handling of it is lossy, which is why Discord
+    itself sends them as strings.
+    """
+
+    __tablename__ = "discord_messages"
+    __table_args__ = (
+        UniqueConstraint("discord_message_id", name="uq_discord_message_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    channel_id: Mapped[str] = mapped_column(String, index=True)
+    discord_message_id: Mapped[str] = mapped_column(String, index=True)
+    author_discord_id: Mapped[str | None] = mapped_column(String, index=True)
+    # The handle as displayed, kept so the commissioner can map an unknown author to a
+    # manager without going back to Discord to see who it was.
+    author_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    posted_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    fetched_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    parse_status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="unparsed"
+    )  # 'unparsed' | 'ignored' | 'staged' | 'failed'
+
+
+class DiscordIngest(Base):
+    """A PROPOSED league action parsed out of a Discord message.
+
+    A proposal is not an action and must never become one on its own — the same rule,
+    and for the same reason, as DiscoveryMatchSuggestion: a wrong player match here
+    moves a keeper clock and nothing downstream would flag it.
+
+    Real sampled messages settle that this stays true permanently rather than as a
+    cautious v1 setting. An IL post ("ekitike IL 1-4") names NO replacement player, and
+    `place_on_il` requires one, so the write is structurally incomplete no matter how
+    confident the parse. A trade post is often written by someone who isn't a party to
+    it, never says whose pick a traded pick originally was, and uses two different
+    notations for a pick. So `payload` is deliberately PARTIAL, and the job of this
+    table is to make confirming an announcement one click rather than a form.
+
+    `resolution` carries the per-entity match method/score AND the things that could
+    NOT be resolved, so the review UI can ask "2026 Pick 6 — round or overall?" as an
+    explicit question instead of dropping it on the floor.
+
+    UNIQUE (discord_message_id, kind, dedupe_key) makes re-parsing idempotent, and
+    rejected rows are KEPT rather than deleted so a dismissal is never re-proposed —
+    both straight from the discovery-suggestion precedent.
+    """
+
+    __tablename__ = "discord_ingests"
+    __table_args__ = (
+        UniqueConstraint(
+            "discord_message_id", "kind", "dedupe_key", name="uq_discord_ingest"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    discord_message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("discord_messages.id", ondelete="CASCADE"),
+        index=True,
+    )
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    # 'trade' | 'il_place' — the two the sampled messages actually contain. Kept as a
+    # string rather than an enum, matching every other enum-ish column here.
+    kind: Mapped[str] = mapped_column(String, index=True)
+    # Distinguishes several proposals parsed from ONE message (a trade post can carry
+    # three separate clauses). Part of the unique key so re-parsing updates in place.
+    dedupe_key: Mapped[str] = mapped_column(String, server_default="")
+    # The target service function's kwargs, as far as they could be filled in.
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # How each entity was resolved, plus whatever could not be — for the review UI.
+    resolution: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="pending"
+    )  # 'pending' | 'applied' | 'rejected' | 'failed'
+    # The Trade.id / InjuryList.id this produced, which is what makes an undo possible.
+    applied_entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    # A RuleViolation from the confirm attempt. Worth surfacing rather than swallowing:
+    # it means Discord and the league's actual state disagree.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

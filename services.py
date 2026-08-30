@@ -9,6 +9,7 @@ import difflib
 import os
 import re
 import unicodedata
+import uuid
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -722,7 +723,8 @@ def advance_season(
 ) -> dict:
     """Roll the league over to a new season (Preseason). The new league row must
     already be synced (the route runs sync for the new FPL id first). Carries forward:
-      1. identity — display_name + password_hash (fills blanks on the new rows),
+      1. identity — display_name + password_hash + discord_user_id (fills blanks on the
+         new rows),
       2. keeper state — for players kept for the new season, a KeeperSeed on the new
          league with years_remaining decremented by 1 (so the clock ticks),
       3. the draft-day player-pool snapshot for the new league,
@@ -803,6 +805,13 @@ def advance_season(
             nm.display_name = om.display_name
         if om.password_hash and not nm.password_hash:
             nm.password_hash = om.password_hash
+        # Same family as the two above, and the same reason: `managers` holds one row
+        # per manager per season, so an identity the LEAGUE owns has to be carried or
+        # it is lost at every rollover. Without this the Discord author->manager map
+        # silently empties and every inbound proposal quietly loses its one certain
+        # identity, with nothing reporting it — the silent-inert pattern.
+        if om.discord_user_id and not nm.discord_user_id:
+            nm.discord_user_id = om.discord_user_id
         carried += 1
     # The keeper carry below walks the OLD row's selections, so it needs the reverse
     # direction to find each seller's new row.
@@ -6097,6 +6106,182 @@ def _same_person(a: str | None, b: str | None) -> bool:
     return a.strip().lower() == b.strip().lower()
 
 
+# ---- Discord ingest queue ----------------------------------------------------
+# Proposals parsed from Discord. NOTHING here applies itself — see the DiscordIngest
+# docstring for why that is permanent rather than cautious. These functions are the
+# human's side of the loop.
+
+def discord_ingest_queue(db: Session, league: League) -> list[dict]:
+    """Pending Discord proposals, newest first, with everything the reviewer needs."""
+    from models import DiscordIngest, DiscordMessage
+
+    rows = (
+        db.query(DiscordIngest, DiscordMessage)
+        .join(DiscordMessage, DiscordMessage.id == DiscordIngest.discord_message_id)
+        .filter(DiscordIngest.league_id == league.id,
+                DiscordIngest.status == "pending")
+        .order_by(DiscordMessage.posted_at.desc().nullslast(),
+                  DiscordIngest.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": str(ing.id), "kind": ing.kind, "confidence": ing.confidence,
+            "payload": ing.payload or {}, "resolution": ing.resolution or {},
+            "error": ing.error,
+            "posted_at": msg.posted_at, "author": msg.author_name,
+            "content": msg.content,
+        }
+        for ing, msg in rows
+    ]
+
+
+def unmapped_discord_authors(db: Session, league: League) -> list[dict]:
+    """Posters we have seen but cannot identify, with a count of their messages.
+
+    The mapping is what makes the whole inbound half safe (see Manager.discord_user_id),
+    so an unmapped author is a real gap rather than a curiosity: every IL post they
+    write will stage without a manager and need one typed in by hand.
+    """
+    from models import DiscordMessage
+
+    mapped = {
+        m.discord_user_id for m in db.query(Manager).filter_by(league_id=league.id)
+        if m.discord_user_id
+    }
+    counts: dict = {}
+    for did, name in (
+        db.query(DiscordMessage.author_discord_id, DiscordMessage.author_name)
+        .filter(DiscordMessage.league_id == league.id,
+                DiscordMessage.author_discord_id.isnot(None))
+    ):
+        if did in mapped:
+            continue
+        entry = counts.setdefault(did, {"discord_user_id": did, "name": name, "messages": 0})
+        entry["messages"] += 1
+        entry["name"] = entry["name"] or name
+    return sorted(counts.values(), key=lambda e: -e["messages"])
+
+
+def map_discord_author(
+    db: Session, league: League, *, fpl_manager_id: str, discord_user_id: str
+) -> dict:
+    """Bind a Discord account to a manager. Blank `discord_user_id` unmaps."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    value = (discord_user_id or "").strip() or None
+    if value:
+        clash = (
+            db.query(Manager)
+            .filter(Manager.league_id == league.id,
+                    Manager.discord_user_id == value,
+                    Manager.id != manager.id)
+            .first()
+        )
+        if clash:
+            raise RuleViolation(
+                f"that Discord account is already mapped to {clash.display}"
+            )
+    manager.discord_user_id = value
+    record_audit(db, league, action="discord.map",
+                 summary=f"Mapped a Discord account to {manager.display}",
+                 manager_ids=[manager.id],
+                 details={"discord_user_id": value})
+    db.commit()
+    return {"manager": manager.display, "discord_user_id": value}
+
+
+def _ingest_or_404(db: Session, league: League, ingest_id: str):
+    from models import DiscordIngest
+
+    row = (
+        db.query(DiscordIngest)
+        .filter(DiscordIngest.id == ingest_id,
+                DiscordIngest.league_id == league.id)
+        .one_or_none()
+    )
+    if not row:
+        raise RuleViolation("proposal not found")
+    return row
+
+
+def apply_discord_ingest(db: Session, league: League, ingest_id: str, **overrides) -> dict:
+    """Confirm a proposal, applying the reviewer's corrections on top of the parse.
+
+    The real service function runs FIRST and only then is the row marked applied, so a
+    refused write leaves the proposal pending rather than recording a decision that
+    never happened — the ordering `confirm_discovery_suggestion` documents.
+
+    A RuleViolation is CAPTURED on the row rather than swallowed: it means Discord and
+    the league's actual state disagree, which is worth seeing.
+    """
+    row = _ingest_or_404(db, league, ingest_id)
+    if row.status == "applied":
+        raise RuleViolation("that proposal has already been applied")
+    payload = dict(row.payload or {})
+    payload.update({k: v for k, v in overrides.items() if v is not None})
+
+    try:
+        if row.kind == "il_place":
+            missing = [k for k in ("fpl_manager_id", "injured_fpl_id",
+                                   "replacement_fpl_id", "start_gw")
+                       if payload.get(k) in (None, "")]
+            if missing:
+                # The replacement is the expected one — no IL announcement contains it.
+                raise RuleViolation(f"still needs: {', '.join(missing)}")
+            result = place_on_il(
+                db, league,
+                fpl_manager_id=str(payload["fpl_manager_id"]),
+                injured_fpl_id=int(payload["injured_fpl_id"]),
+                replacement_fpl_id=int(payload["replacement_fpl_id"]),
+                start_gw=int(payload["start_gw"]),
+            )
+            # _il_to_dict stringifies the PK; the column is a UUID.
+            entity_id = uuid.UUID(result["id"]) if result.get("id") else None
+        elif row.kind == "trade":
+            missing = [k for k in ("a_fpl", "b_fpl") if not payload.get(k)]
+            if missing:
+                raise RuleViolation(f"still needs: {', '.join(missing)}")
+            result = record_trade(
+                db, league,
+                a_fpl=str(payload["a_fpl"]), b_fpl=str(payload["b_fpl"]),
+                a_players=list(payload.get("a_players") or []),
+                b_players=list(payload.get("b_players") or []),
+                a_picks=list(payload.get("a_picks") or []),
+                b_picks=list(payload.get("b_picks") or []),
+            )
+            entity_id = None
+        else:
+            raise RuleViolation(f"unknown proposal kind {row.kind!r}")
+    except RuleViolation as exc:
+        row.status = "failed"
+        row.error = str(exc)
+        db.commit()
+        raise
+
+    row.status = "applied"
+    row.error = None
+    row.payload = payload
+    if entity_id:
+        row.applied_entity_id = entity_id
+    record_audit(db, league, action="discord.apply",
+                 summary=f"Applied a Discord proposal ({row.kind})",
+                 details={"ingest_id": str(row.id), "kind": row.kind})
+    db.commit()
+    return {"applied": row.kind, "result": result}
+
+
+def reject_discord_ingest(db: Session, league: League, ingest_id: str) -> dict:
+    """Dismiss a proposal. The row is KEPT, never deleted, so re-parsing the same
+    message never proposes it again — the discovery-suggestion rule."""
+    row = _ingest_or_404(db, league, ingest_id)
+    row.status = "rejected"
+    record_audit(db, league, action="discord.reject",
+                 summary=f"Dismissed a Discord proposal ({row.kind})",
+                 details={"ingest_id": str(row.id), "kind": row.kind})
+    db.commit()
+    return {"rejected": str(row.id)}
+
+
 def set_condition_term_state(db: Session, league: League, term_id: str, state) -> dict:
     """Rule on a `manual` condition term. `state` is 'met', 'not_met', or None (undecided).
 
@@ -8252,6 +8437,10 @@ def corrections_data(db: Session, league: League) -> dict:
         # For the pick-condition editor's player subject. Same accent-aliased picker
         # the draft and IL forms use.
         "players": list_players(db, league),
+        # Discord proposals awaiting review. Deliberately on THIS page rather than a
+        # new one: it is already where the commissioner corrects trades and links
+        # discovery picks, and a Discord proposal is the same kind of work.
+        "discord_queue": discord_ingest_queue(db, league),
     }
 
 
@@ -8716,6 +8905,28 @@ def data_health(db: Session, league: League) -> list[dict]:
                      for g in gaps))
         if gaps else "ok",
     )
+
+    # Discord bridge. Both of its silent failure modes look exactly like a quiet
+    # channel — a missing Read Message History permission returns an empty array
+    # rather than a 403, and a disabled MESSAGE CONTENT intent returns blank content
+    # with a 200 — so this asserts the INPUT, the same way the draft-day pool check
+    # does. Skipped entirely when the feature is off: "not configured" is a supported
+    # state, not a failure.
+    import discord_bridge
+
+    if discord_bridge.bot_token():
+        for label, env in (("trades", discord_bridge.TRADE_CHANNEL_ENV),
+                           ("IL", discord_bridge.IL_CHANNEL_ENV)):
+            channel = (os.getenv(env) or "").strip()
+            if not channel:
+                continue
+            probe = discord_bridge.probe_channel(channel)
+            add(f"Discord {label} channel readable", probe["ok"], probe["detail"])
+        unmapped = unmapped_discord_authors(db, league)
+        add("Discord authors all mapped to managers", not unmapped,
+            ("unmapped: " + ", ".join(
+                f"{u['name'] or u['discord_user_id']} ({u['messages']})"
+                for u in unmapped)) if unmapped else "")
 
     return checks
 

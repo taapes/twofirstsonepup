@@ -732,9 +732,14 @@ def admin_health(request: Request, db: Session = Depends(get_db)):
         "discovery_open": league.discovery_open,
         "phases": PHASES,
         "managers": [
-            {"name": m.display, "fpl": m.fpl_manager_id, "has_password": m.password_hash is not None}
+            {"name": m.display, "fpl": m.fpl_manager_id,
+             "has_password": m.password_hash is not None,
+             "discord_user_id": m.discord_user_id}
             for m in managers
         ],
+        # Posters we've seen but can't identify. Each one is a real gap: every IL post
+        # they write stages without a manager and needs one typed in by hand.
+        "unmapped_discord": services.unmapped_discord_authors(db, league),
     })
 
 
@@ -1438,6 +1443,83 @@ def admin_trade_condition(
     except RuleViolation as e:
         return _err(e)
     return _corrections_redirect()
+
+
+@router.post("/admin/corrections/discord/apply")
+def admin_discord_apply(
+    request: Request,
+    db: Session = Depends(get_db),
+    ingest_id: str = Form(...),
+    replacement_fpl_id: str = Form(""),
+    fpl_manager_id: str = Form(""),
+    injured_fpl_id: str = Form(""),
+    start_gw: str = Form(""),
+):
+    """Confirm a Discord proposal, with the reviewer's corrections layered on top.
+
+    The overrides exist because a proposal is deliberately PARTIAL: an IL announcement
+    never names the replacement player `place_on_il` requires, so that field is always
+    supplied here rather than parsed. The others let a mis-resolved manager or player
+    be fixed without going back to Discord.
+    """
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        overrides = {
+            "replacement_fpl_id": _safe_int(
+                replacement_fpl_id, 1, 10**9, field="replacement"
+            ) if replacement_fpl_id.strip() else None,
+            "injured_fpl_id": _safe_int(
+                injured_fpl_id, 1, 10**9, field="injured player"
+            ) if injured_fpl_id.strip() else None,
+            "start_gw": _safe_int(start_gw, 1, SEASON_LAST_GW, field="start gameweek")
+            if start_gw.strip() else None,
+            "fpl_manager_id": fpl_manager_id.strip() or None,
+        }
+        services.apply_discord_ingest(db, league, ingest_id, **overrides)
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/corrections/discord/reject")
+def admin_discord_reject(
+    request: Request, db: Session = Depends(get_db), ingest_id: str = Form(...),
+):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.reject_discord_ingest(db, league, ingest_id)
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
+@router.post("/admin/discord/map")
+def admin_discord_map(
+    request: Request,
+    db: Session = Depends(get_db),
+    fpl_manager_id: str = Form(...),
+    discord_user_id: str = Form(""),
+):
+    """Bind a Discord account to a manager — the single highest-value piece of setup.
+
+    With it, the AUTHOR of an IL post is a known manager at certainty 1.0 and no name
+    matching happens at all. Submitting a blank id unmaps.
+    """
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.map_discord_author(
+            db, league, fpl_manager_id=fpl_manager_id,
+            discord_user_id=discord_user_id,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/health", status_code=303)
 
 
 @router.post("/admin/corrections/trade/term-state")

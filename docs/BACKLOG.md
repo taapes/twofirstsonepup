@@ -2149,6 +2149,74 @@ all and raised `MultipleResultsFound` (a 500). It now resolves the row directly,
 
 ---
 
+### Discord bridge — read announcements back off Discord
+
+**Priority:** `P1` — the original ask; sessions 1 and 2 were prerequisites.
+**Status:** `done` — 2026-08-29 (session 3 of 3).
+
+**The ask.** The league announces trades and IL moves in Discord, then someone re-types
+them here — so the site is always behind, and anything nobody re-types is lost.
+
+**Shipped.** `discord_parse.py` (pure) + the inbound half of `discord_bridge.py`;
+`managers.discord_user_id`, `discord_messages`, `discord_ingests` (migration
+`b5c6d7e8f9a0`); a review queue on `/admin/corrections`; an author-mapping panel and two
+probes on `/admin/health`. 66 tests. Suite 999 passed / 18 skipped (was 933).
+
+**The design decision, and it was made by the data.** Five real messages were sampled
+before any code was written, and two facts in them settle the shape permanently:
+
+1. **An IL post names no replacement player** ("ekitike IL 1-4", "Minteh. (1-4)",
+   "Saliba IL 1-4"). `place_on_il` requires one. So the proposal is incomplete by
+   nature and a human always finishes it — no parser improvement changes that.
+2. **A trade post is often written by someone who is not a party to it**, never says
+   whose pick a traded pick originally was, and uses two pick notations.
+
+So "everything stages as pending" is not a cautious starting setting to grow out of;
+it is the correct steady state. The optimisation worth making is not removing the human
+but making the confirmation ONE CLICK — hence `suggest_il_replacement`, which fills the
+missing field from roster diffs and pre-selects it.
+
+**Deterministic, no LLM, and that is not a compromise.** The fuzzy half of the problem
+is deciding which human "Cunha" is, and `services._score_match` already does that purely
+and testably. Once the two are separated, finding the fields is a regex. An LLM would
+not have rescued the one genuinely hard case either (the KT<->KS trade): that bottleneck
+was the data model, which is what session 1 fixed.
+
+**What the parser REFUSES to decide is the feature.** `2026 4th 1st` and
+`6-9 Discoveries` are real assets from real messages, and both readings of each assign a
+different manager's draft slot. They reach the queue as questions. So does an overall
+pick number, which cannot become a round without that season's draft order.
+
+**Three things found while building:**
+1. **The poll cursor has to sort NUMERICALLY.** Snowflakes are stored as strings (they
+   exceed 2^53), so a lexical max puts "9" above "10" and the cursor walks backwards
+   forever. Pinned by a test.
+2. **Both Discord misconfigurations are silent** — a disabled MESSAGE CONTENT intent
+   returns blank content with a 200, and a missing Read Message History returns an empty
+   array rather than a 403. Both are indistinguishable from a quiet channel, hence
+   `probe_channel` and two `data_health` checks.
+3. **The queue template 500'd on IL proposals** in the first cut: the pick-assumption
+   loops ran for every kind, and an IL proposal has no `picks`. Caught by the rendering
+   test, which is why that test exists.
+
+**Research settled, not assumed** (docs.discord.com, Aug 2026): MESSAGE_CONTENT gates
+REST too; the old "under 100 servers" rule became "under 10,000 users" on 2026-06-10, so
+enabling it is a toggle with no review; `VIEW_CHANNEL` + `READ_MESSAGE_HISTORY` are the
+needed permissions and a private channel needs an explicit overwrite; 401/403/429 count
+toward a Cloudflare ban at 10,000 per 10 minutes, so a bad token must disable rather than
+retry. Scraping / selfbots are forbidden and would be strictly worse than the free API.
+
+**Deliberately not built.** Slash commands (needs an Interactions endpoint, Ed25519 over
+the raw body, a 3s deadline). Reaction-based confirmation (a fetched message carries
+reaction COUNTS only, so it costs a second call per message). Auto-apply — see above.
+
+**Next step is not code.** Point it at the real channels with nothing configured to
+write, let it stage a season of history, and read the queue. That produces an actual
+parse/partial/miss rate, which is the only honest input for deciding whether anything
+further is worth adding.
+
+---
+
 ### Trade conditions v2 — terms, any/all, conditional transfer, manual escape valve
 
 **Priority:** `P1` — blocked the Discord ingest work, so it went first.

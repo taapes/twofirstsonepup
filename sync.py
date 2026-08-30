@@ -1039,5 +1039,9 @@ def run_sync(force: bool = False) -> dict:
     import discord_bridge
 
     with SessionLocal() as db:
-        discord = discord_bridge.run_outbound(db, services.current_league(db))
+        current = services.current_league(db)
+        discord = {
+            "in": discord_bridge.run_inbound(db, current),
+            "out": discord_bridge.run_outbound(db, current),
+        }
     return {"ok": True, "plan": plan, "phase_advanced": advanced, "discord": discord}

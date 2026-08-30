@@ -44,6 +44,14 @@ services:
         sync: false
       - key: DISCORD_ALERT_WEBHOOK_URL
         sync: false
+      # Inbound: reading announcements back off Discord. The bot token is a bearer
+      # secret; the channel ids are not, but live here for one place to configure.
+      - key: DISCORD_BOT_TOKEN
+        sync: false
+      - key: DISCORD_TRADE_CHANNEL_ID
+        sync: false
+      - key: DISCORD_IL_CHANNEL_ID
+        sync: false
 
   # --- Demo sandbox: same code, separate Neon branch DB, passwordless login. ---
   # Point DATABASE_URL at a Neon BRANCH of prod (instant copy); prod is untouched.

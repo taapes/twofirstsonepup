@@ -37,6 +37,8 @@ import logging
 import os
 
 import httpx
+from sqlalchemy import BigInteger
+from sqlalchemy import cast as sa_cast
 
 log = logging.getLogger(__name__)
 
@@ -277,4 +279,520 @@ def run_outbound(db, league) -> dict:
             log.warning("discord %s sweep failed: %s", name, exc)
             db.rollback()
             out[name] = {"error": str(exc)}
+    return out
+
+
+# =============================================================================
+# INBOUND: poll a channel, store raw, parse, resolve, stage for review.
+#
+# NOTHING BELOW EVER WRITES LEAGUE STATE. Every parsed announcement becomes a
+# `DiscordIngest` row with status='pending' that a human confirms — the same rule, and
+# for the same reason, as `discovery_match_suggestions`: a wrong player match moves a
+# keeper clock and nothing downstream would flag it (models.py:679).
+#
+# The five real messages that shaped this settle that the human stays permanently, not
+# just for a cautious v1:
+#   * An IL post ("ekitike IL 1-4") names NO replacement, and `place_on_il` requires
+#     one. The write is structurally incomplete however confident the parse.
+#   * A trade post is often written by someone who is not a party to it, never says
+#     whose pick a traded pick originally was, and uses two pick notations.
+# So the goal is not to remove the human. It is to make confirming an announcement ONE
+# CLICK instead of a form.
+# =============================================================================
+
+BOT_TOKEN_ENV = "DISCORD_BOT_TOKEN"
+TRADE_CHANNEL_ENV = "DISCORD_TRADE_CHANNEL_ID"
+IL_CHANNEL_ENV = "DISCORD_IL_CHANNEL_ID"
+
+API_BASE = "https://discord.com/api/v10"
+# Discord's own cap on this endpoint. Also the loop's "is there more?" signal.
+FETCH_LIMIT = 100
+# A cap on how many pages one sweep will pull, so a first run against years of history
+# can't hold the sync open indefinitely. The cursor persists, so the next sweep resumes.
+MAX_PAGES = 10
+
+
+def bot_token() -> str | None:
+    return (os.getenv(BOT_TOKEN_ENV) or "").strip() or None
+
+
+class DiscordAuthError(RuntimeError):
+    """A 401. Raised rather than returned because the caller must STOP, not retry.
+
+    Discord counts 401/403/429 toward a Cloudflare ban at 10,000 per 10 minutes, so a
+    bad or rotated token must disable the feature for this sweep instead of looping.
+    """
+
+
+def fetch_messages(channel_id: str, after: str | None = None, token: str | None = None):
+    """Newest-first page of messages, oldest page first. Returns [] when unreadable.
+
+    Two Discord behaviours drive the shape of this:
+
+    * **`MESSAGE_CONTENT` gates REST, not just the gateway.** Without the privileged
+      intent enabled, `content` comes back as an empty string and the request still
+      succeeds — so an unconfigured app looks exactly like a quiet channel.
+    * **A missing `READ_MESSAGE_HISTORY` permission returns an empty array, not a 403.**
+      Same silent failure. `probe_channel` below exists to tell the two apart, because
+      neither is distinguishable from "nothing new" at this level.
+
+    The docs do not specify which end `after=` returns when more than `limit` messages
+    are pending, so results are sorted client-side by snowflake and paged until a
+    response comes back short.
+    """
+    token = token or bot_token()
+    if not token or not channel_id:
+        return []
+    headers = {"Authorization": f"Bot {token}"}
+    collected: list[dict] = []
+    cursor = after
+    for _page in range(MAX_PAGES):
+        params = {"limit": FETCH_LIMIT}
+        if cursor:
+            params["after"] = cursor
+        try:
+            r = httpx.get(
+                f"{API_BASE}/channels/{channel_id}/messages",
+                headers=headers, params=params, timeout=TIMEOUT_SECONDS,
+            )
+            if r.status_code == 401:
+                raise DiscordAuthError("discord rejected the bot token")
+            r.raise_for_status()
+            batch = r.json()
+        except DiscordAuthError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("discord fetch failed: %s", exc)
+            break
+        if not batch:
+            break
+        # Snowflakes are monotonic, so sorting by id is sorting by time.
+        batch.sort(key=lambda m: int(m["id"]))
+        collected.extend(batch)
+        cursor = batch[-1]["id"]
+        if len(batch) < FETCH_LIMIT:
+            break
+    return collected
+
+
+def probe_channel(channel_id: str, token: str | None = None) -> dict:
+    """Distinguish "quiet channel" from "we cannot actually read this one".
+
+    Worth a dedicated call because BOTH misconfigurations — a missing
+    `READ_MESSAGE_HISTORY` overwrite on a private channel, and a disabled
+    `MESSAGE_CONTENT` intent — present as success with nothing useful in it. Surfaced
+    on /admin/health so a silent bridge is diagnosable rather than mysterious.
+    """
+    token = token or bot_token()
+    if not token:
+        return {"ok": False, "detail": f"{BOT_TOKEN_ENV} is not set"}
+    if not channel_id:
+        return {"ok": False, "detail": "no channel id configured"}
+    try:
+        r = httpx.get(
+            f"{API_BASE}/channels/{channel_id}/messages",
+            headers={"Authorization": f"Bot {token}"},
+            params={"limit": 1}, timeout=TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "detail": f"unreachable: {exc}"}
+    if r.status_code == 401:
+        return {"ok": False, "detail": "bot token rejected (401)"}
+    if r.status_code == 403:
+        return {"ok": False, "detail": "bot cannot view this channel (403)"}
+    if r.status_code >= 400:
+        return {"ok": False, "detail": f"HTTP {r.status_code}"}
+    batch = r.json()
+    if not batch:
+        return {"ok": True, "detail": "readable, but empty — check Read Message "
+                                      "History if you expect messages"}
+    if batch[0].get("content") == "":
+        return {"ok": False,
+                "detail": "messages readable but content is blank — enable the "
+                          "MESSAGE CONTENT intent in the Developer Portal"}
+    return {"ok": True, "detail": "readable"}
+
+
+# ---- resolving names to rows --------------------------------------------------
+# Reuse, never rebuild: services._score_match already does exact/strong/close tiers
+# with difflib and token sets, and it is the same matcher the discovery queue trusts.
+# Rebuilding it here would give the league two matchers that disagree.
+
+def resolve_manager(db, league, *, discord_user_id=None, name=None) -> dict:
+    """Who is this? Returns {"manager": Manager|None, "method": str, "why": str}.
+
+    Tried in strict order of certainty, and the ORDER is the safety property:
+
+      1. `discord_user_id` — exact, no matching involved. This is why the mapping
+         exists, and it covers the author of every IL post for free.
+      2. Exact `Manager.display` (case-insensitive).
+      3. INITIALS of display_name — "KT" is "Kevin T", which the league really writes.
+         Only when UNAMBIGUOUS: this league has two managers whose initials start with
+         K, so the ambiguity check is load-bearing rather than theoretical.
+
+    There is deliberately NO fuzzy tier. A near-miss on a manager name hands a pick to
+    the wrong person, and unlike a player name there are only ten candidates — if none
+    of the three exact routes hit, asking is cheap and guessing is not.
+    """
+    from models import Manager
+
+    rows = db.query(Manager).filter(Manager.league_id == league.id).all()
+    if discord_user_id:
+        for m in rows:
+            if m.discord_user_id and m.discord_user_id == str(discord_user_id):
+                return {"manager": m, "method": "discord_id", "why": ""}
+    if not name:
+        return {"manager": None, "method": None,
+                "why": "unmapped Discord author — map them on /admin/health"}
+
+    want = name.strip().lower()
+    exact = [m for m in rows if (m.display or "").strip().lower() == want]
+    if len(exact) == 1:
+        return {"manager": exact[0], "method": "exact", "why": ""}
+
+    def initials(display: str) -> str:
+        return "".join(part[0] for part in (display or "").split() if part).lower()
+
+    if 1 <= len(want) <= 3 and want.isalpha():
+        hits = [m for m in rows if initials(m.display) == want]
+        if len(hits) == 1:
+            return {"manager": hits[0], "method": "initials", "why": ""}
+        if len(hits) > 1:
+            return {"manager": None, "method": None,
+                    "why": f"{name!r} matches {len(hits)} managers "
+                           f"({', '.join(sorted(h.display for h in hits))})"}
+    return {"manager": None, "method": None, "why": f"no manager matching {name!r}"}
+
+
+def resolve_player(db, name: str) -> dict:
+    """Which player? Returns {"player": Player|None, "method": str, "score": float}.
+
+    Delegates the scoring to services._score_match, so this agrees with the discovery
+    queue by construction. Candidates are ranked and only reported when there is a
+    single best one — two players tying is a question for a human, not a coin flip.
+    """
+    import services
+    from models import Player
+
+    best: list[tuple[float, str, object]] = []
+    for p in db.query(Player).all():
+        scored = services._score_match(name, p.full_name, p.name)
+        if scored:
+            best.append((scored[0], scored[1], p))
+    if not best:
+        return {"player": None, "method": None, "score": 0.0,
+                "why": f"no player matching {name!r}"}
+    best.sort(key=lambda t: -t[0])
+    top = best[0]
+    tied = [b for b in best if b[0] == top[0]]
+    if len(tied) > 1:
+        return {"player": None, "method": None, "score": top[0],
+                "why": f"{name!r} matches {len(tied)} players equally "
+                       f"({', '.join(sorted(str(t[2].name) for t in tied))})"}
+    return {"player": top[2], "method": top[1], "score": top[0], "why": ""}
+
+
+def suggest_il_replacement(db, league, manager, start_gw: int) -> list[dict]:
+    """Who probably came in for the absentee — the field the announcement never has.
+
+    Derived the same way `get_transactions` derives add/drops: diff this manager's
+    roster between consecutive gameweek snapshots. Whoever they ADDED at `start_gw` is
+    offered first, which turns "read Discord, remember it, open the site, fill four
+    fields" into "confirm one dropdown".
+
+    A suggestion only. FPL records no paired add/drop, so which arrival replaced which
+    departure is genuinely unknowable from a diffed snapshot — the same reason
+    docs/DESIGN_IL_OWNERSHIP.md gives for making the season-end release
+    manager-designated rather than derived. Do not promote this to automatic.
+    """
+    from models import Gameweek, Roster
+
+    def squad(gw_number: int) -> set:
+        return {
+            pid for (pid,) in db.query(Roster.player_id)
+            .join(Gameweek, Gameweek.id == Roster.gameweek_id)
+            .filter(Gameweek.league_id == league.id, Gameweek.number == gw_number,
+                    Roster.manager_id == manager.id)
+        }
+
+    added = squad(start_gw) - squad(start_gw - 1) if start_gw > 1 else set()
+    import services
+
+    ident = services.season_identity(db, league, list(added)) if added else {}
+    return [
+        {"fpl_id": row.fpl_id, "name": row.name, "position": row.position}
+        for row in (ident.get(pid) for pid in added) if row is not None
+    ]
+
+
+# ---- the ingest pipeline ------------------------------------------------------
+def _store_messages(db, league, channel_id: str, raw: list[dict]) -> list:
+    """Persist raw messages, skipping ones already seen. Returns the NEW rows.
+
+    Storing before parsing is what makes the pipeline replayable — a parser bug is
+    fixed by re-running over these rows rather than re-fetching from Discord — and it
+    means a message we cannot interpret is still visible, which already beats the
+    status quo where an unrecorded announcement is simply lost.
+    """
+    import datetime as _dt
+
+    from models import DiscordMessage
+
+    known = {
+        mid for (mid,) in db.query(DiscordMessage.discord_message_id)
+        .filter(DiscordMessage.channel_id == str(channel_id))
+    }
+    fresh = []
+    for m in raw:
+        if m["id"] in known:
+            continue
+        known.add(m["id"])
+        author = m.get("author") or {}
+        posted = None
+        if m.get("timestamp"):
+            try:
+                posted = _dt.datetime.fromisoformat(m["timestamp"])
+            except ValueError:
+                posted = None
+        row = DiscordMessage(
+            league_id=league.id, channel_id=str(channel_id),
+            discord_message_id=m["id"],
+            author_discord_id=str(author.get("id")) if author.get("id") else None,
+            author_name=author.get("global_name") or author.get("username"),
+            content=m.get("content") or "",
+            posted_at=posted,
+        )
+        db.add(row)
+        fresh.append(row)
+    db.commit()
+    return fresh
+
+
+def _stage(db, league, msg, kind: str, dedupe_key: str, payload: dict,
+           resolution: dict, confidence: float) -> None:
+    """Upsert one proposal. Idempotent on (message, kind, dedupe_key).
+
+    A row the commissioner already REJECTED is left exactly as it is — never revived,
+    never re-proposed. That is the discovery-suggestion rule, and it is what stops a
+    dismissed parse coming back on every sweep. An APPLIED row is likewise untouched.
+    """
+    from models import DiscordIngest
+
+    existing = (
+        db.query(DiscordIngest)
+        .filter(DiscordIngest.discord_message_id == msg.id,
+                DiscordIngest.kind == kind,
+                DiscordIngest.dedupe_key == dedupe_key)
+        .one_or_none()
+    )
+    if existing is not None:
+        if existing.status != "pending":
+            return
+        existing.payload = payload
+        existing.resolution = resolution
+        existing.confidence = confidence
+        return
+    db.add(DiscordIngest(
+        discord_message_id=msg.id, league_id=league.id, kind=kind,
+        dedupe_key=dedupe_key, payload=payload, resolution=resolution,
+        confidence=confidence, status="pending",
+    ))
+
+
+def _resolve_assets(db, assets: list[dict], giver) -> tuple[list, list, list]:
+    """Parsed assets -> (player fpl ids, pick specs, unresolved notes).
+
+    A pick spec is `record_trade`'s own `"{year}:{type}:{round}:{original owner}"`
+    string, so nothing new is invented for the write path to understand.
+
+    TWO assumptions are made here, and BOTH are reported as unresolved rather than
+    applied silently, because either being wrong reassigns a different manager's slot:
+
+      * the pick's ORIGINAL owner is the person giving it up (never stated in any
+        sampled message, and false for any pick acquired in an earlier trade);
+      * an overall pick number converts to a round by league size, which needs the
+        draft order to be known for that season and is meaningless before it is set.
+    """
+    players, picks, unresolved = [], [], []
+    for a in assets:
+        if a["kind"] == "player":
+            players.append(a)
+        elif a["kind"] == "unresolved":
+            unresolved.append({"text": a["text"], "why": a["why"]})
+        elif a["kind"] == "pick":
+            if a.get("season_year") is None:
+                unresolved.append({"text": a["text"], "why": "no season named"})
+                continue
+            if a["notation"] == "overall":
+                unresolved.append({
+                    "text": a["text"],
+                    "why": f"'Pick {a['number']}' is a position, not a round — "
+                           f"confirm which round and whose pick it originally was",
+                })
+                continue
+            for rnd in a["rounds"]:
+                picks.append({
+                    "spec": f"{a['season_year']}:{a['draft_type']}:{rnd}:"
+                            f"{giver.display if giver else '?'}",
+                    "text": a["text"],
+                    "assumed_owner": giver.display if giver else None,
+                })
+    return players, picks, unresolved
+
+
+def ingest_message(db, league, msg) -> str:
+    """Parse and stage one stored message. Returns its new `parse_status`.
+
+    Never writes league state and never raises past its own bookkeeping.
+    """
+    import discord_parse
+
+    text = msg.content or ""
+    author = resolve_manager(db, league, discord_user_id=msg.author_discord_id)
+
+    trade = discord_parse.parse_trade(text)
+    if trade is not None:
+        # The AUTHOR is only a hint here, not an identity: a real sampled message has
+        # John announcing a trade between two other managers. Both sides are resolved
+        # by name, and neither falls back to the poster.
+        a = resolve_manager(db, league, name=trade["a"])
+        b = resolve_manager(db, league, name=trade["b"])
+        a_players, a_picks, a_un = _resolve_assets(db, trade["a_assets"], a["manager"])
+        b_players, b_picks, b_un = _resolve_assets(db, trade["b_assets"], b["manager"])
+
+        resolved_players: dict = {}
+        unresolved = list(a_un) + list(b_un)
+        for side, group in (("a", a_players), ("b", b_players)):
+            out = []
+            for item in group:
+                hit = resolve_player(db, item["name"])
+                if hit["player"] is None or hit["player"].fpl_id is None:
+                    unresolved.append({
+                        "text": item["text"],
+                        "why": hit.get("why") or "player has no current FPL id",
+                    })
+                    continue
+                out.append({"fpl_id": hit["player"].fpl_id, "name": hit["player"].name,
+                            "method": hit["method"], "score": hit["score"],
+                            "typed": item["name"]})
+            resolved_players[side] = out
+
+        payload = {
+            "a_fpl": a["manager"].fpl_manager_id if a["manager"] else None,
+            "b_fpl": b["manager"].fpl_manager_id if b["manager"] else None,
+            "a_players": [p["fpl_id"] for p in resolved_players["a"]],
+            "b_players": [p["fpl_id"] for p in resolved_players["b"]],
+            "a_picks": [p["spec"] for p in a_picks],
+            "b_picks": [p["spec"] for p in b_picks],
+        }
+        resolution = {
+            "a": {"typed": trade["a"], "method": a["method"],
+                  "display": a["manager"].display if a["manager"] else None,
+                  "why": a["why"]},
+            "b": {"typed": trade["b"], "method": b["method"],
+                  "display": b["manager"].display if b["manager"] else None,
+                  "why": b["why"]},
+            "players": resolved_players,
+            "picks": {"a": a_picks, "b": b_picks},
+            "unresolved": unresolved,
+            "author": {"mapped": author["method"] == "discord_id",
+                       "name": msg.author_name},
+        }
+        complete = bool(a["manager"] and b["manager"] and not unresolved)
+        _stage(db, league, msg, "trade", "", payload, resolution,
+               1.0 if complete else 0.5)
+        return "staged"
+
+    il = discord_parse.parse_il(text)
+    if il is not None:
+        # Here the author IS the manager: IL posts are self-reports, and every sampled
+        # one was written by the manager whose player it is.
+        hit = resolve_player(db, il["player"])
+        manager = author["manager"]
+        payload = {
+            "fpl_manager_id": manager.fpl_manager_id if manager else None,
+            "injured_fpl_id": hit["player"].fpl_id if hit["player"] else None,
+            "start_gw": il["start_gw"],
+            # ABSENT ON PURPOSE. The announcement does not contain it; `place_on_il`
+            # requires it; a human supplies it from the suggestions below.
+            "replacement_fpl_id": None,
+        }
+        unresolved = []
+        if manager is None:
+            unresolved.append({"text": msg.author_name or "?", "why": author["why"]})
+        if hit["player"] is None:
+            unresolved.append({"text": il["player"], "why": hit["why"]})
+        resolution = {
+            "player": {"typed": il["player"], "method": hit["method"],
+                       "score": hit["score"],
+                       "name": hit["player"].name if hit["player"] else None},
+            "manager": {"method": author["method"],
+                        "display": manager.display if manager else None},
+            "end_gw": il["end_gw"],
+            "replacement_suggestions": (
+                suggest_il_replacement(db, league, manager, il["start_gw"])
+                if manager else []
+            ),
+            "needs": ["replacement_fpl_id"],
+            "unresolved": unresolved,
+        }
+        _stage(db, league, msg, "il_place", "", payload, resolution, 0.5)
+        return "staged"
+
+    return "ignored"
+
+
+def poll_channel(db, league, channel_id: str, token: str | None = None) -> dict:
+    """Fetch, store and stage one channel. Never raises."""
+    from models import DiscordMessage
+
+    if not channel_id:
+        return {"skipped": "no channel"}
+    cursor = (
+        db.query(DiscordMessage.discord_message_id)
+        .filter(DiscordMessage.channel_id == str(channel_id))
+        # Snowflakes are monotonic but STRINGS here, so ordering has to be numeric or
+        # "10" sorts above "9" and the cursor walks backwards.
+        .order_by(sa_cast(DiscordMessage.discord_message_id, BigInteger).desc())
+        .limit(1)
+        .scalar()
+    )
+    try:
+        raw = fetch_messages(channel_id, after=cursor, token=token)
+    except DiscordAuthError as exc:
+        return {"error": str(exc), "disabled": True}
+    if not raw:
+        return {"fetched": 0}
+
+    fresh = _store_messages(db, league, channel_id, raw)
+    staged = 0
+    for msg in fresh:
+        try:
+            msg.parse_status = ingest_message(db, league, msg)
+        except Exception as exc:  # noqa: BLE001
+            # One unparseable message must not stop the sweep or lose the rest.
+            log.warning("discord ingest failed for %s: %s", msg.discord_message_id, exc)
+            msg.parse_status = "failed"
+        staged += msg.parse_status == "staged"
+    db.commit()
+    return {"fetched": len(raw), "new": len(fresh), "staged": staged}
+
+
+def run_inbound(db, league) -> dict:
+    """Poll every configured channel. Called from the post-sync hook; never raises."""
+    if league is None or getattr(league, "sync_locked", False):
+        return {"skipped": "frozen" if league is not None else "no league"}
+    if not bot_token():
+        return {"skipped": "not configured"}
+    out: dict = {}
+    for label, env in (("trades", TRADE_CHANNEL_ENV), ("il", IL_CHANNEL_ENV)):
+        channel = (os.getenv(env) or "").strip()
+        if not channel:
+            continue
+        try:
+            out[label] = poll_channel(db, league, channel)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("discord poll failed for %s: %s", label, exc)
+            db.rollback()
+            out[label] = {"error": str(exc)}
     return out
