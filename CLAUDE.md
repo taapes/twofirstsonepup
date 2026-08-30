@@ -760,6 +760,14 @@ full sync), never from a request handler, never inside a service transaction, an
 would give every future audited action a network dependency. `post_message` never
 raises and `run_outbound` swallows even a bug in our own rendering: a trade is the real
 work, the announcement is a side effect.
+A third post, the **gameweek summary** (`announce_gameweek_summary`), carries the
+projected scoreboard and the analysis lines once every PL fixture in the gameweek is
+finished — gated on `gw_fixture_progress`, **NOT `Match.finished`**, which is FPL's H2H
+scoring-lock and can lag by hours; a summary posted mid-match is wrong in the one way
+that matters. `total == 0` is not a finished gameweek. Deduped through the existing
+`discord_alerts` fingerprint rather than a new marker column: the question and the
+answer are identical to the alert sweep's, and a second mechanism for one message would
+be two things to keep in step.
 **Two markers, because "have I already said this?" has two shapes.** `trades.announced_at`
 is the announce queue (`WHERE announced_at IS NULL`), stamped **per success** so a
 partial failure leaves the rest queued; the migration **back-stamps every existing
