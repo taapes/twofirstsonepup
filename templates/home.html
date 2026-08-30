@@ -8,6 +8,38 @@
   <h1>{{ league.name }}</h1>
   <p class="sub">Season {{ league.season_year }}/{{ (league.season_year + 1) % 100 }}</p>
 
+{% if scoreboard and scoreboard.matches %}
+  {# Leads the page only while the gameweek is actually being played — see
+     services.gameweek_is_live. Compact on purpose: the full detail (fixture progress,
+     per-player remaining lists) lives on /scoreboard. #}
+  <h2>GW{{ scoreboard.gameweek }} — in progress
+    <a href="/scoreboard" class="sub" style="font-size:.7rem">full scoreboard →</a></h2>
+  <div class="card" style="padding:10px;overflow-x:auto">
+    <table class="stats">
+      <tbody>
+      {% for m in scoreboard.matches %}
+      <tr>
+        <td style="text-align:right">{{ m.home }}{% if m.leader == m.home %} ▲{% endif %}</td>
+        <td class="num" style="white-space:nowrap">
+          {{ m.home_score if m.home_score is not none else "—" }} – {{ m.away_score if m.away_score is not none else "—" }}
+        </td>
+        <td>{{ m.away }}{% if m.leader == m.away %} ▲{% endif %}</td>
+        <td class="sub" style="white-space:nowrap">
+          {{ (m.home_remaining.remaining if m.home_remaining else 0) }} v
+          {{ (m.away_remaining.remaining if m.away_remaining else 0) }} left
+        </td>
+      </tr>
+      {% if m.analysis %}
+      <tr><td colspan="4" class="sub" style="padding-top:0;border-top:0">{{ m.analysis }}</td></tr>
+      {% endif %}
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="sub" style="margin:6px 0 0">Bench substitutions projected — FPL won't
+      apply them until the gameweek is finalised.</p>
+  </div>
+{% endif %}
+
   <h2>Standings{% if is_admin %} <a href="/admin/standings" class="sub" style="font-size:.7rem">adjust →</a>{% endif %}</h2>
   <div class="card">
     {% if standings %}

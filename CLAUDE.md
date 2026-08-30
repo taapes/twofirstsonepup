@@ -52,7 +52,7 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   naming the host it refused. **A plain `pytest` is now safe** — the old convention of
   hand-typing three `--ignore` flags is obsolete, and shouldn't be revived: it failed on
   2026-08-24 because zsh doesn't word-split an unquoted `$IG`, and they hit prod twice.
-  A full run is `1060 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
+  A full run is `1068 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
@@ -521,6 +521,14 @@ Write tests for these. They are custom and non-obvious:
   `players_remaining_by_manager` runs on the **effective** XI, so a projected sub whose
   own match is still to come counts as left to play (flagged `sub: True`) — on the picked
   XI he appeared nowhere, understating exactly the managers this helps.
+  **The homepage leads with the scoreboard while a gameweek is being played**
+  (`services.gameweek_is_live`, keyed on `gw_fixture_progress` — real PL fixtures, not
+  `Match.finished`). Both ends are excluded on purpose: before the first kickoff every
+  score is 0–0 and says nothing the standings don't, and after the last whistle the
+  gameweek is a result rather than a race. `total == 0` is an unsynced gameweek, not a
+  finished one. `get_scoreboard` is 19 queries with no N+1 — it was 26 until
+  `players_remaining_by_manager` stopped recomputing the projection `get_scoreboard`
+  had already built; pass it in rather than letting both call it.
   **Matchup analysis** (`services.matchup_analysis`) is a deterministic sentence per tie,
   four states, draws called out ("9 to draw, 10 to win"). The contingency does NOT
   explode: what's uncertain is *which* player fills a slot, not how many slots there are,

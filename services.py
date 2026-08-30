@@ -428,6 +428,27 @@ def matchup_analysis(match: dict) -> str:
             f"{lead} to draw.{tail}")
 
 
+def gameweek_is_live(db: Session, league: League, gw_number: int | None = None) -> bool:
+    """Is a gameweek underway — first kickoff gone, last whistle not yet blown?
+
+    Keyed on REAL PL fixtures (`gw_fixture_progress`), not `Match.finished`, which is
+    FPL's H2H scoring-lock and can lag by hours.
+
+    Deliberately excludes both ends. Before the first kickoff every score is 0–0 and
+    the scoreboard says nothing the standings don't; after the last whistle the
+    gameweek is a result rather than a race. `total == 0` is an unsynced gameweek, not
+    a finished one — the same missing-data-isn't-emptiness guard used elsewhere.
+    """
+    gw_number = gw_number or current_gameweek(db, league)
+    if not gw_number:
+        return False
+    counts = (gw_fixture_progress(db, league, gw_number) or {}).get("counts") or {}
+    total = counts.get("total") or 0
+    if not total or counts.get("finished", 0) >= total:
+        return False
+    return (counts.get("finished", 0) + counts.get("in_progress", 0)) > 0
+
+
 def get_scoreboard(db: Session, league: League, gw_number: int | None = None) -> dict:
     """Current-GW H2H scoreboard: each matchup with live scores (from gameweek_points,
     falling back to the match's stored points) and whether it's finished.
@@ -453,7 +474,7 @@ def get_scoreboard(db: Session, league: League, gw_number: int | None = None) ->
     # the invariant the tests key on.
     projected = projected_points_by_manager(db, league, gw_number)
     live = {mid: p["points"] for mid, p in projected.items()}
-    remaining = players_remaining_by_manager(db, league, gw_number)
+    remaining = players_remaining_by_manager(db, league, gw_number, projected)
     matches = []
     for mt in db.query(Match).filter_by(league_id=league.id, gameweek_id=gw.id):
         hs = live.get(mt.home_manager_id, mt.home_points)
@@ -1890,7 +1911,9 @@ def projected_points_by_manager(db: Session, league: League, gw_number: int) -> 
     return out
 
 
-def players_remaining_by_manager(db: Session, league: League, gw_number: int) -> dict:
+def players_remaining_by_manager(
+    db: Session, league: League, gw_number: int, projected: dict | None = None
+) -> dict:
     """manager_id -> {"total", "remaining", "in_progress", "by_position",
     "playing_now", "remaining_players"} for a gameweek's EFFECTIVE XI — the picked
     starters with auto-subs projected, so this agrees with the score on the same page.
@@ -1920,7 +1943,13 @@ def players_remaining_by_manager(db: Session, league: League, gw_number: int) ->
     season = _season_by_fpl_id(db, league)
     club_status = _club_status_by_gw(db, league, gw_number)
     next_kickoff = _club_next_kickoff_by_gw(db, league, gw_number)
-    projected = projected_points_by_manager(db, league, gw_number)
+    # Accepts a precomputed projection because get_scoreboard needs the same one for
+    # the score. Computing it twice per page doubled the cost of the slowest read in
+    # the app — ~960ms against Neon, half of it this duplicate.
+    projected = (
+        projected if projected is not None
+        else projected_points_by_manager(db, league, gw_number)
+    )
     out: dict = {}
     for gp in db.query(GameweekPoints).filter_by(gameweek_id=gw.id):
         buckets = {

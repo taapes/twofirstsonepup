@@ -686,3 +686,79 @@ def test_the_scoreboard_page_renders_the_analysis_and_marks_a_sub(test_session):
     body = r.text
     assert "Scott needs" in body, "the analysis line rendered"
     assert ">sub<" in body, "the projected substitute is marked as one"
+
+
+# ---- the homepage lead ---------------------------------------------------------
+# The scoreboard leads the homepage only while a gameweek is actually being played.
+# Both ends are excluded deliberately: before the first kickoff every score is 0–0, and
+# after the last whistle the gameweek is a result rather than a race.
+
+def _progress(session, lg, *, finished, in_progress, not_started):
+    for i in range(finished):
+        _fixture(session, lg, 100 + i, f"F{i}", "ZZZ", finished=True)
+    for i in range(in_progress):
+        _fixture(session, lg, 200 + i, f"P{i}", "ZZZ", finished=False, started=True)
+    for i in range(not_started):
+        _fixture(session, lg, 300 + i, f"N{i}", "ZZZ", finished=False, started=False)
+    session.commit()
+
+
+@pytest.mark.parametrize("finished,in_progress,not_started,live", [
+    (0, 0, 10, False),   # before the first kickoff — every score is 0–0
+    (0, 1, 9, True),     # first match under way
+    (9, 0, 1, True),     # the real GW2 state: one fixture still to come
+    (5, 2, 3, True),
+    (10, 0, 0, False),   # all done — the standings are the story again
+    (0, 0, 0, False),    # unsynced gameweek, NOT a finished one
+])
+def test_gameweek_is_live_only_while_it_is_being_played(
+    test_session, finished, in_progress, not_started, live
+):
+    lg, _gw = _league(test_session)
+    _progress(test_session, lg, finished=finished, in_progress=in_progress,
+              not_started=not_started)
+    assert services.gameweek_is_live(test_session, lg, GW) is live
+
+
+def test_the_homepage_leads_with_the_scoreboard_while_live(test_session):
+    from auth import hash_password
+    from fastapi.testclient import TestClient
+    from main import app
+
+    lg, gw = _league(test_session)
+    home = _manager(test_session, lg, "Scott", "1")
+    away = _manager(test_session, lg, "John", "2")
+    made = _squad_rows(test_session, lg, _SHAPE)
+    _progress(test_session, lg, finished=1, in_progress=1, not_started=0)
+    _gwpoints(test_session, gw, home, _entries(_SHAPE, made, points={"m2": 12}))
+    _gwpoints(test_session, gw, away, _entries(_SHAPE, made, points={"m3": 5}))
+    test_session.add(Match(league_id=lg.id, gameweek_id=gw.id,
+                           home_manager_id=home.id, away_manager_id=away.id))
+    home.password_hash = hash_password("pw")
+    test_session.commit()
+
+    client = TestClient(app, follow_redirects=False)
+    assert client.post("/login", data={"manager_id": "1", "password": "pw"}).status_code == 303
+    body = client.get("/").text
+    assert f"GW{GW} — in progress" in body
+    # Above the standings, which is the whole point of the request.
+    assert body.index("in progress") < body.index("Standings")
+
+
+def test_the_homepage_omits_the_scoreboard_once_the_gameweek_is_done(test_session):
+    from auth import hash_password
+    from fastapi.testclient import TestClient
+    from main import app
+
+    lg, gw = _league(test_session)
+    home = _manager(test_session, lg, "Scott", "1")
+    _manager(test_session, lg, "John", "2")
+    _progress(test_session, lg, finished=2, in_progress=0, not_started=0)
+    home.password_hash = hash_password("pw")
+    test_session.commit()
+
+    client = TestClient(app, follow_redirects=False)
+    assert client.post("/login", data={"manager_id": "1", "password": "pw"}).status_code == 303
+    body = client.get("/").text
+    assert "in progress" not in body
+    assert "Standings" in body, "the rest of the page is unaffected"

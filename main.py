@@ -196,6 +196,11 @@ def home(request: Request, db: Session = Depends(get_db)):
     league = services.current_league(db)
     ctx = {"request": request, "league": league, "is_admin": is_admin(request)}
     if league:
+        # The scoreboard leads the page while a gameweek is actually being played —
+        # that is when it is the most interesting thing here, and it costs a read the
+        # rest of the week wouldn't pay for.
+        if services.gameweek_is_live(db, league):
+            ctx["scoreboard"] = services.get_scoreboard(db, league)
         ctx.update(
             standings=services.get_standings(db, league),
             flags=services.get_flags(db, league),
