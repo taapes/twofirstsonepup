@@ -89,14 +89,7 @@ pattern."
   freshly-migrated schema were not guaranteed to agree (production turned out to have
   neither). Verified: `alembic revision --autogenerate` against a migrated schema now
   detects nothing, so a diff contains only what its author changed. Original entry:
-  (`P3`, found 2026-08-25 while generating the Item 17 migration). `alembic revision --autogenerate` proposes
-  `ix_draft_queue_season_year` (`draft_queue.season_year`) and
-  `ix_side_payouts_manager_id` (`side_payouts.manager_id`) on a schema built from
-  migrations — so the models declare `index=True` on both and no revision ever created
-  them. Harmless (a missing index is slow, not wrong) but it means every future
-  autogenerate carries two unrelated `create_index` calls that have to be stripped by
-  hand, and someone will eventually miss one. Fix: one revision creating both, so the
-  next autogenerate is clean. Check production separately — it may or may not have them.
+  (`P3`, found 2026-08-25 while generating the Item 17 migration.)
 - **Three test files can commit to the production database** (`P3`) —
   `test_audit.py` / `test_demo.py` / `test_sync_freeze.py` resolve their session from
   `DATABASE_URL`. Deliberate (they test code that commits internally) but unguarded,
