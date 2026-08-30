@@ -2198,6 +2198,16 @@ down, for the third time in a week.
 **Pinned** by `tests/test_current_gameweek_sync.py`, using the real payload captured
 live during GW2. Both fixes verified to bite.
 
+**The tests that matter most here are the CALL-SITE ones**, added after a first pass
+that only covered the payload parsing. With parsing tests alone, both call sites could
+be reverted to `await get_current_gw()` and the whole suite stayed green — which is
+exactly how the original survived. `test_sync_rosters_uses_the_gameweek_the_site_reads`
+and its sibling force FPL to disagree with the stored calendar and assert which
+gameweek the task actually fetched, so a future divergence is impossible rather than
+merely unlikely. A third pins that FPL is still the fallback when a league has no
+calendar yet — the bug was never that FPL is consulted, only that it was consulted
+INSTEAD of our own answer.
+
 **Still to do by hand:** production has no GW2 rosters or points, and sync only ever
 writes the current gameweek. Backfill with
 `sync_rosters(gw_number=2)` / `sync_gameweek_points(gw_number=2)` — both already take an

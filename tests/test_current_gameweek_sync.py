@@ -135,3 +135,70 @@ def test_health_is_satisfied_once_the_current_gameweek_is_written(test_session):
     checks = {c["check"]: c for c in services.data_health(test_session, lg)}
     assert checks["rosters synced for the current gameweek"]["ok"] is True
     assert checks["gameweek points synced for the current gameweek"]["ok"] is True
+
+
+# ---- the fix that kills the CLASS, not just this instance ---------------------
+# Without these two, both call sites could revert to `await get_current_gw()` and the
+# entire suite would stay green — which is precisely how the original bug survived. The
+# tests above pin the payload PARSING; these pin that sync asks the same question its
+# readers do, which is the property that makes a future divergence impossible rather
+# than merely unlikely.
+
+def _run_sync_task(task, monkeypatch, *, fpl_gw, seen):
+    """Drive a sync task with FPL disagreeing with our stored calendar.
+
+    `get_current_gw` is forced to the WRONG answer, so a task that consults it lands on
+    the wrong gameweek and a task that consults `services.current_gameweek` does not.
+    """
+    async def fake_current_gw():
+        seen["asked_fpl"] = True
+        return fpl_gw
+
+    async def fake_get_json(client, url):
+        seen.setdefault("urls", []).append(url)
+        # Enough shape for both tasks; no player rows exist, so picks are skipped.
+        return {"picks": [], "elements": {}}
+
+    monkeypatch.setattr(sync, "get_current_gw", fake_current_gw)
+    monkeypatch.setattr(sync, "_get_json", fake_get_json)
+    asyncio.run(task(fpl_league_id="70"))
+
+
+def test_sync_rosters_uses_the_gameweek_the_site_reads(test_session, monkeypatch):
+    """The regression, at the call site. FPL says 1, our calendar says 2 — the snapshot
+    must land on 2, because 2 is what /scoreboard and the transactions diff ask for."""
+    lg = _seed(test_session, today_gw=2)
+    seen: dict = {}
+    _run_sync_task(sync.sync_rosters, monkeypatch, fpl_gw=1, seen=seen)
+
+    # The per-entry URL carries the gameweek, so it shows which one was resolved.
+    assert seen["urls"], "the task should have fetched something"
+    assert all(url.endswith("/event/2") for url in seen["urls"]), seen["urls"]
+
+
+def test_sync_gameweek_points_uses_the_gameweek_the_site_reads(test_session, monkeypatch):
+    lg = _seed(test_session, today_gw=2)
+    seen: dict = {}
+    _run_sync_task(sync.sync_gameweek_points, monkeypatch, fpl_gw=1, seen=seen)
+
+    assert any("/event/2/live" in url for url in seen["urls"]), seen["urls"]
+    assert not any("/event/1/live" in url for url in seen["urls"]), seen["urls"]
+
+
+def test_fpl_is_still_the_fallback_when_we_have_no_calendar(test_session, monkeypatch):
+    """A league whose gameweek dates haven't synced yet has no derivation to use, and
+    falling back is right there — the bug was never that FPL is consulted, only that it
+    was consulted INSTEAD of our own answer."""
+    lg = League(fpl_league_id="70", name="L", season_year=2026, is_current=True,
+                sync_locked=False, phase="in_season")
+    test_session.add(lg)
+    test_session.flush()
+    test_session.add(Manager(league_id=lg.id, fpl_manager_id="1", name="A",
+                             display_name="Ann"))
+    test_session.commit()
+    assert services.current_gameweek(test_session, lg) is None, "no dated gameweeks"
+
+    seen: dict = {}
+    _run_sync_task(sync.sync_rosters, monkeypatch, fpl_gw=7, seen=seen)
+    assert seen.get("asked_fpl") is True
+    assert all(url.endswith("/event/7") for url in seen["urls"]), seen["urls"]
