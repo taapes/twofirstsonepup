@@ -90,11 +90,20 @@ pattern."
   neither). Verified: `alembic revision --autogenerate` against a migrated schema now
   detects nothing, so a diff contains only what its author changed. Original entry:
   (`P3`, found 2026-08-25 while generating the Item 17 migration.)
-- **Three test files can commit to the production database** (`P3`) —
-  `test_audit.py` / `test_demo.py` / `test_sync_freeze.py` resolve their session from
-  `DATABASE_URL`. Deliberate (they test code that commits internally) but unguarded,
-  and the reason every regression summary here says "green excluding those three".
-  Confirmed to have actually written to prod on 2026-08-18.
+- ~~**Three test files can commit to the production database**~~ — **done 2026-08-31**
+  (`859ef3f`). All three converted onto `test_session`; a full run is now
+  `1137 passed, 0 skipped`. **The stated rationale was wrong on both halves:**
+  `record_audit` does not commit (it joins the caller's transaction so the audit row is
+  atomic with the change), and `test_session` is not rollback-based — it TRUNCATEs, so
+  it tolerates commits freely. `test_sync_league_resolution.py` had already proved the
+  pattern by reading back a `SyncLog` row that sync's own internal session committed.
+  The real blocker was `from db import SessionLocal` at module scope, which binds a COPY
+  the monkeypatch cannot reach. `test_demo.py` never wrote anything at all — it was on
+  the list on grounds it did not meet. `test_sync_freeze.py` was the dangerous one: its
+  fixture flipped `sync_locked` on the LIVE league and relied on a `finally`, so a crash
+  between those points left production frozen. The `COMMITTING_DB_MODULES` refusal is
+  replaced by an ACTIVE guard (`tests/test_meta.py`) asserting no test module imports
+  `SessionLocal` — an allowlist emptied of members is a guard that can never fire.
 - **Audit for the silent-inert pattern** (`P2`, suggested 2026-08-20) — **sweep #1 run
   2026-08-24 (six findings); sweep #2 run 2026-08-30 (two findings, both in code written
   the day before, one of them with a passing test — see "Silent-inert sweep #2" below).**
@@ -2205,6 +2214,40 @@ INSTEAD of our own answer.
 writes the current gameweek. Backfill with
 `sync_rosters(gw_number=2)` / `sync_gameweek_points(gw_number=2)` — both already take an
 explicit gameweek for exactly this.
+
+---
+
+### Cleanup pass: 0 skipped, 0 warnings, a page sweep, and a satisfiable health page
+
+**Priority:** `P2` — housekeeping, requested directly ("I want the website and testing
+clean").
+**Status:** `done` — 2026-08-31. Four items, all shipped.
+
+**What was actually wrong** (surveyed rather than assumed):
+1. 18 skipped tests, whose recorded justification did not survive contact with the code
+   — see the bullet above. Recovered.
+2. 52 `DeprecationWarning`s from ONE call, 46 sites. Migrated; the suite now runs clean
+   under `-W error::DeprecationWarning`, which is what keeps it clean.
+3. Nothing asserted the 37 HTML pages render. Added `tests/test_pages_render.py`.
+4. `/admin/health` carried a permanently-red check reporting 105 legitimate rows.
+
+**Two things checked and deliberately NOT changed:** no route 500s on an empty database,
+and there is no runtime hotspot worth chasing (slowest test 2.16s; ~3:20 is ~1100 tests
+each paying DB setup, with no single offender).
+
+**The instructive part is how easy the smoke test was to write badly.** An ad-hoc version
+"passed" while 26 of 35 routes were quietly 303-ing to `/who` — an admin cookie does not
+satisfy the site-wide gate for manager pages. It therefore asserts **200**, not "not
+500", and `/draft-prep` is kept separate because it is gated on `is_owner`, not the admin
+password. The same script also seeded a league and left it behind, breaking
+`test_absence_ownership` on the next full run — which is why the real one goes through
+`test_session` and its TRUNCATE teardown.
+
+**Corrections made to my own claims during the session**, recorded because the pattern
+matters more than the instances: "Starlette will remove the old signature" (no removal
+version is named anywhere — it was noise, not a deadline); "32 call sites" (46; the grep
+missed the multi-line form); and a suspected bug in the draft label matcher that turned
+out to be an artifact of calling `_drafted_this_season` with an empty `presence` map.
 
 ---
 
