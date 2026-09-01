@@ -67,6 +67,14 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   `status_code` and `headers`, so any positional third argument breaks. Leaving
   `"request"` in the context dict is harmless (Starlette `setdefault`s it), which is why
   the three `_*_ctx` helpers still inject it.
+- **Every HTML page has a render sweep** (`tests/test_pages_render.py`). It asserts
+  **200**, not "not 500": an ad-hoc version of this passed while 26 of 35 routes were
+  quietly 303-ing to `/who`, because an admin cookie doesn't satisfy the site-wide gate
+  for manager pages. It parametrizes over an EXPLICIT path list, not `app.routes` —
+  deriving would sweep in the POST and `/v1` routes and would silently stop covering a
+  page that lost `response_class=HTMLResponse`. A companion test compares the literal
+  list against the app's declared routes, so adding a page fails loudly until it's
+  covered. `/draft-prep` is separate: it is gated on `is_owner`, not the admin password.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
