@@ -45,14 +45,20 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   Both that check and the alembic-on-PATH check live in `pytest_configure`, **not** in
   the `test_engine` fixture: a session-fixture failure is cached and re-raised per
   dependent test, which is what turned one unactivated venv into 585 identical errors.
-- **The three committing test files are refused by default.** `test_audit.py` /
-  `test_demo.py` / `test_sync_freeze.py` build sessions from `DATABASE_URL` (which
-  `db.py` resolves via `load_dotenv()`, i.e. **production Neon** on a dev machine) and
-  commit. `pytest_collection_modifyitems` skips them unless `ALLOW_COMMITTING_DB_TESTS=1`,
-  naming the host it refused. **A plain `pytest` is now safe** — the old convention of
-  hand-typing three `--ignore` flags is obsolete, and shouldn't be revived: it failed on
-  2026-08-24 because zsh doesn't word-split an unquoted `$IG`, and they hit prod twice.
-  A full run is `1068 passed, 18 skipped`; those 18 are the refusal, not lost coverage.
+- **No test may open its own `SessionLocal`.** `from db import SessionLocal` binds a COPY
+  of the sessionmaker, which `test_session`'s monkeypatch cannot reach — so the module
+  keeps talking to `DATABASE_URL`, i.e. **production Neon** on a dev machine (`db.py`
+  calls `load_dotenv()`). Three files did exactly that; two of them wrote to production
+  on 2026-08-18, and they were skipped-by-default for a year to contain it. **Converted
+  2026-08-31** onto `test_session`, so a full run is now `1088 passed, 0 skipped`.
+  The old `COMMITTING_DB_MODULES` refusal is gone, replaced by
+  `tests/test_meta.py::test_no_test_module_imports_sessionlocal_from_db` — an ACTIVE
+  guard, because an allowlist emptied of members is a guard that can never fire.
+  The rationale recorded for those skips ("they test code that commits internally, and a
+  rollback fixture can't cover that") was wrong on both halves: `record_audit` does not
+  commit (it joins the caller's transaction on purpose), and `test_session` is not
+  rollback-based — it TRUNCATEs, so it tolerates commits. `sync.SessionLocal` is patched
+  too, so a sync task's own internal commits land in the test DB and can be read back.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and

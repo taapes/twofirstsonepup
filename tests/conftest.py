@@ -79,63 +79,6 @@ def pytest_configure(config):
         )
 
 
-# Test modules that build their sessions from db.SessionLocal() — i.e. from
-# DATABASE_URL — and COMMIT. That is deliberate and correct: they cover code that
-# commits internally (services.record_audit, the sync.* tasks), which a rollback-based
-# fixture cannot test. The defect is that nothing about DATABASE_URL says "test", and
-# db.py calls load_dotenv(), so on any dev machine with a normal .env they connect to
-# PRODUCTION Neon and commit there.
-#
-# The convention used to be "remember to pass --ignore for these three". On 2026-08-24
-# that convention failed on a shell detail (zsh does not word-split an unquoted "$IG",
-# so all three flags arrived as one unmatched path and pytest dropped them silently)
-# and they ran against production twice. A guard that needs a correctly hand-typed flag
-# every time is not a guard, so the default is now inverted: they are refused unless
-# the caller has deliberately pointed them somewhere safe.
-COMMITTING_DB_MODULES = frozenset(
-    {"test_audit.py", "test_demo.py", "test_sync_freeze.py"}
-)
-
-
-def _committing_tests_refusal():
-    """Return a refusal reason, or None if the caller has sanctioned these tests.
-
-    ONE sanction only, and deliberately not "DATABASE_URL == TEST_DATABASE_URL":
-    `test_engine` above asserts the two must DIFFER, so equality would trade a prod
-    write for a failure in every other DB-backed test. Anyone who wants these to run
-    must say so outright, ideally with DATABASE_URL pointed at a scratch database.
-    """
-    if os.getenv("ALLOW_COMMITTING_DB_TESTS"):
-        return None
-
-    db_url = os.getenv("DATABASE_URL")
-    # Host only — never echo credentials into test output.
-    where = "an unset DATABASE_URL"
-    if db_url:
-        where = db_url.split("@")[-1].split("/")[0] if "@" in db_url else db_url
-    return (
-        f"refused: this module COMMITS to DATABASE_URL ({where}). Set "
-        "ALLOW_COMMITTING_DB_TESTS=1 to allow it, and point DATABASE_URL at a "
-        "scratch database first unless you mean to write there."
-    )
-
-
-def pytest_collection_modifyitems(config, items):
-    """Refuse the committing modules by default, so a plain `pytest` cannot reach prod.
-
-    A skip (not a deselect) on purpose: these must stay VISIBLE in the summary. The
-    whole point of this file is that invisible skips get misread as coverage.
-    """
-    reason = _committing_tests_refusal()
-    if reason is None:
-        return
-
-    skip = pytest.mark.skip(reason=reason)
-    for item in items:
-        if os.path.basename(str(item.path)) in COMMITTING_DB_MODULES:
-            item.add_marker(skip)
-
-
 @pytest.fixture(scope="session")
 def test_engine():
     url = os.getenv("TEST_DATABASE_URL")
