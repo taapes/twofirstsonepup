@@ -155,6 +155,44 @@ def _squad_lines(db, league, gw_number) -> dict:
     return out
 
 
+def standings_coverage(db, league, gw_number: int, standings) -> dict:
+    """How many gameweeks the STORED standings actually include.
+
+    FPL updates its H2H table when it finalises a gameweek, which can lag the final
+    whistle by a day. So `get_standings` can legitimately return a table that predates
+    the gameweek being reviewed, and labelling it "after this gameweek" hands the model a
+    false fact it has been told to trust.
+
+    Found on the real GW2 (2026-09-01): every record read 1W-0L, Michael sat top on 81
+    points-for having just scored 23, and the header claimed the table was current. This
+    is the same class of error the no-arithmetic rule guards against, but on the INPUT
+    side — the persona tells the model every figure it is given is authoritative, so a
+    stale number gets laundered into a confident sentence.
+
+    `matches_won + drawn + lost` is the honest measure: it counts results the table has
+    absorbed, whatever the sync did. Compared against the gameweeks that actually have
+    H2H fixtures up to and including this one.
+    """
+    from models import Gameweek, Match
+
+    played = max(
+        (
+            (r.get("matches_won") or 0)
+            + (r.get("matches_drawn") or 0)
+            + (r.get("matches_lost") or 0)
+        )
+        for r in standings
+    ) if standings else 0
+    expected = (
+        db.query(Gameweek.number)
+        .join(Match, Match.gameweek_id == Gameweek.id)
+        .filter(Gameweek.league_id == league.id, Gameweek.number <= gw_number)
+        .distinct()
+        .count()
+    )
+    return {"played": played, "expected": expected, "current": played >= expected}
+
+
 def build_prompt(db, league, gw_number: int) -> str:
     """Everything the model is allowed to know, as plain text.
 
@@ -187,7 +225,26 @@ def build_prompt(db, league, gw_number: int) -> str:
                     f"{s['in']['name']} came off the bench for {s['in']['points']} pts"
                 )
 
-    parts += ["", "STANDINGS after this gameweek", ""]
+    coverage = standings_coverage(db, league, gw_number, standings)
+    if coverage["current"]:
+        parts += ["", "STANDINGS after this gameweek", ""]
+    else:
+        through = coverage["played"]
+        covers = f"through GW{through}" if through else "no gameweeks yet"
+        # Stated as a restriction, not a footnote. The model is instructed elsewhere to
+        # treat every supplied figure as authoritative, so the only safe move is to tell
+        # it plainly what this table is not.
+        parts += [
+            "",
+            f"STANDINGS — STALE. These do NOT include GW{gw_number}.",
+            "",
+            f"  FPL has not yet finalised its table for this gameweek; what follows "
+            f"covers {covers}.",
+            "  Do NOT present this as the current table, do NOT say who leads the "
+            "league or is bottom of it, and do NOT describe anyone as rising or "
+            "falling. Use the match results above for anything about form or position.",
+            "",
+        ]
     for row in standings:
         parts.append(
             f"  {row['rank']}. {row['manager']} — {row['total']} pts "

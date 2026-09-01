@@ -905,6 +905,19 @@ its own angles, plus the deterministic `services.matchup_analysis` sentence as t
 authoritative result, and `PERSONA` states that every figure is supplied and none may be
 computed, totalled, ranked or inferred. That is the accepted trade for letting it choose
 what's notable.
+**The STANDINGS block verifies its own label** (`ai_content.standings_coverage`). FPL
+finalises its H2H table up to a day after the final whistle, so `get_standings` can
+legitimately return a table that predates the gameweek being reviewed — on the real GW2
+every record read 1W-0L and the top manager sat on 81 points-for having just scored 23,
+under a header claiming the table was current. This is the no-arithmetic problem on the
+INPUT side: the persona tells the model every supplied figure is authoritative, so a
+stale one is laundered into a confident sentence. Coverage is measured as
+`matches_won + drawn + lost` (results the table has absorbed, whatever the sync did)
+against the gameweeks that actually have `Match` rows through this one; when it falls
+short the block is headed **STALE** and the model is instructed not to name a leader or
+describe anyone as rising. Deliberately NOT re-derived from `Match` rows — that would
+fork the review from what `/standings` shows, and the site being a day behind FPL is a
+sync fact, not a bug to paper over in one reader.
 Gated on **fixture progress** (`gw_fixture_progress`, the same test the Discord gameweek
 summary uses, so the two can't disagree), never `services.gw_finished` — that's ANY
 finished H2H match, and `Match.finished` is FPL's scoring-lock, which lags by hours.

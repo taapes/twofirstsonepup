@@ -31,6 +31,7 @@ from models import (
     Match,
     Player,
     PlayerSeason,
+    Standing,
 )
 from rules import AI_MIN_REGENERATE_SECONDS, MAX_AI_CALLS_PER_GW, RuleViolation
 
@@ -240,6 +241,77 @@ def test_the_prompt_carries_the_facts_and_not_the_arithmetic(test_session):
     assert "result: John wins 63–41." in prompt
     assert "STANDINGS" in prompt
     assert "Saka (MID, ARS)" in prompt, "per-player rows, so it can find its own angles"
+
+
+def _two_gameweeks_of_matches(test_session, lg, john, ann):
+    """A GW1 fixture and match alongside the GW2 ones _seed already made."""
+    gw1 = test_session.query(Gameweek).filter_by(league_id=lg.id, number=1).one()
+    test_session.add(Fixture(league_id=lg.id, fpl_fixture_id=300, event=1,
+                             home_team="A", away_team="B", finished=True))
+    test_session.add(Match(league_id=lg.id, gameweek_id=gw1.id,
+                           home_manager_id=ann.id, away_manager_id=john.id))
+    test_session.commit()
+
+
+def _standings(test_session, lg, john, ann, *, played):
+    for i, m in enumerate((john, ann)):
+        test_session.add(Standing(
+            league_id=lg.id, manager_id=m.id, rank=i + 1, total=3 * played,
+            points_for=100, points_against=90,
+            matches_won=played, matches_drawn=0, matches_lost=0))
+    test_session.commit()
+
+
+def test_standings_that_predate_the_gameweek_are_labelled_stale(test_session):
+    """FPL finalises its H2H table up to a day after the final whistle, so the stored
+    standings can legitimately predate the gameweek being reviewed. Labelling them
+    "after this gameweek" hands the model a false fact it is told to trust — the real
+    GW2 shipped with a manager top of the table on 81 points-for having just scored 23.
+    """
+    lg, john, ann = _seed(test_session)
+    _two_gameweeks_of_matches(test_session, lg, john, ann)
+    _standings(test_session, lg, john, ann, played=1)
+
+    prompt = ai_content.build_prompt(test_session, lg, GW)
+    assert "STANDINGS — STALE. These do NOT include GW2." in prompt
+    assert "covers through GW1" in prompt
+    assert "STANDINGS after this gameweek" not in prompt
+    # The restriction has to be an instruction, not a footnote.
+    assert "do NOT say who leads the league" in prompt
+
+
+def test_standings_that_include_the_gameweek_are_labelled_current(test_session):
+    lg, john, ann = _seed(test_session)
+    _two_gameweeks_of_matches(test_session, lg, john, ann)
+    _standings(test_session, lg, john, ann, played=2)
+
+    prompt = ai_content.build_prompt(test_session, lg, GW)
+    assert "STANDINGS after this gameweek" in prompt
+    assert "STALE" not in prompt
+
+
+def test_coverage_counts_absorbed_results_not_synced_gameweeks(test_session):
+    """`matches_won + drawn + lost` is the measure — it counts results the table has
+    absorbed whatever the sync did, so a draw counts and a manager with no row doesn't
+    drag the answer down."""
+    lg, john, ann = _seed(test_session)
+    _two_gameweeks_of_matches(test_session, lg, john, ann)
+    test_session.add(Standing(league_id=lg.id, manager_id=john.id, rank=1, total=4,
+                              points_for=100, points_against=90,
+                              matches_won=1, matches_drawn=1, matches_lost=0))
+    test_session.commit()
+
+    st = services.get_standings(test_session, lg)
+    cov = ai_content.standings_coverage(test_session, lg, GW, st)
+    assert cov == {"played": 2, "expected": 2, "current": True}
+
+
+def test_coverage_on_an_empty_table_does_not_crash(test_session):
+    """Preseason, or a league whose first sync hasn't landed."""
+    lg, john, ann = _seed(test_session)
+    cov = ai_content.standings_coverage(test_session, lg, GW, [])
+    assert cov["played"] == 0 and cov["current"] is False
+    assert "STANDINGS — STALE" in ai_content.build_prompt(test_session, lg, GW)
 
 
 def test_a_manager_note_reaches_the_prompt(test_session):
