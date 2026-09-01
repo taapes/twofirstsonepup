@@ -201,6 +201,10 @@ def home(request: Request, db: Session = Depends(get_db)):
         # rest of the week wouldn't pay for.
         if services.gameweek_is_live(db, league):
             ctx["scoreboard"] = services.get_scoreboard(db, league)
+        # A STORED ROW READ ONLY. Generation happens in the post-sync hook and must
+        # never happen in a request handler — CLAUDE.md's architecture rule, and the
+        # difference between a page load and a paid API call.
+        ctx["gw_review"] = services.latest_gw_review(db, league)
         ctx.update(
             standings=services.get_standings(db, league),
             flags=services.get_flags(db, league),

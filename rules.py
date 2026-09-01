@@ -601,6 +601,23 @@ XI_SIZE = sum(XI_POSITION_MINIMUMS.values()) + 4   # 11
 
 
 
+# ---- AI-generated content ----
+# The gameweek review (docs/BACKLOG.md, "AI enhancements epic"). Constants here so the
+# spend guards are visible next to every other league rule rather than buried in the
+# module that spends the money.
+AI_REVIEW_KIND = "gw_review"
+
+# Attempts per (league, gameweek, kind), counting FAILURES. A cap that only counted
+# successes would be no cap at all against a persistently failing key — which is the
+# exact scenario where a runaway would go unnoticed, since nothing is being produced to
+# look at.
+MAX_AI_CALLS_PER_GW = 5
+
+# A regenerate button is a thing people double-click. Cheap at four cents, but the cap
+# above is the real budget and this stops one impatient click burning a fifth of it.
+AI_MIN_REGENERATE_SECONDS = 300
+
+
 # ---- Projected auto-substitutions ----
 # FPL applies bench substitutions only when a gameweek is FINALISED, so a live score
 # shows a manager carrying a hole that FPL will later fill. Measured on 2026-08-30

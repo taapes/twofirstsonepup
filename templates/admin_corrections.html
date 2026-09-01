@@ -137,6 +137,33 @@
 </div>
 {% endif %}
 
+<h2>Gameweek review — what the writer knows about each manager</h2>
+{# Feeds the AI gameweek review's prompt. Kept editable rather than in a code constant
+   because the tone is the whole deliverable and league in-jokes move faster than
+   deploys. Keyed on the PERSON, so these survive the season rollover. #}
+<div class="card" style="padding:10px;overflow-x:auto">
+  <p class="sub">One line of standing context each — e.g. "the league favourite and
+    insufferable about it, never flatter him". Leave blank for none. Blank deletes.</p>
+  <table class="stats">
+    <tbody>
+    {% for n in manager_notes %}
+      <tr>
+        <td style="white-space:nowrap;vertical-align:middle">{{ n.person }}</td>
+        <td>
+          <form method="post" action="/admin/ai/manager-note"
+                style="display:flex;gap:6px">
+            <input type="hidden" name="person" value="{{ n.person }}">
+            <input name="note" value="{{ n.note }}" autocomplete="off"
+                   style="width:100%" placeholder="nothing in particular">
+            <button class="mini" type="submit">Save</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
 <h2>From Discord
   <span class="sub">({{ discord_queue|length }} awaiting review)</span></h2>
 {# Nothing here has been applied. A proposal is deliberately PARTIAL — an IL post

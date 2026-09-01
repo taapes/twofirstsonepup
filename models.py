@@ -613,6 +613,87 @@ class DiscordIngest(Base):
     )
 
 
+class AiGeneratedContent(Base):
+    """A generated piece of prose — currently the gameweek review.
+
+    One row per (league, gameweek, kind), and a regenerate UPDATES it in place rather
+    than inserting a second row. That is the deliberate divergence from
+    `DiscoveryMatchSuggestion`, whose whole point is keeping every candidate forever: a
+    discovery pick genuinely benefits from a decision history, a superseded gameweek
+    review does not. Nothing downstream ever wants the previous draft.
+
+    `status` is what keeps generated prose off Discord until a human sends it. It only
+    becomes `'posted'` through the admin route — the post-sync hook has no sending code
+    path at all. Two independent places, because a model cannot tell when a joke lands
+    badly on a particular person in a particular week, and a chat message cannot be
+    unsent.
+
+    TRAP for the epic's later sub-items: in Postgres a NULL `gameweek_id` defeats the
+    UNIQUE constraint, because NULL != NULL. Harmless for `gw_review`, which always sets
+    it; a live problem for the planned trade-commentary rows, which key off a trade
+    instead and would silently duplicate.
+    """
+
+    __tablename__ = "ai_generated_content"
+    __table_args__ = (
+        UniqueConstraint(
+            "league_id", "gameweek_id", "kind", name="uq_ai_generated_content"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    # Nullable for kinds that aren't gameweek-scoped (see the TRAP above).
+    gameweek_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("gameweeks.id"), nullable=True, index=True
+    )
+    kind: Mapped[str] = mapped_column(String, index=True)  # 'gw_review'
+    status: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="ready"
+    )  # 'ready' | 'posted' | 'discarded' | 'failed'
+    headline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Which model produced it — so a tone change can be attributed after the fact.
+    model: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Why a generation failed, when status='failed'. Surfaced to the commissioner rather
+    # than swallowed: a refusal and a timeout want different responses.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Counts generation ATTEMPTS for this key, including failures — what the per-gameweek
+    # cap is enforced against. A row that failed twice has still cost two calls.
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    generated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ManagerNote(Base):
+    """A line of standing context about one manager, for the review's prompt.
+
+    e.g. "the league favourite and insufferable about it — never flatter him". Editable
+    by the commissioner without a deploy, because league in-jokes move faster than
+    releases and the tone is the whole deliverable.
+
+    KEYED ON THE PERSON, with no `league_id` and no `managers.id` FK — deliberately.
+    `managers` holds one row per manager PER SEASON, so an FK would need re-entering at
+    every rollover: exactly the trap `Manager.discord_user_id` documents, which cost the
+    league every mapping at the 26/27 rollover. A note about a human is true across
+    seasons. Same person-name precedent as `Trade.condition_manager_name` and
+    `FuturePick.owner`; matched against `Manager.display`.
+    """
+
+    __tablename__ = "manager_notes"
+    __table_args__ = (UniqueConstraint("person", name="uq_manager_note_person"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    person: Mapped[str] = mapped_column(String, index=True)  # Manager.display
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class DiscordAlert(Base):
     """One commissioner alert already pushed to Discord. Purely a dedupe ledger.
 

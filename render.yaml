@@ -52,6 +52,11 @@ services:
         sync: false
       - key: DISCORD_IL_CHANNEL_ID
         sync: false
+      # AI gameweek review. Billable — a leaked key spends real money, so sync: false
+      # and dashboard-only, same as the rest. OFF when unset. Deliberately absent from
+      # the demo service below: the demo must never bill the real account.
+      - key: ANTHROPIC_API_KEY
+        sync: false
 
   # --- Demo sandbox: same code, separate Neon branch DB, passwordless login. ---
   # Point DATABASE_URL at a Neon BRANCH of prod (instant copy); prod is untouched.

@@ -1067,6 +1067,7 @@ def run_sync(force: bool = False) -> dict:
     # Its own session: `league` above belongs to a session that has already closed, and
     # the announcer commits per row. run_outbound applies the frozen-season skip and
     # the feature-off check itself, so there is nothing to guard here.
+    import ai_content
     import discord_bridge
 
     with SessionLocal() as db:
@@ -1075,4 +1076,10 @@ def run_sync(force: bool = False) -> dict:
             "in": discord_bridge.run_inbound(db, current),
             "out": discord_bridge.run_outbound(db, current),
         }
-    return {"ok": True, "plan": plan, "phase_advanced": advanced, "discord": discord}
+        # The gameweek review. GENERATES ONLY — it has no path that posts anywhere, by
+        # design: a model can't tell when a joke lands badly on a particular person in a
+        # particular week, so the commissioner reads it and presses send. It holds its
+        # own frozen-season / feature-off / already-generated guards and cannot raise.
+        ai = ai_content.run_after_sync(db, current)
+    return {"ok": True, "plan": plan, "phase_advanced": advanced,
+            "discord": discord, "ai": ai}

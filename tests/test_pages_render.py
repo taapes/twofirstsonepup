@@ -48,6 +48,7 @@ ADMIN_SESSION_PAGES = [
     "/scoreboard",
     "/cups",
     "/history",
+    "/reviews",
     "/seasons",
     # admin-only (the inner is_admin gate)
     "/admin/health",

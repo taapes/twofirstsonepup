@@ -46,6 +46,7 @@ from rules import (
     CONDITION_NOT_MET,
     CONDITION_PENDING,
     CONDITION_PLAYER_METRICS,
+    AI_REVIEW_KIND,
     CONDITION_MANUAL,
     CONDITION_LOGIC_ALL,
     CONDITION_LOGIC_ANY,
@@ -6513,6 +6514,128 @@ def _same_person(a: str | None, b: str | None) -> bool:
     return a.strip().lower() == b.strip().lower()
 
 
+# ---- AI-generated content (read side) ---------------------------------------
+# Generation lives in ai_content.py and only ever runs from the post-sync hook. These are
+# the reads a page view is allowed to do.
+
+def latest_gw_review(db: Session, league: League) -> dict | None:
+    """The most recent gameweek review worth showing, or None.
+
+    Excludes 'discarded' and 'failed': a discarded review was a deliberate decision and
+    a failed one is a diagnostic, not content. Both stay queryable on /reviews.
+    """
+    from models import AiGeneratedContent, Gameweek
+
+    row = (
+        db.query(AiGeneratedContent, Gameweek)
+        .join(Gameweek, Gameweek.id == AiGeneratedContent.gameweek_id)
+        .filter(AiGeneratedContent.league_id == league.id,
+                AiGeneratedContent.kind == AI_REVIEW_KIND,
+                AiGeneratedContent.status.in_(("ready", "posted")),
+                AiGeneratedContent.content.isnot(None))
+        .order_by(Gameweek.number.desc())
+        .first()
+    )
+    if row is None:
+        return None
+    content, gw = row
+    return {
+        "id": str(content.id), "gameweek": gw.number, "headline": content.headline,
+        "content": content.content, "status": content.status, "model": content.model,
+        "generated_at": content.generated_at,
+        "paragraphs": [p.strip() for p in (content.content or "").split("\n\n") if p.strip()],
+    }
+
+
+def gw_reviews(db: Session, league: League) -> list[dict]:
+    """Every review for this league, newest gameweek first — including discarded and
+    failed ones, so /reviews is an honest record rather than a highlight reel."""
+    from models import AiGeneratedContent, Gameweek
+
+    rows = (
+        db.query(AiGeneratedContent, Gameweek)
+        .join(Gameweek, Gameweek.id == AiGeneratedContent.gameweek_id)
+        .filter(AiGeneratedContent.league_id == league.id,
+                AiGeneratedContent.kind == AI_REVIEW_KIND)
+        .order_by(Gameweek.number.desc())
+        .all()
+    )
+    return [
+        {"id": str(c.id), "gameweek": gw.number, "headline": c.headline,
+         "content": c.content, "status": c.status, "model": c.model,
+         "error": c.error, "attempts": c.attempts, "generated_at": c.generated_at,
+         "paragraphs": [p.strip() for p in (c.content or "").split("\n\n") if p.strip()]}
+        for c, gw in rows
+    ]
+
+
+def set_review_status(db: Session, league: League, gw_number: int, status: str) -> dict:
+    """Mark a review posted or discarded. The ONLY writer of 'posted'.
+
+    Deliberately narrow: `ai_content` has no path that sets this, so generation can never
+    put something in front of the league. See that module's docstring.
+    """
+    import ai_content
+
+    if status not in ("ready", "posted", "discarded"):
+        raise RuleViolation(f"unknown review status {status!r}")
+    row = ai_content.existing_review(db, league, gw_number)
+    if row is None:
+        raise RuleViolation(f"no GW{gw_number} review to update")
+    row.status = status
+    record_audit(db, league, action="ai.review.status",
+                 summary=f"GW{gw_number} review marked {status}",
+                 details={"gameweek": gw_number, "status": status})
+    db.commit()
+    return {"gameweek": gw_number, "status": status}
+
+
+def manager_notes(db: Session, league: League) -> list[dict]:
+    """One row per CURRENT manager, with their standing note (blank if unset).
+
+    Driven off the managers, not off the notes table, so the admin form always lists
+    everyone — including whoever has no note yet, who is the person you actually want to
+    write one for.
+    """
+    from models import ManagerNote
+
+    notes = {n.person: n.note for n in db.query(ManagerNote)}
+    return [
+        {"person": m.display, "note": notes.get(m.display) or ""}
+        for m in db.query(Manager).filter_by(league_id=league.id)
+        .order_by(Manager.display_name)
+    ]
+
+
+def set_manager_note(db: Session, league: League, person: str, note: str) -> dict:
+    """Upsert one manager's standing note. Blank deletes it.
+
+    Keyed on the PERSON, so it survives the rollover — see ManagerNote's docstring for
+    why an FK would not.
+    """
+    from models import ManagerNote
+
+    person = (person or "").strip()
+    if not person:
+        raise RuleViolation("which manager?")
+    row = db.query(ManagerNote).filter_by(person=person).one_or_none()
+    text = (note or "").strip()
+    if not text:
+        if row is not None:
+            db.delete(row)
+            db.commit()
+        return {"person": person, "note": ""}
+    if row is None:
+        row = ManagerNote(person=person)
+        db.add(row)
+    import datetime as _dt
+
+    row.note = text
+    row.updated_at = _dt.datetime.now(_dt.timezone.utc)
+    db.commit()
+    return {"person": person, "note": text}
+
+
 # ---- Discord ingest queue ----------------------------------------------------
 # Proposals parsed from Discord. NOTHING here applies itself — see the DiscordIngest
 # docstring for why that is permanent rather than cautious. These functions are the
@@ -8973,6 +9096,9 @@ def corrections_data(db: Session, league: League) -> dict:
         # Main-draft picks the keeper derivation can't read. data_health reports them;
         # this is what lets the commissioner actually clear one.
         "unresolved_picks": unresolved_draft_picks(db, league),
+        # Standing per-manager context for the gameweek review's prompt. Editable here
+        # because league in-jokes move faster than deploys.
+        "manager_notes": manager_notes(db, league),
     }
 
 

@@ -75,7 +75,7 @@ reflects the commissioner's explicit request to move conditional pick trades and
 | 3 | **Item 9** — IL backfill form search by name | Self-service IL/international placement (done 2026-08-24) now covers the common case, lowering urgency, but this is still the right fix for the admin-only historical path. |
 | 4 | **Item 16** — historical GK IL backfill refused once goalie teams are on | **Premise settled 2026-08-24: `goalie_team_mode` is `off` for 26/27 and the commissioner confirmed that is deliberate.** So `_refuse_goalkeeper_list_move` cannot fire this season and this is latent, not live — safe to leave here or drop further. |
 | 5 | **Item 11** — preflight "rollover NOT done" detection fix | Matters most right before the *next* draft (2027), not urgently now. |
-| 6 | **Item 19** — AI enhancements epic, sub-item 1 (GW review/banter) | Largest, most novel item on this list (new dependency, new outbound integration pattern) — sequenced after the smaller/safer items and after the pick-trade item has proven the newer trade-related surface, but has the highest ceiling for visible payoff. |
+| ~~6~~ | ~~**Item 19** — AI enhancements epic, sub-item 1 (GW review/banter)~~ | **Done 2026-09-01.** Sub-items 2-4 remain open. |
 | 7 | **Item 14** — scheduled keeper lock / draft open | Not time-critical until closer to the *next* draft/keeper-lock cycle. |
 | ~~8~~ | ~~**Item 15** — Discord webhook trade announcements~~ | **Done 2026-08-29**, plus commissioner alerts. Built as session 2 of the Discord bridge. |
 
@@ -2436,7 +2436,35 @@ under conditions it cannot evaluate, so no future clause is lost for lack of a c
 **Priority:** `P2` — logged as an epic with sequenced sub-items; sequencing not finally
 committed (research recommends sub-item 1 first). See `docs/SESSION_PLANS.md` for
 sub-item 1's full build session prompt.
-**Status:** `open`
+**Status:** `sub-item 1 done 2026-09-01; 2-4 open`
+
+**Sub-item 1 shipped 2026-09-01** as `ai_content.py` + `ai_generated_content` /
+`manager_notes` (migration `e8f9a0b1c2d3`), the homepage card, `/reviews`, and four admin
+routes. `tests/test_ai_review.py` (22 tests, no network — `generate=` is injected).
+Details in `CLAUDE.md`; the plumbing sub-items 2-4 reuse is `ai_content.api_key`,
+`call_model`, `ensure_review`'s cap/interval/upsert shape, and `manager_notes`.
+
+Three things the build settled that the sub-items inherit:
+- **Posting is manually approved, generation is not** — the commissioner's explicit
+  requirement, and now the feature's defining property. Any new AI surface must keep it:
+  generate and store automatically, send only on a click.
+- **The model is never asked to do arithmetic.** It gets raw rows plus the deterministic
+  `matchup_analysis` sentence as the authoritative result. Sub-item 3 (waiver-wire) is
+  the one where this bites hardest — a recommendation is an inference, not a quoted
+  number, so it needs its own thinking about what is asserted vs. computed.
+- **`PERSONA` is the deliverable and no test can assess it.** Budget tuning time after
+  the first real reviews rather than treating the tone as shipped.
+
+Three recorded design details were **wrong** and are corrected here so the next sub-item
+doesn't repeat them: the post-sync hook is in `sync.py`'s `run_sync`, **not `main.py`**;
+gate on `gw_fixture_progress`, **not `services.gw_finished`** (ANY finished H2H match, and
+`Match.finished` is FPL's scoring-lock, hours late); and on Opus 5 `budget_tokens` and
+assistant prefill both **return a 400** — thinking is adaptive, output shaping is
+`output_config.format`.
+
+**Cost was over-stated in the original entry.** Real figure: ~2,500 input / ~500 output
+tokens on `claude-opus-5` is **~$0.04 a gameweek, under $2 a season** including
+regenerations. `MAX_AI_CALLS_PER_GW` exists against a stuck key, not against the bill.
 
 **The ask.** AI-based, pundit-style banter/GW review/next-GW analysis, plus AI analysis
 of the waiver wire (player recommendations) and trade analysis, using the Anthropic API.
@@ -2460,9 +2488,9 @@ Not an oversight.
 **Sub-items (epic, sequencing not finally committed — sub-item 1 recommended first: it's
 the smallest, reuses only already-computed data, and pays for the shared plumbing the
 others reuse):**
-1. **GW review / pundit-style banter** — reuses `get_scoreboard`, `get_standings`,
-   `GameweekPoints` (all already computed, no new query work). **Has a full build
-   session prompt in `docs/SESSION_PLANS.md` — ready to run.**
+1. ~~**GW review / pundit-style banter**~~ — **DONE 2026-09-01.** Reused
+   `get_scoreboard`, `get_standings`, `GameweekPoints` and `matchup_analysis` as
+   predicted; no new query work was needed.
 2. **Next-GW preview/analysis** — near-clone of (1) using already-synced fixtures/roster
    data.
 3. **Waiver-wire recommendations** — flagged as the piece most likely to be

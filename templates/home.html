@@ -40,6 +40,41 @@
   </div>
 {% endif %}
 
+{% if gw_review %}
+  {# Sits between the live scoreboard and the standings: the two never compete, since
+     one renders DURING a gameweek and this only after one. A stored-row read — the
+     generation happens in the post-sync hook, never in a request. #}
+  <h2>GW{{ gw_review.gameweek }}
+    {% if gw_review.headline %}— {{ gw_review.headline }}{% else %}review{% endif %}
+    <a href="/reviews" class="sub" style="font-size:.7rem">all reviews →</a></h2>
+  <div class="card">
+    {# Never |safe: this is model output. #}
+    {% for para in gw_review.paragraphs %}<p>{{ para }}</p>{% endfor %}
+    <p class="sub" style="margin:6px 0 0">
+      Written by {{ gw_review.model or "AI" }} from the final scoreboard and standings.
+      {% if gw_review.status == "posted" %}Posted to Discord.{% endif %}
+    </p>
+    {% if is_admin %}
+    <div style="display:flex;gap:6px;margin-top:8px">
+      {# The ONLY path that posts to Discord. Generation never does — a model can't tell
+         when a joke lands badly, and a chat message can't be unsent. #}
+      {% if gw_review.status != "posted" %}
+      <form method="post" action="/admin/ai/gw-review/{{ gw_review.gameweek }}/post"
+            onsubmit="return confirm('Post this to Discord? The league will see it and it cannot be unsent.')">
+        <button class="mini" type="submit">post to Discord</button>
+      </form>
+      {% endif %}
+      <form method="post" action="/admin/ai/gw-review/{{ gw_review.gameweek }}/regenerate">
+        <button class="mini" type="submit">regenerate</button>
+      </form>
+      <form method="post" action="/admin/ai/gw-review/{{ gw_review.gameweek }}/discard">
+        <button class="mini" type="submit">discard</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+{% endif %}
+
   <h2>Standings{% if is_admin %} <a href="/admin/standings" class="sub" style="font-size:.7rem">adjust →</a>{% endif %}</h2>
   <div class="card">
     {% if standings %}

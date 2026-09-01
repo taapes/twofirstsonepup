@@ -1650,6 +1650,101 @@ def admin_discovery_link(
     return _corrections_redirect()
 
 
+@router.get("/reviews", response_class=HTMLResponse)
+def reviews_page(request: Request, db: Session = Depends(get_db)):
+    """Every gameweek review, newest first — including discarded and failed ones.
+
+    An honest record rather than a highlight reel: a discarded review is a decision worth
+    being able to look back at, and a failed one says the key or the model had a problem.
+    """
+    league = _league_or_404(db)
+    return templates.TemplateResponse(request, "reviews.html", {
+        "request": request, "league": league, "is_admin": is_admin(request),
+        "reviews": services.gw_reviews(db, league),
+    })
+
+
+@router.post("/admin/ai/gw-review/{gw}/regenerate")
+def admin_review_regenerate(gw: int, request: Request, db: Session = Depends(get_db)):
+    """Regenerate one gameweek's review in place. Costs an API call; capped."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/", status_code=303)
+    league = _league_or_404(db)
+    import ai_content
+
+    try:
+        ai_content.ensure_review(db, league, gw, force=True)
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/", status_code=303)
+
+
+@router.post("/admin/ai/gw-review/{gw}/post")
+def admin_review_post(gw: int, request: Request, db: Session = Depends(get_db)):
+    """Send a review to Discord. THE ONLY PATH THAT POSTS ONE.
+
+    Generation is automatic; this is not. A model cannot tell when a joke lands badly on
+    a particular person in a particular week, and a chat message cannot be unsent — so a
+    human reads it first. `ai_content` has no sending code at all.
+    """
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/", status_code=303)
+    league = _league_or_404(db)
+    import ai_content
+    import discord_bridge
+
+    row = ai_content.existing_review(db, league, gw)
+    if row is None or not row.content:
+        return _err(RuleViolation(f"no GW{gw} review to post"))
+    url = discord_bridge.webhook_url(discord_bridge.ALERT_WEBHOOK_ENV)
+    if not url:
+        return _err(RuleViolation(
+            "no Discord webhook is configured, so there's nowhere to post it"
+        ))
+    header = f"📝 **GW{gw}**" + (f" — {row.headline}" if row.headline else "")
+    for message in discord_bridge._chunks([row.content], header=header):
+        if not discord_bridge.post_message(url, message):
+            return _err(RuleViolation("Discord wouldn't take it — try again shortly"))
+    try:
+        services.set_review_status(db, league, gw, "posted")
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/", status_code=303)
+
+
+@router.post("/admin/ai/gw-review/{gw}/discard")
+def admin_review_discard(gw: int, request: Request, db: Session = Depends(get_db)):
+    """Hide a review from the homepage. Kept on /reviews — a decision, not a deletion."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.set_review_status(db, league, gw, "discarded")
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/", status_code=303)
+
+
+@router.post("/admin/ai/manager-note")
+def admin_manager_note(
+    request: Request, db: Session = Depends(get_db),
+    person: str = Form(...), note: str = Form(""),
+):
+    """Set one manager's standing note for the review's prompt.
+
+    Editable here rather than in a code constant because league in-jokes move faster than
+    deploys, and the tone is the whole deliverable.
+    """
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.set_manager_note(db, league, person, note)
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
 @router.post("/admin/corrections/draft/link")
 def admin_draft_pick_link(
     request: Request, db: Session = Depends(get_db),

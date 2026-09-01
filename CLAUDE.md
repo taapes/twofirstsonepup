@@ -37,7 +37,11 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
 - New migration: `alembic revision --autogenerate -m "<message>"`
 - Apply migrations: `alembic upgrade head`
 - Dev deps (tests + local proxy workaround): `uv pip install -r requirements-dev.txt`
-- Tests: `pytest`. Pure rule tests run anywhere; anything touching the DB needs
+- Tests: `pytest`. **This works only because of `pytest.ini`'s `pythonpath = .`** —
+  every module under test is at the repo root while the tests are in `tests/` with no
+  `__init__.py`, so pytest prepends `tests/` alone. Before that file existed a bare
+  `pytest` died at collection ("No module named services") and only `python -m pytest`
+  (which adds CWD) worked, with nothing saying so. Pure rule tests run anywhere; anything touching the DB needs
   `TEST_DATABASE_URL` (local Postgres recipe in `tests/conftest.py`). **Without it the
   run now stops before collection** with `ERROR: TEST_DATABASE_URL is not set` (exit 4)
   — a silent `585 skipped, exit 0` used to read as green and has caused false-green
@@ -883,6 +887,51 @@ a 403** — on a private channel that needs an explicit permission overwrite, si
 guild-level roles don't reach it. `discord_bridge.probe_channel` distinguishes them and
 `data_health` surfaces both. Never retry a 401: 401/403/429 count toward a Cloudflare ban
 at 10,000 per 10 minutes, so a bad token disables the sweep.
+
+**AI gameweek review (`ai_content.py`).** The first PAID outbound call. `claude-opus-5`
+writes a weekly write-up after every finished gameweek; the homepage shows it and
+`/reviews` keeps the history. OFF when `ANTHROPIC_API_KEY` is unset (a logged no-op, the
+`discord_bridge.webhook_url` shape), and generated from `sync.run_sync`'s post-sync block
+— **never in a request handler**, or a page view would cost money.
+**GENERATION IS AUTOMATIC; POSTING IS NOT.** Nothing generated reaches Discord without a
+commissioner click, because a model can't tell when a joke lands badly on a particular
+person in a particular week and a chat message can't be unsent. Enforced in TWO places on
+purpose: `ai_content.py` contains no sending code at all (a test asserts this over the
+AST, since the module's own docstring says so in prose and a substring scan trips on the
+comment documenting the rule), and `status` becomes `'posted'` only via
+`POST /admin/ai/gw-review/{gw}/post`. A homepage card is passive and stays automatic.
+**THE MODEL IS NEVER ASKED TO DO ARITHMETIC.** It gets raw per-player rows so it can find
+its own angles, plus the deterministic `services.matchup_analysis` sentence as the
+authoritative result, and `PERSONA` states that every figure is supplied and none may be
+computed, totalled, ranked or inferred. That is the accepted trade for letting it choose
+what's notable.
+Gated on **fixture progress** (`gw_fixture_progress`, the same test the Discord gameweek
+summary uses, so the two can't disagree), never `services.gw_finished` — that's ANY
+finished H2H match, and `Match.finished` is FPL's scoring-lock, which lags by hours.
+`total == 0` is an unsynced gameweek, not a finished one.
+Spend is bounded by `rules.MAX_AI_CALLS_PER_GW` (which counts FAILURES too — a cap that
+only counted successes is no cap at all against a stuck key, exactly when a runaway goes
+unnoticed because nothing is being produced to look at) and
+`AI_MIN_REGENERATE_SECONDS` against a double-clicked button. A regenerate updates the row
+**in place** — a superseded roast has no value, the deliberate divergence from
+`discovery_match_suggestions`' keep-every-candidate rule.
+`manager_notes` is keyed on **`person` (a String, UNIQUE), with no `league_id` and no FK**
+— `managers` holds one row per manager per season, so an FK would need re-entering at
+every rollover, which is the `discord_user_id` trap; a note about a human is true across
+seasons (the `Trade.condition_manager_name` / `FuturePick.owner` precedent). Editable on
+`/admin/corrections` so the tone can be retuned without a deploy.
+**`PERSONA` is the deliverable and no test can assess it** — funny and entertaining
+first, informative second; affectionate ribbing, easy laughs, occasionally a little mean
+about a THING that happened, never about a PERSON. One named constraint: John is the
+league favourite and obnoxious about it, so he is never flattered — that is a withholding
+of praise, not licence to be harsher with him. The failure mode in one direction is a
+bland recap nobody reads; in the other, a line that makes someone quietly not want to be
+in the league. The first is recoverable by tuning, the second isn't — which is why
+Discord is gated. Expect to tune it after the first few real reviews.
+On Opus 5, `budget_tokens` is a 400 and assistant prefill is a 400: thinking is adaptive,
+output shaping is `output_config.format`. `stop_reason == "refusal"` is handled (teasing
+copy about named people can trip a classifier) and recorded with its reason, because a
+refusal and a timeout want different responses from the commissioner.
 
 **Ineligible players:** a non-DEF added to FPL after the draft (i.e. not in the
 season's `player_pool_snapshot`, captured at rollover) is flagged in

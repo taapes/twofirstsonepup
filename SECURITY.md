@@ -30,11 +30,25 @@ Small private league app (≈10 users) on Render + Neon, session-cookie auth.
 - `DISCORD_TRADE_CHANNEL_ID` / `DISCORD_IL_CHANNEL_ID` — optional. Not secret, but kept
   in env alongside the token so the whole feature is configured in one place.
 
+- `ANTHROPIC_API_KEY` — optional, for the AI gameweek review. A **billable** credential:
+  anyone holding it spends your money, so it is the one secret here whose leak costs
+  directly rather than exposing data. Rotate in the Anthropic Console, which revokes the
+  old key immediately. The review itself is worth ~$0.04 a gameweek, but a leaked key is
+  not bounded by our usage — `rules.MAX_AI_CALLS_PER_GW` caps only what *this app* will
+  spend. Never sent anything but the prompt: league scores, standings and the
+  commissioner's manager notes. No passwords, no emails, no session data.
+
 Reading requires the **MESSAGE CONTENT** privileged intent (it gates the REST API, not
 just the gateway) plus `VIEW_CHANNEL` + `READ_MESSAGE_HISTORY` on each channel — and on
 a private channel that means an explicit permission overwrite, since guild-level roles
 do not reach it. Both misconfigurations fail SILENTLY (blank content, or an empty array
 instead of a 403), so `/admin/health` probes for them.
+
+The AI review is OFF when `ANTHROPIC_API_KEY` is unset, and **generation never posts**
+— `ai_content.py` contains no sending code at all, and a review reaches Discord only when
+the commissioner presses the button on the homepage. That split is the point: a model
+cannot judge when a joke lands badly on a particular person in a particular week, and a
+chat message cannot be unsent.
 
 All Discord features are OFF when their variable is unset — no config UI, no database
 flag — so a fresh checkout, the test suite and the demo sandbox are silent by default.

@@ -17,3 +17,13 @@ python-dotenv==1.1.1
 jinja2==3.1.4
 python-multipart==0.0.18  # form posts (HTMX)
 itsdangerous==2.2.0       # signed session cookies (commissioner login)
+
+# --- AI content generation ---
+# The official Anthropic SDK, NOT raw httpx. A DELIBERATE exception to this repo's
+# dependency-austere posture, recorded in docs/BACKLOG.md's "AI enhancements epic" —
+# typed responses and retry handling are worth one dependency for a feature that is
+# entirely content generation. Do not strip this as an oversight.
+#
+# It brings `httpx2`, a SEPARATE package from the `httpx` above (which sync.py and
+# discord_bridge.py use). Both are installed and both work; they are not in conflict.
+anthropic==1.2.0

@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Gameweek Reviews{% endblock %}
+{% block content %}
+<h1>Gameweek Reviews</h1>
+<p class="sub">Written after each gameweek from the final scoreboard and standings.
+  Discarded and failed ones are kept here too — an honest record rather than a
+  highlight reel.</p>
+
+{% if reviews %}
+  {% for r in reviews %}
+  <h2>GW{{ r.gameweek }}{% if r.headline %} — {{ r.headline }}{% endif %}
+    {% if r.status != "ready" %}<span class="tag">{{ r.status }}</span>{% endif %}</h2>
+  <div class="card">
+    {% if r.paragraphs %}
+      {# Never |safe: model output. #}
+      {% for para in r.paragraphs %}<p>{{ para }}</p>{% endfor %}
+    {% elif r.error %}
+      <p class="sub">Couldn't be written: {{ r.error }}
+        ({{ r.attempts }} attempt{{ "" if r.attempts == 1 else "s" }})</p>
+    {% else %}
+      <p class="sub">No content.</p>
+    {% endif %}
+    <p class="sub" style="margin:6px 0 0">
+      {{ r.model or "—" }} · {{ r.generated_at.strftime("%-d %b %H:%M") if r.generated_at else "—" }}
+    </p>
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="empty">No reviews yet. One is written after each gameweek's fixtures
+    finish, once an Anthropic API key is configured.</div>
+{% endif %}
+{% endblock %}
