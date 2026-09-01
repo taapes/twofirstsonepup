@@ -404,14 +404,19 @@ def test_the_database_itself_refuses_a_second_club_and_a_shared_one(test_session
 
 def test_health_skips_goalkeepers_in_the_keeper_seed_check(test_session):
     """A goalkeeper can never be an individual keeper, so he can never need a seed.
-    Left in, this lists every keeper in the league forever."""
+    Left in, this lists every keeper in the league forever.
+
+    The check was renamed 2026-08-31 ("rostered players have a keeper seed" ->
+    "keeper clocks derivable without a seed") when it was narrowed to managers whose
+    draft record is incomplete; the goalkeeper exclusion is unchanged.
+    """
     lg, mgrs, _clubs, gws = _seed(test_session, mode="redraft")
     squad = _squad(test_session, lg, mgrs, gws)
     for p in squad["A"]["out"] + squad["B"]["out"]:
         test_session.add(KeeperSeed(league_id=lg.id, manager_id=mgrs["A"].id,
                                     player_id=p.id, years_remaining=2))
     test_session.commit()
-    assert _checks(test_session, lg)["rostered players have a keeper seed"]["ok"] is True
+    assert _checks(test_session, lg)["keeper clocks derivable without a seed"]["ok"] is True
 
 
 def test_health_flags_a_submitted_keeper_that_no_longer_counts(test_session):

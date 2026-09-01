@@ -635,6 +635,24 @@ Three layers protect the live data when testing before the draft:
    public picks/trades; the logged-in commissioner can still write. Use it to
    keep data clean outside the live-draft window.
 
+**Two health checks worth understanding.** `"keeper clocks derivable without a seed"`
+was narrowed 2026-08-31: asking every rostered player for a `KeeperSeed` is
+UNSATISFIABLE once a season has a draft board — on 26/27 it reported 105 failures, of
+which 76 were drafted that season and 29 were waiver pickups, all deriving their clock
+from real data. A permanently-red check costs more than it is worth, because it trains
+the reader to ignore the page. It now asks only for managers outside
+`_drafted_this_season`'s `trusted` set, which is precisely "we have no complete draft
+evidence for this manager".
+That surfaced the real signal underneath: `"draft picks resolved to players"`
+(`services.unresolved_draft_picks`). A main-draft pick recorded as free text that never
+resolves costs its manager `trusted` status, so his WHOLE squad falls back to the "on
+the GW1 roster" proxy, which over-grants a draft-length clock to a preseason free-agent
+signing. It reports only picks the DERIVATION cannot read — resolution happens in memory
+and is never written back, so a `player_id IS NULL` filter alone over-reports two of the
+three 26/27 label picks. Cleared with `services.link_draft_pick` on `/admin/corrections`
+(a sibling of `link_discovery_pick`, which is discovery-only — before it existed the
+check reported a problem nobody could act on).
+
 **Data-quality aids:** idempotent upsert sync; the two-truths boundary (sync never
 overwrites custom data); trade reconciliation (site+FPL dedupe); the standings
 audit log; `GET /admin/health` runs integrity checks (roster sizes, standings

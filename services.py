@@ -8316,6 +8316,128 @@ def _discovery_pick_or_404(
     return row
 
 
+def unresolved_draft_picks(db: Session, league: League) -> list[dict]:
+    """MAIN-draft picks recorded as free text that never resolved to a player.
+
+    A pick is recorded as a label when the player had no `players` row on draft night
+    (`record_pick` takes an fpl id, but three 26/27 picks were entered by hand). The
+    keeper derivation tries to resolve those against that manager's own GW1 roster —
+    a ~15-player haystack — and one that still fails costs its manager `trusted` status
+    in `_drafted_this_season`, so his ENTIRE squad falls back to the "on the GW1 roster"
+    proxy. That proxy over-grants a draft-length clock to anyone signed in preseason
+    free agency, so this is a real cost, not bookkeeping.
+
+    Typically fails because the player was dropped before GW1 and so isn't in the
+    haystack at all — which is exactly the case a human can fix and the matcher can't.
+    """
+    from models import DraftPick
+
+    rows = (
+        db.query(DraftPick, Manager)
+        .join(Manager, Manager.id == DraftPick.manager_id)
+        .filter(DraftPick.season_year == (league.season_year or 0),
+                DraftPick.draft_type == "main",
+                DraftPick.player_id.is_(None),
+                DraftPick.team_id.is_(None),
+                DraftPick.player_label.isnot(None))
+        .order_by(DraftPick.pick_number)
+        .all()
+    )
+    if not rows:
+        return []
+
+    # Report only the picks the DERIVATION cannot read, not every unlinked label.
+    # Resolution happens in memory and is never written back to `player_id`, so a
+    # `player_id IS NULL` filter alone over-reports: of the three 26/27 label picks,
+    # two resolve fine ("Ruben Dias" -> Rúben, "Alex Scott" -> Scott) and flagging them
+    # would send the commissioner after work that is already done. Uses the same
+    # resolver `_drafted_this_season` does, so the check and the derivation cannot
+    # disagree about what "unresolved" means.
+    presence, _il = _roster_presence_and_il_coverage(
+        db, league, current_gameweek(db, league) or 1
+    )
+    gw1: dict = {}
+    for (mid, pid), gws in presence.items():
+        if 1 in gws:
+            gw1.setdefault(mid, set()).add(pid)
+    names = {
+        p.id: p for p in db.query(Player).filter(
+            Player.id.in_({pid for pids in gw1.values() for pid in pids})
+        )
+    } if gw1 else {}
+
+    out = []
+    for dp, m in rows:
+        if _resolve_label_on_roster(dp.player_label, gw1.get(m.id, set()), names):
+            continue
+        out.append({"pick_number": dp.pick_number, "manager": m.display,
+                    "label": dp.player_label, "season_year": dp.season_year})
+    return out
+
+
+def link_draft_pick(
+    db: Session, league: League, *, season_year: int, pick_number: int,
+    player_fpl_id: int,
+) -> dict:
+    """Attach a real `players` row to a free-text MAIN-draft pick.
+
+    The sibling of `link_discovery_pick`, and admin-only for the same reason: `Player.name`
+    is FPL's short `web_name` while a manager types whatever they called out, so a fuzzy
+    match is a coin flip and a wrong link hands someone another manager's keeper clock
+    with nothing downstream to flag it.
+
+    Added 2026-08-31 because `data_health` began reporting unresolved main-draft picks and
+    there was no way to act on one — `link_discovery_pick` refuses anything that isn't
+    `draft_type='discovery'`. A check nobody can clear is the same problem as no check.
+
+    `player_label` is kept as entered: it is the record of what was actually called out.
+    """
+    from models import DraftPick
+
+    row = (
+        db.query(DraftPick)
+        .filter_by(league_id=league.id, season_year=season_year,
+                   draft_type="main", pick_number=pick_number)
+        .one_or_none()
+    )
+    if row is None:
+        raise RuleViolation(f"no {season_year} main-draft pick #{pick_number}")
+    if row.team_id is not None:
+        raise RuleViolation("that pick is a goalie team, not a player")
+    player = _resolve_player(db, player_fpl_id)
+
+    if row.player_id == player.id:
+        return {"pick_number": pick_number, "label": row.player_label,
+                "player": player.name, "linked": True, "already": True}
+    if row.player_id is not None:
+        held = db.get(Player, row.player_id)
+        raise RuleViolation(
+            f"pick #{pick_number} is already linked to "
+            f"{held.name if held else row.player_id} — unlink it first"
+        )
+    clash = (
+        db.query(DraftPick)
+        .filter(DraftPick.season_year == season_year,
+                DraftPick.draft_type == "main",
+                DraftPick.player_id == player.id)
+        .first()
+    )
+    if clash is not None:
+        raise RuleViolation(
+            f"{player.name} is already linked to {season_year} pick #{clash.pick_number}"
+        )
+
+    row.player_id = player.id
+    record_audit(db, league, action="draft.pick.link",
+                 summary=f"Linked {season_year} pick #{pick_number} to {player.name}",
+                 manager_ids=[row.manager_id] if row.manager_id else None,
+                 details={"pick_number": pick_number, "label": row.player_label,
+                          "player": player.name})
+    db.commit()
+    return {"pick_number": pick_number, "label": row.player_label,
+            "player": player.name, "linked": True}
+
+
 def link_discovery_pick(
     db: Session, league: League, *, season_year: int, pick_number: int,
     player_fpl_id: int,
@@ -8848,6 +8970,9 @@ def corrections_data(db: Session, league: League) -> dict:
         # new one: it is already where the commissioner corrects trades and links
         # discovery picks, and a Discord proposal is the same kind of work.
         "discord_queue": discord_ingest_queue(db, league),
+        # Main-draft picks the keeper derivation can't read. data_health reports them;
+        # this is what lets the commissioner actually clear one.
+        "unresolved_picks": unresolved_draft_picks(db, league),
     }
 
 
@@ -9254,8 +9379,42 @@ def data_health(db: Session, league: League) -> list[dict]:
             pid for (pid,) in db.query(Player.id).filter(Player.position == "GKP")
         }
         unseeded -= gk_ids
-    add("rostered players have a keeper seed", not unseeded,
-        f"{len(unseeded)} without a seed" if unseeded else "ok")
+
+    # NARROWED 2026-08-31. Asking every rostered player for a seed is unsatisfiable once
+    # a season has a draft board: on 26/27 it reported 105 failures, of which 76 were
+    # drafted this season and 29 were picked up off waivers — both derive their clock
+    # from real data and neither needs a seed. A permanently-red check trains the reader
+    # to ignore the health page, which costs more than the check was ever worth.
+    #
+    # A seed is only genuinely required where the derivation has nothing to work from,
+    # and `_drafted_this_season` already computes exactly that: its `trusted` set is the
+    # managers whose draft evidence is COMPLETE. For anyone else the seed is the only
+    # source of a player's prior keeper years.
+    presence, _il = _roster_presence_and_il_coverage(db, league, gw.number if gw else 1)
+    _drafted, trusted = _drafted_this_season(db, league, presence)
+    if trusted:
+        untrusted_rosters = {
+            pid for (mid, pid) in (
+                db.query(Roster.manager_id, Roster.player_id)
+                .filter_by(gameweek_id=gw.id).all() if gw is not None else []
+            ) if mid not in trusted
+        }
+        unseeded &= untrusted_rosters
+    add("keeper clocks derivable without a seed", not unseeded,
+        f"{len(unseeded)} player(s) held by a manager with no complete draft record — "
+        "see the unresolved draft picks below, which is the cause and the fix"
+        if unseeded else "ok")
+
+    # The signal the check above used to bury. A main-draft pick recorded as free text
+    # that never resolved to a player costs its manager `trusted` status, so his whole
+    # squad falls back to the "on the GW1 roster" proxy — which over-grants a
+    # draft-length clock to anyone signed in preseason free agency.
+    #
+    # Actionable, unlike the old check: link the pick and the manager is trusted again.
+    unresolved_picks = unresolved_draft_picks(db, league)
+    add("draft picks resolved to players", not unresolved_picks,
+        "; ".join(f"pick #{p['pick_number']} {p['manager']} {p['label']!r}"
+                  for p in unresolved_picks) if unresolved_picks else "ok")
 
     # An unlinked discovery pick isn't broken — it's the normal state until the player
     # joins the PL — so this is visibility, not a failure. It goes red only when there

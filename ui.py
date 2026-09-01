@@ -1650,6 +1650,35 @@ def admin_discovery_link(
     return _corrections_redirect()
 
 
+@router.post("/admin/corrections/draft/link")
+def admin_draft_pick_link(
+    request: Request, db: Session = Depends(get_db),
+    season_year: str = Form(...), pick_number: str = Form(...),
+    player_name: str = Form(...),
+):
+    """Attach a real player to a free-text MAIN-draft pick.
+
+    Named by LABEL rather than element id, unlike the discovery form: the fix for an
+    unresolved pick is usually a player who was dropped before GW1, and the accent-aware
+    picker is how a commissioner actually finds him. Deliberately a human decision — see
+    services.link_draft_pick.
+    """
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
+    league = _league_or_404(db)
+    try:
+        player = services.resolve_player_by_label(db, league, player_name)
+        services.link_draft_pick(
+            db, league,
+            season_year=_safe_int(season_year, 2000, 2100, field="season"),
+            pick_number=_safe_int(pick_number, 1, 999, field="pick number"),
+            player_fpl_id=player.fpl_id,
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return _corrections_redirect()
+
+
 @router.post("/admin/corrections/discovery/match")
 def admin_discovery_match_now(request: Request, db: Session = Depends(get_db)):
     """Run the matcher on demand. It also runs daily off the back of a full sync;

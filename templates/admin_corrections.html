@@ -97,6 +97,46 @@
   </datalist>
 </div>
 
+{% if unresolved_picks %}
+<h2>Unreadable draft picks
+  <span class="sub">({{ unresolved_picks|length }})</span></h2>
+{# A main-draft pick recorded as free text that never resolved to a player. It costs its
+   manager "trusted" status in the keeper derivation, so his WHOLE squad falls back to
+   the "on the GW1 roster" proxy — which over-grants a draft-length clock to anyone
+   signed in preseason free agency. Usually unreadable because the player was dropped
+   before GW1, so he isn't in the roster the matcher searches. #}
+<div class="card" style="padding:10px;overflow-x:auto">
+  <table class="stats">
+    <thead><tr><th>Pick</th><th>Manager</th><th>As entered</th><th>Link to</th></tr></thead>
+    <tbody>
+    {% for p in unresolved_picks %}
+      <tr>
+        <td>#{{ p.pick_number }}</td>
+        <td>{{ p.manager }}</td>
+        <td><code>{{ p.label }}</code></td>
+        <td>
+          <form method="post" action="/admin/corrections/draft/link"
+                style="display:flex;gap:6px"
+                onsubmit="return confirm('Link pick #{{ p.pick_number }} to this player? This sets {{ p.manager }}\'s keeper clocks and cannot be told apart from a correct link later.')">
+            <input type="hidden" name="season_year" value="{{ p.season_year }}">
+            <input type="hidden" name="pick_number" value="{{ p.pick_number }}">
+            <input name="player_name" list="playerListFix" autocomplete="off"
+                   placeholder="search by name" style="width:16em" required>
+            <button class="mini" type="submit">Link</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <datalist id="playerListFix">
+    {% for pl in players %}<option value="{{ pl.label }}"></option>
+    {% if pl.alias %}<option value="{{ pl.alias }}"></option>{% endif %}
+    {% endfor %}
+  </datalist>
+</div>
+{% endif %}
+
 <h2>From Discord
   <span class="sub">({{ discord_queue|length }} awaiting review)</span></h2>
 {# Nothing here has been applied. A proposal is deliberately PARTIAL — an IL post
