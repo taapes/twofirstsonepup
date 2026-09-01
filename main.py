@@ -158,7 +158,7 @@ def _error_response(request: Request, status_code: int, message: str):
     if request.headers.get("HX-Request") == "true":
         return PlainTextResponse(message, status_code=status_code)
     return templates.TemplateResponse(
-        "error.html",
+        request, "error.html",
         {"request": request, "status_code": status_code, "message": message},
         status_code=status_code,
     )
@@ -212,7 +212,7 @@ def home(request: Request, db: Session = Depends(get_db)):
             adjustments=services.get_standing_adjustments(db, league),
             ineligible=services.ineligible_players(db, league),
         )
-    return templates.TemplateResponse("home.html", ctx)
+    return templates.TemplateResponse(request, "home.html", ctx)
 
 
 @app.post("/admin/sync", dependencies=[Depends(require_admin)])

@@ -184,7 +184,7 @@ def _board_response(request, db, league, year, draft_type="main", *, error: str 
     RuleViolation must reach the picker through a 200 like this one."""
     ctx = _board_ctx(request, db, league, year, draft_type)
     ctx["pick_error"] = error
-    resp = templates.TemplateResponse("_board.html", ctx)
+    resp = templates.TemplateResponse(request, "_board.html", ctx)
     resp.headers["HX-Trigger"] = "draftChanged"
     return resp
 
@@ -233,7 +233,7 @@ def who(request: Request, db: Session = Depends(get_db)):
     managers = (
         db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
     )
-    return templates.TemplateResponse("who.html", {
+    return templates.TemplateResponse(request, "who.html", {
         "request": request, "league": league, "is_admin": is_admin(request), "hide_nav": True,
         "demo": is_demo(),
         "managers": [
@@ -269,7 +269,7 @@ def manager_login_form(manager_id: str, request: Request, db: Session = Depends(
     )
     if not m:
         raise HTTPException(status_code=404, detail="manager not found")
-    return templates.TemplateResponse("manager_login.html", {
+    return templates.TemplateResponse(request, "manager_login.html", {
         "request": request, "is_admin": is_admin(request), "hide_nav": True,
         "manager": {"name": m.display, "fpl": m.fpl_manager_id},
         "first_time": m.password_hash is None, "error": None,
@@ -290,7 +290,7 @@ def manager_login(
     if m.password_hash is None:
         return RedirectResponse(f"/login?manager_id={manager_id}", status_code=303)
     if not verify_password(password, m.password_hash):
-        return templates.TemplateResponse("manager_login.html", {
+        return templates.TemplateResponse(request, "manager_login.html", {
             "request": request, "is_admin": False, "hide_nav": True,
             "manager": {"name": m.display, "fpl": m.fpl_manager_id},
             "first_time": False, "error": "Incorrect password",
@@ -316,7 +316,7 @@ def set_password(
     if m.password_hash is not None:
         return RedirectResponse(f"/login?manager_id={manager_id}", status_code=303)
     if password != confirm or len(password) < 6:
-        return templates.TemplateResponse("manager_login.html", {
+        return templates.TemplateResponse(request, "manager_login.html", {
             "request": request, "is_admin": False, "hide_nav": True,
             "manager": {"name": m.display, "fpl": m.fpl_manager_id},
             "first_time": True,
@@ -340,7 +340,7 @@ def logout_any(request: Request):
 @router.get("/admin/login", response_class=HTMLResponse)
 def login_form(request: Request, next: str = "/"):
     return templates.TemplateResponse(
-        "login.html", {"request": request, "next": next, "error": None, "is_admin": is_admin(request)}
+        request, "login.html", {"request": request, "next": next, "error": None, "is_admin": is_admin(request)}
     )
 
 
@@ -350,7 +350,7 @@ def login(request: Request, password: str = Form(...), next: str = Form("/")):
         request.session["admin"] = True
         return RedirectResponse(next, status_code=303)
     return templates.TemplateResponse(
-        "login.html",
+        request, "login.html",
         {"request": request, "next": next, "error": "Incorrect password", "is_admin": False},
         status_code=401,
     )
@@ -376,7 +376,7 @@ def _teams_data(db: Session, league, request: Request) -> list[dict]:
 def teams_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     return templates.TemplateResponse(
-        "teams.html",
+        request, "teams.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
          "teams": _teams_data(db, league, request)},
     )
@@ -397,7 +397,7 @@ def team_page(fpl_manager_id: str, request: Request, db: Session = Depends(get_d
         None,
     )
     return templates.TemplateResponse(
-        "team.html",
+        request, "team.html",
         {"request": request, "league": league, "is_admin": is_admin(request), "team": team, "manager": m.display},
     )
 
@@ -412,7 +412,7 @@ def keepers_page(request: Request, db: Session = Depends(get_db)):
     # keepers are only editable in the offseason phase (and not when manually locked);
     # admin can always edit.
     editable = _feature_allowed(request, db, league, "keepers_editable", lock_attr="keepers_locked")
-    return templates.TemplateResponse("keepers_select.html", {
+    return templates.TemplateResponse(request, "keepers_select.html", {
         "request": request, "league": league, "is_admin": is_admin(request),
         "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
         # The draft/keeper cycle this row is actually running — see
@@ -436,7 +436,7 @@ def keepers_candidates(request: Request, db: Session = Depends(get_db)):
         return _forbidden(request, "You can only view your own keeper options.")
     cands = services.keeper_candidates(db, league, fpl) if fpl else None
     return templates.TemplateResponse(
-        "_keeper_candidates.html", {"request": request, "candidates": cands}
+        request, "_keeper_candidates.html", {"request": request, "candidates": cands}
     )
 
 
@@ -448,7 +448,7 @@ def keepers_discovery_search(request: Request, db: Session = Depends(get_db)):
     q = (request.query_params.get("q") or "").strip()
     results = services.search_players(db, league, q=q, sort="points", limit=25) if q else []
     return templates.TemplateResponse(
-        "_discovery_search.html", {"request": request, "results": results}
+        request, "_discovery_search.html", {"request": request, "results": results}
     )
 
 
@@ -497,7 +497,7 @@ def my_team_page(request: Request, db: Session = Depends(get_db)):
     cur = services.current_gameweek(db, league)
     can_edit_il = bool(team) and (is_admin(request) or fpl == current_manager_id(request))
     manager = services._resolve_manager(db, league, fpl) if can_edit_il else None
-    return templates.TemplateResponse("my_team.html", {
+    return templates.TemplateResponse(request, "my_team.html", {
         "request": request, "league": league, "team": team,
         # IL self-service controls (only when viewing your own team / admin)
         "can_edit_il": can_edit_il,
@@ -666,7 +666,7 @@ def my_team_upcoming_page(request: Request, db: Session = Depends(get_db)):
     fpl = _resolve_my_fpl(request, db, league)
     matchups = services.get_upcoming_matchups(db, league, fpl) if fpl else []
     me = services.get_my_team(db, league, fpl) if fpl else None
-    return templates.TemplateResponse("my_team_upcoming.html", {
+    return templates.TemplateResponse(request, "my_team_upcoming.html", {
         "request": request, "league": league,
         "matchups": matchups, "me_name": me["manager"] if me else None,
     })
@@ -684,7 +684,7 @@ def picks_page(request: Request, db: Session = Depends(get_db)):
         for name in (p["original_owner"], p["owner"])
     })
     return templates.TemplateResponse(
-        "picks.html",
+        request, "picks.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
          "future_picks": future_picks, "managers": managers},
     )
@@ -717,7 +717,7 @@ def admin_health(request: Request, db: Session = Depends(get_db)):
     )
     from rules import PHASES
 
-    return templates.TemplateResponse("admin_health.html", {
+    return templates.TemplateResponse(request, "admin_health.html", {
         "request": request, "league": league, "is_admin": True,
         "checks": services.data_health(db, league),
         "writes_locked": league.writes_locked,
@@ -816,7 +816,7 @@ def admin_season(request: Request, db: Session = Depends(get_db)):
          "is_current": lg.is_current, "phase": lg.phase}
         for lg in db.query(_League).order_by(_League.season_year)
     ]
-    return templates.TemplateResponse("admin_season.html", {
+    return templates.TemplateResponse(request, "admin_season.html", {
         "request": request, "league": current, "is_admin": True,
         "current": {"name": current.name, "season": current.season_year,
                     "fpl": current.fpl_league_id} if current else None,
@@ -890,7 +890,7 @@ def admin_season_mapping(
     suggested = services.suggest_manager_pairing(db, old_league, new_league)
     old_mgrs = db.query(_M).filter_by(league_id=old_league.id).order_by(_M.name).all()
     new_mgrs = db.query(_M).filter_by(league_id=new_league.id).order_by(_M.name).all()
-    return templates.TemplateResponse("admin_season_mapping.html", {
+    return templates.TemplateResponse(request, "admin_season_mapping.html", {
         "request": request, "league": old_league, "is_admin": True,
         "new_fpl": new_league.fpl_league_id,
         "new_season": new_league.season_year,
@@ -1016,7 +1016,7 @@ def admin_standings(request: Request, db: Session = Depends(get_db)):
     managers = (
         db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
     )
-    return templates.TemplateResponse("admin_standings.html", {
+    return templates.TemplateResponse(request, "admin_standings.html", {
         "request": request, "league": league, "is_admin": True,
         "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
         "standings": services.get_standings(db, league),
@@ -1182,7 +1182,7 @@ def admin_cups(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     managers = db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
     sug_cup, sug_pup = services.prior_season_shield_participants(db, league)
-    return templates.TemplateResponse("admin_cups.html", {
+    return templates.TemplateResponse(request, "admin_cups.html", {
         "request": request, "league": league, "is_admin": True,
         "cups": services.get_cups(db, league),
         "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers],
@@ -1283,7 +1283,7 @@ def players_page(request: Request, db: Session = Depends(get_db)):
     owner = is_owner(request)
     players = services.player_portal(db, league, viewer_is_owner=owner)
     proj_year = services.projection_season_year(db) if owner else None
-    return templates.TemplateResponse("admin_players.html", {
+    return templates.TemplateResponse(request, "admin_players.html", {
         "request": request, "league": league, "is_admin": is_admin(request),
         "is_owner": owner,
         "players": players,
@@ -1350,7 +1350,7 @@ def draft_prep(request: Request, db: Session = Depends(get_db)):
                 "margin": prep["predictions"][mid]["margin"],
                 "players": prep["predictions"][mid]["keepers"],
             })
-    return templates.TemplateResponse("draft_prep.html", {
+    return templates.TemplateResponse(request, "draft_prep.html", {
         "request": request, "league": league, "is_admin": is_admin(request),
         "is_owner": True, "prep": prep, "year": year, "mine": mine,
         "ledger": ledger, "me": me.display if me else None,
@@ -1384,7 +1384,7 @@ def admin_corrections(
         return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
     league = _league_or_404(db)
     dq = (dq or "").strip()
-    return templates.TemplateResponse("admin_corrections.html", {
+    return templates.TemplateResponse(request, "admin_corrections.html", {
         "request": request, "league": league, "is_admin": True,
         "dq": dq,
         "player_search": (
@@ -1717,7 +1717,7 @@ def admin_keepers(request: Request, db: Session = Depends(get_db)):
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/keepers", status_code=303)
     league = _league_or_404(db)
-    return templates.TemplateResponse("admin_keepers.html", {
+    return templates.TemplateResponse(request, "admin_keepers.html", {
         "request": request, "league": league, "is_admin": True,
         "roster_gaps": services.unexplained_roster_gaps(db, league),
         **services.keeper_overrides_context(db, league),
@@ -1800,7 +1800,7 @@ def admin_audit(request: Request, db: Session = Depends(get_db)):
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/audit", status_code=303)
     league = _league_or_404(db)
-    return templates.TemplateResponse("audit.html", {
+    return templates.TemplateResponse(request, "audit.html", {
         "request": request, "league": league, "is_admin": True,
         "entries": services.get_audit_log(db, league),
     })
@@ -1810,7 +1810,7 @@ def admin_audit(request: Request, db: Session = Depends(get_db)):
 def cups_page(request: Request, db: Session = Depends(get_db)):
     """Public, read-only cup brackets."""
     league = _league_or_404(db)
-    return templates.TemplateResponse("cups.html", {
+    return templates.TemplateResponse(request, "cups.html", {
         "request": request, "league": league, "cups": services.get_cups(db, league),
         "shield": services.get_shield(db, league),
     })
@@ -1820,7 +1820,7 @@ def cups_page(request: Request, db: Session = Depends(get_db)):
 def history_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     return templates.TemplateResponse(
-        "history.html",
+        request, "history.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
          "history": services.get_history(db, league)},
     )
@@ -1834,7 +1834,7 @@ def seasons_page(request: Request, db: Session = Depends(get_db)):
 
     league = _league_or_404(db)
     rows = db.query(_League).order_by(_League.season_year.desc()).all()
-    return templates.TemplateResponse("seasons.html", {
+    return templates.TemplateResponse(request, "seasons.html", {
         "request": request, "league": league,
         "seasons": [
             {"fpl": lg.fpl_league_id, "season": lg.season_year, "name": lg.name,
@@ -1851,7 +1851,7 @@ def season_detail(fpl_league_id: str, request: Request, db: Session = Depends(ge
     season = services.resolve_league(db, fpl_league_id)
     if not season:
         raise HTTPException(status_code=404, detail="season not found")
-    return templates.TemplateResponse("season_detail.html", {
+    return templates.TemplateResponse(request, "season_detail.html", {
         "request": request, "league": _league_or_404(db), "season_league": season,
         "season": season.season_year, "is_current": season.is_current,
         "standings": services.get_standings(db, season),
@@ -1872,7 +1872,7 @@ def trade_page(request: Request, db: Session = Depends(get_db)):
         db.query(Manager).filter_by(league_id=league.id).order_by(Manager.display_name).all()
     )
     return templates.TemplateResponse(
-        "trade.html",
+        request, "trade.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
          "managers": [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers]},
     )
@@ -1884,7 +1884,7 @@ def trade_assets(side: str, request: Request, db: Session = Depends(get_db)):
     fpl = request.query_params.get(f"{side}_manager")
     assets = services.manager_assets(db, league, fpl) if fpl else None
     return templates.TemplateResponse(
-        "_trade_assets.html", {"request": request, "side": side, "assets": assets}
+        request, "_trade_assets.html", {"request": request, "side": side, "assets": assets}
     )
 
 
@@ -1929,7 +1929,7 @@ def trades_page(request: Request, db: Session = Depends(get_db)):
         for name in (row["from"], row["to"]) if name
     })
     return templates.TemplateResponse(
-        "trades.html",
+        request, "trades.html",
         {"request": request, "league": league, "is_admin": is_admin(request),
          "trades": trades, "seasons": seasons, "managers": managers,
          "trade_notes": services.get_trade_notes(db, league)},
@@ -1946,7 +1946,7 @@ def transactions_page(request: Request, db: Session = Depends(get_db)):
         for season in seasons_data for week in season["weeks"] for move in week["moves"]
     })
     return templates.TemplateResponse(
-        "transactions.html",
+        request, "transactions.html",
         {"request": request, "league": league, "seasons_data": seasons_data,
          "seasons": seasons, "managers": managers,
          "window": services.waiver_window(db, league)},
@@ -1957,7 +1957,7 @@ def transactions_page(request: Request, db: Session = Depends(get_db)):
 def scoreboard_page(request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
     gw = request.query_params.get("gw")
-    return templates.TemplateResponse("scoreboard.html", {
+    return templates.TemplateResponse(request, "scoreboard.html", {
         "request": request, "league": league,
         "board": services.get_scoreboard(db, league, int(gw) if gw and gw.isdigit() else None),
     })
@@ -1967,14 +1967,14 @@ def scoreboard_page(request: Request, db: Session = Depends(get_db)):
 @router.get("/draft/{year}", response_class=HTMLResponse)
 def draft_page(year: int, request: Request, draft_type: str = "main", db: Session = Depends(get_db)):
     league = _league_or_404(db)
-    return templates.TemplateResponse("draft.html", _board_ctx(request, db, league, year, draft_type))
+    return templates.TemplateResponse(request, "draft.html", _board_ctx(request, db, league, year, draft_type))
 
 
 @router.get("/draft/{year}/board", response_class=HTMLResponse)
 def draft_board_partial(year: int, request: Request, draft_type: str = "main", db: Session = Depends(get_db)):
     """Board partial for the every-7s poll, so all devices see picks live."""
     league = _league_or_404(db)
-    return templates.TemplateResponse("_board.html", _board_ctx(request, db, league, year, draft_type))
+    return templates.TemplateResponse(request, "_board.html", _board_ctx(request, db, league, year, draft_type))
 
 
 # ---- draft autodraft queue (manager) + admin approve ----
@@ -1990,7 +1990,7 @@ def _queue_ctx(request: Request, db: Session, league, year: int, draft_type: str
 @router.get("/draft/{year}/queue", response_class=HTMLResponse)
 def draft_queue_partial(year: int, request: Request, draft_type: str = "main", db: Session = Depends(get_db)):
     league = _league_or_404(db)
-    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
+    return templates.TemplateResponse(request, "_queue.html", _queue_ctx(request, db, league, year, draft_type))
 
 
 @router.post("/draft/{year}/queue/add", response_class=HTMLResponse)
@@ -2008,7 +2008,7 @@ def draft_queue_add(
                               team_code=team_code, season_year=year, draft_type=draft_type)
     except RuleViolation as e:
         return _err(e)
-    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
+    return templates.TemplateResponse(request, "_queue.html", _queue_ctx(request, db, league, year, draft_type))
 
 
 @router.post("/draft/{year}/queue/remove", response_class=HTMLResponse)
@@ -2026,7 +2026,7 @@ def draft_queue_remove(
                                    team_code=team_code, season_year=year, draft_type=draft_type)
     except RuleViolation as e:
         return _err(e)
-    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
+    return templates.TemplateResponse(request, "_queue.html", _queue_ctx(request, db, league, year, draft_type))
 
 
 @router.post("/draft/{year}/queue/reorder", response_class=HTMLResponse)
@@ -2044,7 +2044,7 @@ def draft_queue_reorder(
                                season_year=year, draft_type=draft_type)
     except RuleViolation as e:
         return _err(e)
-    return templates.TemplateResponse("_queue.html", _queue_ctx(request, db, league, year, draft_type))
+    return templates.TemplateResponse(request, "_queue.html", _queue_ctx(request, db, league, year, draft_type))
 
 
 @router.post("/draft/{year}/approve-queued", response_class=HTMLResponse)
@@ -2108,7 +2108,7 @@ def draft_search(
     on_clock = services.next_open_pick(services.get_draft_board(db, league, year))
     can_pick = bool(on_clock) and can_act_as(request, on_clock.get("owner_fpl"))
     return templates.TemplateResponse(
-        "_search_results.html", {"request": request, "results": results, "year": year,
+        request, "_search_results.html", {"request": request, "results": results, "year": year,
                                  "is_admin": is_admin(request), "can_pick": can_pick}
     )
 
@@ -2307,7 +2307,7 @@ def _discovery_ctx(request: Request, db: Session, league, year: int) -> dict:
 
 
 def _discovery_board_response(request, db, league, year):
-    resp = templates.TemplateResponse("_discovery_board.html", _discovery_ctx(request, db, league, year))
+    resp = templates.TemplateResponse(request, "_discovery_board.html", _discovery_ctx(request, db, league, year))
     resp.headers["HX-Trigger"] = "discoveryChanged"
     return resp
 
@@ -2315,14 +2315,14 @@ def _discovery_board_response(request, db, league, year):
 @router.get("/discovery/{year}", response_class=HTMLResponse)
 def discovery_page(year: int, request: Request, db: Session = Depends(get_db)):
     league = _league_or_404(db)
-    return templates.TemplateResponse("discovery.html", _discovery_ctx(request, db, league, year))
+    return templates.TemplateResponse(request, "discovery.html", _discovery_ctx(request, db, league, year))
 
 
 @router.get("/discovery/{year}/board", response_class=HTMLResponse)
 def discovery_board_partial(year: int, request: Request, db: Session = Depends(get_db)):
     """Discovery board partial for the every-7s poll (live multi-device)."""
     league = _league_or_404(db)
-    return templates.TemplateResponse("_discovery_board.html", _discovery_ctx(request, db, league, year))
+    return templates.TemplateResponse(request, "_discovery_board.html", _discovery_ctx(request, db, league, year))
 
 
 @router.post("/discovery/{year}/pick", response_class=HTMLResponse)

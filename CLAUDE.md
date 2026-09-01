@@ -59,6 +59,14 @@ before any non-trivial work. Known-but-unscheduled bugs and features live in
   commit (it joins the caller's transaction on purpose), and `test_session` is not
   rollback-based — it TRUNCATEs, so it tolerates commits. `sync.SessionLocal` is patched
   too, so a sync task's own internal commits land in the test DB and can be read back.
+- **`TemplateResponse` takes `request` FIRST.** `TemplateResponse(request, "x.html", ctx)`,
+  not the legacy `TemplateResponse("x.html", ctx)`. All 46 sites migrated 2026-08-31;
+  the suite runs clean under `-W error::DeprecationWarning`, which is the cheapest way to
+  keep it that way. Starlette 0.41.3 still accepts the old shape and names no removal
+  version, so this was noise-cleanup — but its legacy branch assigns `args[2]` to BOTH
+  `status_code` and `headers`, so any positional third argument breaks. Leaving
+  `"request"` in the context dict is harmless (Starlette `setdefault`s it), which is why
+  the three `_*_ctx` helpers still inject it.
 - **Mutation testing: always run with `PYTHONDONTWRITEBYTECODE=1`.** The house style for
   verifying a test is to break the code, confirm the test fails, then restore the file. But
   `cp`-ing a source file back leaves `__pycache__` holding the **mutated** bytecode, and
