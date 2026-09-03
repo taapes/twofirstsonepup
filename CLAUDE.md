@@ -839,6 +839,21 @@ lose the tail silently. A `sync_locked` league is skipped (guard lives in
 `send`; that seam is where a bot token replaces the webhook when the inbound half needs
 threaded replies.
 
+**A trade read FROM Discord is never announced back TO Discord.** `announced_at IS
+NULL` is the announce queue, so `apply_discord_ingest` passes
+`record_trade(already_announced=True)` — Discord is where the trade came from, and
+without it confirming a proposal read out of `#trades` posts it straight back to
+`#trades` on the next sync, an echo of the message that taught us about it. Found
+2026-09-03 while mapping which channel each webhook points at; the commissioner reads
+`#trades` and would have pointed the public webhook at the same channel.
+**Three outbound webhooks, three audiences**: `DISCORD_WEBHOOK_URL` (public, trades),
+`DISCORD_ALERT_WEBHOOK_URL` (private commissioner — `flagged_actions` + failed
+`data_health`, i.e. named managers and their infractions, which is why it is separate and
+why leaving it unset is fully supported: `/admin/health` shows the same content), and
+`DISCORD_REVIEW_WEBHOOK_URL` (the AI review's own channel). The review had originally
+pointed at the ALERT webhook, which would have shown the league's weekly write-up to
+nobody but the commissioner.
+
 **Inbound Discord (`discord_bridge.py` + `discord_parse.py`).** Reads `#trades` and the
 IL channel and stages what it finds for review. **NOTHING is ever applied
 automatically** — every parsed announcement becomes a `DiscordIngest` row the

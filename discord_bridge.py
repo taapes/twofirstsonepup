@@ -46,6 +46,11 @@ log = logging.getLogger(__name__)
 # config page, matching SYNC_AUTH_TOKEN's handling in SECURITY.md.
 WEBHOOK_ENV = "DISCORD_WEBHOOK_URL"
 ALERT_WEBHOOK_ENV = "DISCORD_ALERT_WEBHOOK_URL"
+# The AI gameweek review's destination. Its own channel rather than either of the two
+# above: the trade channel would bury actual trades under a weekly essay, and the alert
+# channel is private to the commissioner — a review written for the league to read is
+# useless there. OFF when unset, like every other webhook.
+REVIEW_WEBHOOK_ENV = "DISCORD_REVIEW_WEBHOOK_URL"
 
 # Deliberately short. The sync it hangs off has real work to do, and a slow webhook is
 # indistinguishable from a dead one for our purposes: either way we skip and retry.

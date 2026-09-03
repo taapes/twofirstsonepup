@@ -1696,10 +1696,10 @@ def admin_review_post(gw: int, request: Request, db: Session = Depends(get_db)):
     row = ai_content.existing_review(db, league, gw)
     if row is None or not row.content:
         return _err(RuleViolation(f"no GW{gw} review to post"))
-    url = discord_bridge.webhook_url(discord_bridge.ALERT_WEBHOOK_ENV)
+    url = discord_bridge.webhook_url(discord_bridge.REVIEW_WEBHOOK_ENV)
     if not url:
         return _err(RuleViolation(
-            "no Discord webhook is configured, so there's nowhere to post it"
+            "DISCORD_REVIEW_WEBHOOK_URL isn't set, so there's nowhere to post it"
         ))
     header = f"📝 **GW{gw}**" + (f" — {row.headline}" if row.headline else "")
     for message in discord_bridge._chunks([row.content], header=header):

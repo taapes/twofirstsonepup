@@ -21,6 +21,11 @@ Small private league app (≈10 users) on Render + Neon, session-cookie auth.
   channel. Point it somewhere only the commissioner can read: it carries flagged
   actions and failed health checks, i.e. named managers and their infractions.
 
+- `DISCORD_REVIEW_WEBHOOK_URL` — optional. Incoming webhook for the channel the AI
+  gameweek review posts to, and the ONLY thing that writes there. Its own channel on
+  purpose: the trade webhook would bury real trades under a weekly essay, and the alert
+  webhook is private to the commissioner, where a review written for the league to read
+  is useless. Unset means the post button refuses by name rather than posting nowhere.
 - `DISCORD_BOT_TOKEN` — optional, for INBOUND (reading announcements). A bearer secret
   with no scoping beyond the permissions granted at invite: anyone holding it can act
   as the bot in every guild it has joined. Rotate by regenerating in the Developer

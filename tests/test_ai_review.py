@@ -18,6 +18,7 @@ import pathlib
 import pytest
 
 import ai_content
+import discord_bridge
 import services
 from auth import hash_password
 from models import (
@@ -355,7 +356,6 @@ def test_generation_never_posts(test_session, monkeypatch):
     in ai_content reaches Discord, so no amount of generating can put something in front
     of the league."""
     posted = []
-    import discord_bridge
 
     monkeypatch.setattr(discord_bridge, "post_message",
                         lambda url, content: posted.append(content) or True)
@@ -365,6 +365,7 @@ def test_generation_never_posts(test_session, monkeypatch):
     # undetected until this test set both.
     monkeypatch.setenv(discord_bridge.WEBHOOK_ENV, "https://example.invalid/hook")
     monkeypatch.setenv(discord_bridge.ALERT_WEBHOOK_ENV, "https://example.invalid/alert")
+    monkeypatch.setenv(discord_bridge.REVIEW_WEBHOOK_ENV, "https://example.invalid/rev")
     lg, _j, _a = _seed(test_session)
 
     ai_content.ensure_review(test_session, lg, GW, generate=FakeGenerator())
@@ -394,11 +395,10 @@ def test_generation_never_posts(test_session, monkeypatch):
 
 def test_posting_requires_the_admin_route(test_session, client, monkeypatch):
     posted = []
-    import discord_bridge
 
     monkeypatch.setattr(discord_bridge, "post_message",
                         lambda url, content: posted.append(content) or True)
-    monkeypatch.setenv("DISCORD_ALERT_WEBHOOK_URL", "https://example.invalid/hook")
+    monkeypatch.setenv(discord_bridge.REVIEW_WEBHOOK_ENV, "https://example.invalid/rev")
     monkeypatch.setenv("ADMIN_PASSWORD", "pw")
     lg, _j, _a = _seed(test_session)
     ai_content.ensure_review(test_session, lg, GW, generate=FakeGenerator())
@@ -413,11 +413,10 @@ def test_posting_requires_the_admin_route(test_session, client, monkeypatch):
 
 def test_a_manager_cannot_post_a_review(test_session, client, monkeypatch):
     posted = []
-    import discord_bridge
 
     monkeypatch.setattr(discord_bridge, "post_message",
                         lambda url, content: posted.append(content) or True)
-    monkeypatch.setenv("DISCORD_ALERT_WEBHOOK_URL", "https://example.invalid/hook")
+    monkeypatch.setenv(discord_bridge.REVIEW_WEBHOOK_ENV, "https://example.invalid/rev")
     lg, john, _a = _seed(test_session)
     ai_content.ensure_review(test_session, lg, GW, generate=FakeGenerator())
 
@@ -430,16 +429,35 @@ def test_a_manager_cannot_post_a_review(test_session, client, monkeypatch):
 
 def test_posting_without_a_webhook_says_so(test_session, client, monkeypatch):
     """Rather than silently marking it posted."""
-    monkeypatch.delenv("DISCORD_ALERT_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv(discord_bridge.REVIEW_WEBHOOK_ENV, raising=False)
     monkeypatch.setenv("ADMIN_PASSWORD", "pw")
     lg, _j, _a = _seed(test_session)
     ai_content.ensure_review(test_session, lg, GW, generate=FakeGenerator())
     client.post("/admin/login", data={"password": "pw"})
 
     r = client.post(f"/admin/ai/gw-review/{GW}/post")
-    assert r.status_code == 400 and "nowhere to post" in r.text
+    assert r.status_code == 400 and "DISCORD_REVIEW_WEBHOOK_URL" in r.text
     test_session.expire_all()
     assert test_session.query(AiGeneratedContent).one().status == "ready"
+
+
+def test_the_review_posts_to_its_own_channel(test_session, client, monkeypatch):
+    """Its own webhook, not either existing one. The trade channel would bury actual
+    trades under a weekly essay, and the alert channel is private to the commissioner —
+    a review written for the league to read is useless there."""
+    hits = []
+    monkeypatch.setattr(discord_bridge, "post_message",
+                        lambda url, content: hits.append(url) or True)
+    monkeypatch.setenv(discord_bridge.WEBHOOK_ENV, "https://example.invalid/trades")
+    monkeypatch.setenv(discord_bridge.ALERT_WEBHOOK_ENV, "https://example.invalid/alert")
+    monkeypatch.setenv(discord_bridge.REVIEW_WEBHOOK_ENV, "https://example.invalid/rev")
+    monkeypatch.setenv("ADMIN_PASSWORD", "pw")
+    lg, _j, _a = _seed(test_session)
+    ai_content.ensure_review(test_session, lg, GW, generate=FakeGenerator())
+    client.post("/admin/login", data={"password": "pw"})
+
+    assert client.post(f"/admin/ai/gw-review/{GW}/post").status_code == 303
+    assert hits == ["https://example.invalid/rev"]
 
 
 # ---- the read surfaces -------------------------------------------------------

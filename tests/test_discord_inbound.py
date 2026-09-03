@@ -385,6 +385,50 @@ def test_a_rule_violation_is_captured_on_the_row_not_swallowed(test_session, mon
     assert ing.status == "failed" and ing.error
 
 
+def test_a_trade_read_from_discord_is_not_announced_back_to_discord(
+        test_session, monkeypatch):
+    """The echo. `announced_at IS NULL` is the announce queue, so a trade confirmed from
+    a Discord proposal would be posted straight back to the channel that taught us about
+    it on the next sync. Discord already knows — that's where it came from.
+
+    Found 2026-09-03 while explaining which channel each webhook points at: the
+    commissioner reads #trades AND would have pointed the public webhook at it.
+    """
+    lg, _m = _seed(test_session)
+    _poll(test_session, lg, monkeypatch, [_raw(1, TRADE_MSG)])
+    ing = test_session.query(DiscordIngest).one()
+    services.apply_discord_ingest(test_session, lg, str(ing.id))
+
+    rows = test_session.query(Trade).all()
+    assert rows, "the trade was recorded"
+    assert all(t.announced_at is not None for t in rows), \
+        "a trade read from Discord must not be queued for announcement"
+
+    sent = []
+    out = discord_bridge.announce_new_trades(
+        test_session, lg, send=lambda content: sent.append(content) or True)
+    assert sent == [] and out["sent"] == 0
+
+
+def test_an_ordinary_trade_is_still_queued_for_announcement(test_session):
+    """The other half: the guard must not switch announcing off for trades the league
+    hasn't heard about, which is the feature's whole purpose."""
+    lg, m = _seed(test_session)
+    saka = _player(test_session, lg, "Saka", 500)
+    services.record_trade(
+        test_session, lg, a_fpl=m["John"].fpl_manager_id,
+        b_fpl=m["Kevin T"].fpl_manager_id,
+        a_players=[saka.fpl_id], b_players=[], a_picks=[], b_picks=[])
+
+    rows = test_session.query(Trade).all()
+    assert rows and all(t.announced_at is None for t in rows)
+
+    sent = []
+    discord_bridge.announce_new_trades(
+        test_session, lg, send=lambda content: sent.append(content) or True)
+    assert len(sent) == 1
+
+
 def test_a_dismissed_proposal_is_never_re_proposed(test_session, monkeypatch):
     """Kept, not deleted — the discovery-suggestion rule. Re-parsing must not revive
     a decision the commissioner already made."""

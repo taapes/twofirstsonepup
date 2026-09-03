@@ -57,6 +57,12 @@ services:
       # the demo service below: the demo must never bill the real account.
       - key: ANTHROPIC_API_KEY
         sync: false
+      # Where the AI review posts when the commissioner presses send. Its OWN channel:
+      # the trade webhook would bury real trades under a weekly essay, and the alert
+      # webhook is private to the commissioner, where a review written for the league to
+      # read is useless.
+      - key: DISCORD_REVIEW_WEBHOOK_URL
+        sync: false
 
   # --- Demo sandbox: same code, separate Neon branch DB, passwordless login. ---
   # Point DATABASE_URL at a Neon BRANCH of prod (instant copy); prod is untouched.

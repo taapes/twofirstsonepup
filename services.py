@@ -4801,15 +4801,18 @@ def goalie_team_owner(
     return owner
 
 
-def _add_club_trade(db: Session, league: League, frm, to, team, owner: dict) -> None:
+def _add_club_trade(db: Session, league: League, frm, to, team, owner: dict) -> Trade:
     """One direction of a goalie-team move. Mutates `owner` so a caller doing a swap
     validates both legs against a single, consistent picture. Adds the row; does NOT
-    commit — the caller owns the transaction."""
+    commit — the caller owns the transaction. Returns the row so a caller can stamp it
+    (`record_trade`'s `already_announced`)."""
     if owner.get(team.id) != frm.fpl_manager_id:
         raise RuleViolation(f"{frm.display} doesn't hold {team.name}")
-    db.add(Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id,
-                 team_id=team.id))
+    row = Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id,
+                team_id=team.id)
+    db.add(row)
     owner[team.id] = to.fpl_manager_id
+    return row
 
 
 def trade_goalie_team(
@@ -6778,6 +6781,8 @@ def apply_discord_ingest(db: Session, league: League, ingest_id: str, **override
                 b_players=list(payload.get("b_players") or []),
                 a_picks=list(payload.get("a_picks") or []),
                 b_picks=list(payload.get("b_picks") or []),
+                # Read out of Discord, so Discord already knows — see record_trade.
+                already_announced=True,
             )
             entity_id = None
         else:
@@ -9169,6 +9174,7 @@ def record_trade(
     db: Session, league: League, *, a_fpl: str, b_fpl: str,
     a_players: list, a_picks: list, b_players: list, b_picks: list,
     a_clubs: list | None = None, b_clubs: list | None = None,
+    already_announced: bool = False,
 ) -> dict:
     """Record a trade between two managers: any players + picks each way, no cap.
     Each asset becomes a Trade row; pick assets reassign ownership via the shared
@@ -9184,21 +9190,27 @@ def record_trade(
     if A.id == B.id:
         raise RuleViolation("pick two different managers")
     by_person = {m.display: m for m in db.query(Manager).filter_by(league_id=league.id)}
+    created: list = []
 
     def add_player(frm, to, fpl):
         p = _resolve_player(db, int(fpl))
-        db.add(Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id, player_id=p.id))
+        row = Trade(league_id=league.id, from_manager=frm.id, to_manager=to.id,
+                    player_id=p.id)
+        db.add(row)
+        created.append(row)
 
     def add_pick(frm, to, spec):
         y, dt, rnd, orig = spec.split(":")
         owner = by_person.get(orig)
         if not owner:
             raise RuleViolation(f"unknown pick original owner '{orig}'")
-        db.add(Trade(
+        row = Trade(
             league_id=league.id, from_manager=frm.id, to_manager=to.id,
             pick_season_year=int(y), pick_draft_type=dt, pick_round=int(rnd),
             pick_original_manager=owner.id, draft_pick=f"{y} {dt} R{rnd} (orig {orig})",
-        ))
+        )
+        db.add(row)
+        created.append(row)
 
     for fpl in a_players:
         add_player(A, B, fpl)
@@ -9221,8 +9233,10 @@ def record_trade(
         # Both legs judged against the state before EITHER happens. Sequencing them
         # would have the first leg leave B holding two clubs, and the second refuse.
         owner = goalie_team_owner(db, league)
-        _add_club_trade(db, league, A, B, _resolve_team(db, int(a_clubs[0])), owner)
-        _add_club_trade(db, league, B, A, _resolve_team(db, int(b_clubs[0])), owner)
+        created.append(
+            _add_club_trade(db, league, A, B, _resolve_team(db, int(a_clubs[0])), owner))
+        created.append(
+            _add_club_trade(db, league, B, A, _resolve_team(db, int(b_clubs[0])), owner))
     moved = (len(a_players) + len(b_players) + len(a_picks) + len(b_picks)
              + len(a_clubs) + len(b_clubs))
     # This was the one write path in the app that never wrote an audit entry, which
@@ -9235,6 +9249,17 @@ def record_trade(
         details={"a_players": list(a_players), "b_players": list(b_players),
                  "a_picks": list(a_picks), "b_picks": list(b_picks)},
     )
+    if already_announced:
+        # Discord is where this trade CAME from, so the announce queue has nothing left
+        # to say. Without this, confirming a proposal read out of #trades posts it
+        # straight back to #trades on the next sync — an echo of the message that
+        # taught us about it. `announced_at IS NULL` means "Discord hasn't been told",
+        # and it has been.
+        import datetime as _dt
+
+        stamp = _dt.datetime.now(_dt.timezone.utc)
+        for row in created:
+            row.announced_at = stamp
     db.commit()
     return {"a": A.display, "b": B.display, "assets_moved": moved}
 
