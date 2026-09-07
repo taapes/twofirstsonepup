@@ -208,28 +208,34 @@ The 2027 draft board is the deadline for 1 and 3; a conditional resolves only on
 season is `sync_locked`, so 2 has slack — but it is the one most likely to be forgotten,
 since the wording lives only in a Discord message.
 
-### A conditional pick whose deadline precedes the season it depends on
+### A pick's YEAR in a trade post can be wrong, and only a human knows
 
-**Priority:** `P2` — one live clause; a commissioner decision first, maybe a column later.
-**Status:** `open`
+**Priority:** `P3` — a reading caution, not a bug. No code change proposed.
+**Status:** `closed 2026-09-07` (recorded as a lesson)
 
-The Cunha deal's third clause — "+1 additional discovery 2026 2nd (cunha 200+ and ks
-wins league)" — **cannot settle in time as written.** Its condition turns on how 26/27
-finishes (Cunha's total, Kevin S's league position), which resolves around May 2027, but
-the 2026 discovery draft runs in the autumn, roughly seven months earlier. `pending`
-means no transfer, so Kevin S will hold and use a pick he may turn out to have owed
-Kevin T.
+The Cunha deal's third conditional line reads "+1 additional discovery **2026** 2nd
+(cunha 200+ and ks wins league)". Taken literally that is a 2026 discovery pick, which
+is how it was first recorded — and it was wrong. The commissioner confirmed it means
+**2031 2nd**, continuing the guaranteed 2028/2029/2030 sequence.
 
-No code can fix that — it is an ambiguity in the agreement, and the commissioner should
-confirm whether "2026 2nd" meant the following autumn's draft. Recorded as written
-(2026-09-07) with the question in its verbatim `conditions` text, so the promise is
-visible on the board, `/picks` and `/conditions` instead of living in a Discord message.
+The post's own arithmetic says so once you look for it: `6-9 Discoveries` means six
+guaranteed plus three conditional, and a discovery draft has only two rounds, so with
+2027 1st and 2027 2nd already spoken for the third conditional pick cannot be in 2027 —
+and 2026's draft was days away when the deal was struck.
 
-This is also the one case a **typed** review deadline would serve, and the reason to
-reconsider one later. The derived deadline (`condition_rulings_due`, keyed on
-`sync_locked`) is right for every other clause and needs no column; an agreement whose
-own due date PRECEDES the season it depends on is the exception. One clause is not yet a
-pattern — revisit if a second appears.
+Two things worth keeping from this:
+
+- **`discord_parse` reading "2026 2nd" as a 2026 pick is correct behaviour**, not a
+  parser bug. A literal reading is the only one a regex can justify; noticing that it
+  contradicts the surrounding count is human work. This is why every parsed trade stages
+  for confirmation instead of applying, and the case is a good argument for keeping it
+  that way.
+- **An analysis built on a misread field can look like a finding.** The wrong year
+  generated a confident "this clause cannot settle before its own draft" conclusion, a
+  backlog entry, and an editorial "NOTE:" appended to the *verbatim* text of a real
+  agreement between two people. The wording has been restored. Don't edit what someone
+  wrote in order to record a doubt about it — the doubt goes in the analysis, not in the
+  quote.
 
 ### Discord parser: decoration is staged as fake player assets
 
