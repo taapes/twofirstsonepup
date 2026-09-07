@@ -76,6 +76,8 @@ reflects the commissioner's explicit request to move conditional pick trades and
 | 4 | **Item 16** — historical GK IL backfill refused once goalie teams are on | **Premise settled 2026-08-24: `goalie_team_mode` is `off` for 26/27 and the commissioner confirmed that is deliberate.** So `_refuse_goalkeeper_list_move` cannot fire this season and this is latent, not live — safe to leave here or drop further. |
 | 5 | **Item 11** — preflight "rollover NOT done" detection fix | Matters most right before the *next* draft (2027), not urgently now. |
 | ~~6~~ | ~~**Item 19** — AI enhancements epic, sub-item 1 (GW review/banter)~~ | **Done 2026-09-01.** Sub-items 2-4 remain open. |
+| 6a | **Gameweek PREVIEW** (epic sub-item 2) | Added 2026-09-07 at the commissioner's request. The spine sub-item 1 built is reusable, and `get_upcoming_matchups` is most of the input — but the trigger inverts and the content is predictive, so it is not the clone the epic assumed. |
+| 6b | **AI-assisted transfer recommendations** (epic sub-item 3) | Added 2026-09-07 at the commissioner's request. Sequenced after 6a because it needs a new service function (`get_free_agents`) and an up-front decision about owner-only projections — the AI layer is the smaller half. |
 | 7 | **Item 14** — scheduled keeper lock / draft open | Not time-critical until closer to the *next* draft/keeper-lock cycle. |
 | ~~8~~ | ~~**Item 15** — Discord webhook trade announcements~~ | **Done 2026-08-29**, plus commissioner alerts. Built as session 2 of the Discord bridge. |
 
@@ -207,6 +209,95 @@ are the DATA gaps it exposed, none of which the parser can fix.
 The 2027 draft board is the deadline for 1 and 3; a conditional resolves only once its
 season is `sync_locked`, so 2 has slack — but it is the one most likely to be forgotten,
 since the wording lives only in a Discord message.
+
+### Gameweek PREVIEW, published before kickoff
+
+**Priority:** `P2` — the natural next AI surface; sub-item 2 of the AI enhancements epic.
+**Status:** `open`
+
+A write-up of the gameweek about to be played: the ten managers' fixtures, who each faces,
+what looks decisive. The counterpart to the review that ships today, at the other end of
+the week.
+
+**The trigger is INVERTED, which is the main thing the epic's "near-clone of (1)"
+one-liner got wrong.** The review is gated on every fixture being finished
+(`gw_fixture_progress`); a preview must fire in the window *after* the previous gameweek
+finishes and *before* the next deadline, and must not fire once the gameweek is under way.
+`services.gameweek_is_live` already draws exactly that line for the homepage scoreboard
+(keyed on real PL fixtures, excluding both ends on purpose), so it is the test to reuse
+rather than a new one. Note the review's guard against an unsynced gameweek —
+`total == 0` is not "finished" — has a mirror here: a gameweek with no fixture rows yet
+is not "about to start".
+
+**It is PREDICTIVE, and the review's safety rule does not cover that.** `PERSONA` forbids
+computing a number, which is the right rule for describing what happened — every figure is
+supplied. A preview instead makes claims about what *will* happen, and no amount of
+"don't do arithmetic" prevents a confident wrong forecast. Needs its own instruction: the
+model may say who is favoured and why, but must attribute it to the supplied inputs
+(fixture difficulty, form, availability) rather than asserting outcomes. Expect this to be
+the part that takes tuning, not the prose.
+
+**Reuse, all of it already built:**
+- `services.get_upcoming_matchups` — the `/my-team/upcoming` data layer: next three H2H
+  opponents, both squads, each player's real PL fixture and difficulty. This is most of
+  the preview's input and it exists.
+- `services.waiver_window` — whether we are in the waiver period or free agency, which
+  frames "who might still change their squad before kickoff".
+- `ai_content`'s whole spine: `api_key`, `call_model`, `ensure_review`'s cap/interval/
+  upsert shape, `manager_notes`, and the `AiGeneratedContent` table (`kind` is already a
+  column, so a `gw_preview` kind needs no migration — but note the `UNIQUE(league_id,
+  gameweek_id, kind)` caveat that a NULL `gameweek_id` defeats it, which does not bite
+  here because a preview always names one).
+- The manual Discord gate. **Non-negotiable, same as the review**: generation automatic,
+  posting on a click, and no sending code in the generating module.
+
+**Two things to decide before building:** whether a preview names likely lineups (they
+can still change, so a wrong one reads as a mistake rather than a forecast), and whether
+it must avoid anything the keeper-privacy gate protects — `_derive_keeper_status`'s
+disclosure defaults exist precisely because `/v1` has no viewer, and a generated preview
+has no viewer either.
+
+### AI-assisted transfer recommendations
+
+**Priority:** `P2` — sub-item 3 of the AI enhancements epic, and still the piece most
+likely to be underestimated.
+**Status:** `open`
+
+"Here are the unrostered players worth picking up, and who might want them." Distinct
+from proposed-trade advice (that names another manager's assets and stays a separate,
+gated future item).
+
+**It needs a genuinely new service function, and that has not changed.**
+`get_free_agents` — "who has no `Roster` row in the latest synced gameweek" — **still
+does not exist** (verified 2026-09-07). `search_players` is draft-context-only and is the
+wrong tool: its `taken` oracle answers "already drafted or kept", not "unrostered right
+now", and it carries the availability semantics of a draft rather than a season. Budget
+for this rather than assuming the AI layer is the work.
+
+**Three constraints that shape the feature, not just the prompt:**
+
+1. **FPL's Draft API exposes no waiver-priority data.** Recommendations can therefore
+   only ever be "good unrostered players", never "you will actually win this claim".
+   Saying otherwise would be a confident falsehood about a rule the app cannot see.
+2. **Waivers vs. free agency changes what the advice MEANS.** A claim during the waiver
+   period is contested and priority-ordered; in the final 24h it is first-come. The advice
+   is different in each, and `services.waiver_window` already knows which we are in.
+3. **Projections are OWNER-ONLY, and this is the trap.** `player_projection` is the
+   obvious input for "who is worth adding", but `player_portal` gates it behind
+   `viewer_is_owner` and three tests enforce it — including
+   `test_the_default_is_no_projections_so_a_forgetful_caller_leaks_nothing` and
+   `test_the_draft_board_search_never_exposes_projections`. A recommendation shown to all
+   ten managers, built on projections, leaks exactly what those tests protect, and it
+   would leak through *generated prose* where no viewer argument can catch it. Decide up
+   front: either the feature is owner-only like `/draft-prep`, or it must be built on
+   data every manager can already see (`PlayerSeason` stats, form, fixtures).
+
+**This is ADVICE, which is a different risk class from banter.** The epic's own split
+decision — that advice on a proposed trade "could influence a real decision between real
+people" — applies here in weaker form: it is about unrostered players rather than a
+counterparty's assets, but it still tells a manager what to do. The manual Discord gate
+matters more here, not less, and a wrong recommendation posted to the league is worse
+than a flat joke.
 
 ### A pick's YEAR in a trade post can be wrong, and only a human knows
 
@@ -2571,14 +2662,11 @@ others reuse):**
 1. ~~**GW review / pundit-style banter**~~ — **DONE 2026-09-01.** Reused
    `get_scoreboard`, `get_standings`, `GameweekPoints` and `matchup_analysis` as
    predicted; no new query work was needed.
-2. **Next-GW preview/analysis** — near-clone of (1) using already-synced fixtures/roster
-   data.
-3. **Waiver-wire recommendations** — flagged as the piece most likely to be
-   underestimated: needs a genuinely NEW service function (e.g. `get_free_agents`, "who
-   has no `Roster` row in the latest synced GW" — does not exist today; `search_players`
-   is draft-context-only and the wrong tool). Also: FPL's Draft API exposes no real
-   waiver-priority data, so recommendations can only ever be "good unrostered players,"
-   never priority-aware — a scope-defining constraint for the AI persona/prompt.
+2. **Next-GW preview/analysis** — **now its own entry below** ("Gameweek PREVIEW").
+   The one-line "near-clone of (1)" was wrong in one important way: the trigger is
+   inverted and the content is predictive rather than descriptive.
+3. **Waiver-wire recommendations** — **now its own entry below**
+   ("AI-assisted transfer recommendations").
 4. **Trade commentary (after the fact)** — bundles with (1)/(2)'s wave; reuses
    `get_trades`.
 5. *(separate future item, NOT part of this epic's initial build)* **Proposed-trade
