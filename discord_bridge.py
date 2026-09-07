@@ -765,8 +765,15 @@ def ingest_message(db, league, msg) -> str:
         # The AUTHOR is only a hint here, not an identity: a real sampled message has
         # John announcing a trade between two other managers. Both sides are resolved
         # by name, and neither falls back to the poster.
-        a = resolve_manager(db, league, name=trade["a"])
-        b = resolve_manager(db, league, name=trade["b"])
+        #
+        # A party WRITTEN AS A MENTION ("to <@1362...> Kevin S for:") is different: that
+        # id is exact, so it goes in as `discord_user_id` and takes resolve_manager's
+        # first tier. An id we don't hold falls through to the name tier, so this can
+        # only ever improve on a name match.
+        a = resolve_manager(db, league, discord_user_id=trade.get("a_discord_id"),
+                            name=trade["a"])
+        b = resolve_manager(db, league, discord_user_id=trade.get("b_discord_id"),
+                            name=trade["b"])
         a_players, a_picks, a_un = _resolve_assets(db, trade["a_assets"], a["manager"])
         b_players, b_picks, b_un = _resolve_assets(db, trade["b_assets"], b["manager"])
 
@@ -798,7 +805,10 @@ def ingest_message(db, league, msg) -> str:
         resolution = {
             "a": {"typed": trade["a"], "method": a["method"],
                   "display": a["manager"].display if a["manager"] else None,
-                  "why": a["why"]},
+                  "why": a["why"],
+                  # Form D reads the giver off the HEAD of the asset text by position,
+                  # so the queue has to say so — the `assumed_owner` rule one level up.
+                  "assumed": bool(trade.get("a_assumed"))},
             "b": {"typed": trade["b"], "method": b["method"],
                   "display": b["manager"].display if b["manager"] else None,
                   "why": b["why"]},

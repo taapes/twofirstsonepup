@@ -51,6 +51,56 @@ KS Trades:
 
 6-9 Discoveries"""
 
+# Forms C and D, found by sweeping the whole channel rather than sampling it. All four
+# of these parsed to NOTHING until 2026-09-07, and all four are pick-only trades — the
+# kind that exist in no FPL feed, so a missed one is a wrong draft board in 2027.
+TRADE_C_ROUND_PICK = """TRADE ALERT
+
+KEVIN T TRADES ROUND 3 PICK 10
+
+STEVE TRADES ROUND 5 PICK 5 AND 2027 2nd round discovery"""
+
+TRADE_C_DISCOVERY = """TRADE ALERT:
+
+🚨🚨🚨🚨
+Tucker trades 2027 1st round discovery
+
+Kevin trades 2028 1st round discovery
+
+🚨🚨🚨🚨"""
+
+TRADE_D_GETS = ("TRADE ALERT: GABY GETS KEVIN ROUND 4 PICK 10 FOR "
+                "2027 DISCOVERY, 2ND ROUND")
+
+# The mention form. `<@...>` used to survive the name cleanup as "1362...> Kevin S".
+TRADE_A_MENTION = """🚨🚨TRADE ALERT 🚨🚨
+John trades:
+2028 John 1st round
+To <@1362557356201738515> Kevin S for:
+Bruno Fernandes"""
+
+# A real message carrying TWO trades: an inline pair (form C's shape) followed by a
+# form A body. It is the reason the form matchers are tried A, B, C, D and not in any
+# other order — and the reason that order needs a test rather than a comment.
+TRADE_TWO_IN_ONE = """adding for posterity
+
+TRADE!\u0020
+
+Kevin F trades his 2026 Discovery 2nd
+
+Kevin T trades his 2026, 5th and 6th rounds
+
+
+\U0001f6a8 \U0001f6a8 Trade Alert\U0001f6a8 \U0001f6a8
+
+John trades
+2026 Pick 6
+2026 discovery 2nd
+2028 discovery 2nd
+
+to Michael for
+2026 pick 4"""
+
 IL_POSTS = [
     "ekitike IL 1-4 (prob longer and indefinitely)",
     "Minteh. (1-4) probably longer",
@@ -58,13 +108,147 @@ IL_POSTS = [
 ]
 
 
+# ---- forms C and D ------------------------------------------------------------
+def test_assets_on_the_managers_own_line_are_a_trade():
+    """Form C. `_FORM_B_HEADER` wants "Who trades:" alone on its line, so three real
+    messages matched nothing at all."""
+    r = P.parse_trade(TRADE_C_DISCOVERY)
+    assert r is not None and r["form"] == "C"
+    assert (r["a"], r["b"]) == ("Tucker", "Kevin")
+    assert r["a_assets"] == [{
+        "kind": "pick", "notation": "round", "rounds": [1], "season_year": 2027,
+        "draft_type": "discovery", "text": "2027 1st round discovery"}]
+    assert r["b_assets"][0]["season_year"] == 2028
+
+
+def test_form_c_is_only_a_trade_when_two_managers_give():
+    """A lone "X trades Y" line is as likely to be someone narrating a deal as
+    announcing one, and a one-sided trade is not a trade."""
+    assert P.parse_trade("TRADE ALERT\nTucker trades 2027 1st round discovery") is None
+
+
+def test_a_gets_for_post_is_read_with_the_giver_and_receiver_the_right_way_round():
+    """Form D names the RECEIVER first — inverted from every other form. This file's
+    invariant is that `a` gives `a_assets`, so the message has to be turned around."""
+    r = P.parse_trade(TRADE_D_GETS)
+    assert r is not None and r["form"] == "D"
+    assert r["a"] == "KEVIN", "the giver, read off the head of the asset text"
+    assert r["b"] == "GABY", "the receiver, named first in the message"
+    # Gaby gives the discovery pick; Kevin gives the round-4 slot.
+    assert r["b_assets"] == [{
+        "kind": "pick", "notation": "round", "rounds": [2], "season_year": 2027,
+        "draft_type": "discovery", "text": "2027 DISCOVERY, 2ND ROUND"}]
+
+
+def test_the_form_d_giver_is_flagged_as_an_assumption():
+    """It is read by POSITION, so it is a guess and has to travel as one. The real
+    message says "KEVIN" and this league has three, so `resolve_manager` will refuse
+    it — but only if the queue knows not to trust the name."""
+    assert P.parse_trade(TRADE_D_GETS)["a_assumed"] is True
+
+
+def test_form_d_never_swallows_an_asset_word_as_a_name():
+    """If the giver isn't named, the asset text must survive intact rather than losing
+    its first token to a manager slot."""
+    r = P.parse_trade("TRADE ALERT: GABY GETS 2027 DISCOVERY 2ND FOR CUNHA")
+    assert r["a"] == ""
+    assert r["a_assets"][0]["text"] == "2027 DISCOVERY 2ND"
+
+
+def test_form_a_wins_when_a_message_carries_an_inline_pair_as_well():
+    """The matcher ORDER is a safety property, not a style choice. This real message has
+    two inline "X trades <assets>" lines above a form A body; if C ran first it would
+    claim the message and report the wrong two managers and the wrong assets.
+
+    It also pins the known limitation rather than hiding it: only ONE of the two trades
+    in this post is extracted. Two trades in one message is out of scope — splitting on
+    the banner would be a different change, and the post is visible either way.
+    """
+    r = P.parse_trade(TRADE_TWO_IN_ONE)
+    assert r["form"] == "A"
+    assert (r["a"], r["b"]) == ("John", "Michael")
+    assert [x.get("number") or x.get("rounds") for x in r["a_assets"]] == [6, [2], [2]]
+
+
+# ---- a position within a round is not an overall pick number ------------------
+def test_round_n_pick_m_is_unresolved_not_an_overall_pick():
+    """It USED to return {"notation": "overall", "number": 10} — the 10th pick of the
+    whole draft instead of the 10th pick of round 3, which is a different manager's
+    slot. Naming that manager needs the draft order, which a pure parser hasn't got."""
+    a = P.parse_asset("ROUND 3 PICK 10")
+    assert a["kind"] == "unresolved"
+    assert "position within a round" in a["why"]
+
+
+def test_the_round_pick_guard_leaves_every_other_notation_alone():
+    """The guard keys on a round named by DIGIT, so an ordinal round is untouched."""
+    assert P.parse_asset("2026 Pick 6")["notation"] == "overall"
+    assert P.parse_asset("2027 1st round discovery")["notation"] == "round"
+    assert P.parse_asset("2026 5th round pick")["notation"] == "round"
+    assert P.parse_asset("2026 4th (Mark's pick - 8th)")["notation"] == "round"
+
+
+def test_a_discovery_typo_still_reads_as_a_discovery_pick():
+    """A real message says "Tucker's 2027 Discover 2nd". Reading that as a MAIN-draft
+    pick moves the wrong pick, and nothing downstream would catch it."""
+    assert P.parse_asset("Tucker's 2027 Discover 2nd")["draft_type"] == "discovery"
+
+
+# ---- mentions -----------------------------------------------------------------
+def test_a_mention_does_not_mangle_the_manager_name():
+    r = P.parse_trade(TRADE_A_MENTION)
+    assert r["b"] == "Kevin S", "was '1362557356201738515> Kevin S'"
+
+
+def test_a_mention_is_captured_as_an_id_not_merely_stripped():
+    """It is `resolve_manager`'s exact tier and the whole reason
+    `managers.discord_user_id` exists — throwing it away would discard the best
+    identifier in the message."""
+    r = P.parse_trade(TRADE_A_MENTION)
+    assert r["b_discord_id"] == "1362557356201738515"
+    assert r["a_discord_id"] is None, "John is written as a plain name"
+
+
+def test_a_role_mention_is_stripped_but_never_read_as_a_person():
+    r = P.parse_trade(
+        "TRADE ALERT\nJohn trades:\nBruno\nTo <@&99887766> the league for:\n2026 6th")
+    assert r["b"] == "the league"
+    assert r["b_discord_id"] is None
+
+
 # ---- classification -----------------------------------------------------------
-@pytest.mark.parametrize("text", [
-    TRADE_A_PICKS, TRADE_A_ORDINALS, TRADE_B_PLAYER, TRADE_B_INITIALS])
+ALL_REAL_TRADES = [
+    TRADE_A_PICKS, TRADE_A_ORDINALS, TRADE_B_PLAYER, TRADE_B_INITIALS,
+    TRADE_C_ROUND_PICK, TRADE_C_DISCOVERY, TRADE_D_GETS, TRADE_A_MENTION,
+]
+
+
+@pytest.mark.parametrize("text", ALL_REAL_TRADES)
 def test_every_real_trade_post_is_classified_as_one(text):
-    """The banner is on every trade post and nothing else, so classification is exact
-    rather than heuristic — which is why no scoring is needed here at all."""
+    """The banner is on every trade post, so classification is free. It is NOT absent
+    from everything else — see the prose test below — so the form matchers, not this,
+    are what actually filter."""
     assert P.is_trade_post(text) is True
+
+
+@pytest.mark.parametrize("text", ALL_REAL_TRADES)
+def test_every_real_trade_post_yields_two_managers_and_some_assets(text):
+    """The sweep that matters: a trade post this file cannot read is a pick trade lost
+    for good, since no FPL feed carries one. Four of these eight returned None until
+    2026-09-07."""
+    r = P.parse_trade(text)
+    assert r is not None, "parsed to nothing"
+    assert r["b"], "no counterparty"
+    assert r["a_assets"] and r["b_assets"], "a trade moves something both ways"
+
+
+def test_a_message_complaining_about_the_channel_is_not_a_trade():
+    """The header check alone is not a filter: this real message matches it. It is safe
+    only because no form matches, which is why the forms must stay strict."""
+    text = ("PLEASE MOVE THIS CHAT TO THE RULES-DELIBERATION channel. "
+            "This is the Trade Alerts channel SMH")
+    assert P.is_trade_post(text) is True
+    assert P.parse_trade(text) is None
 
 
 @pytest.mark.parametrize("text", IL_POSTS + ["who's starting haaland this week?", ""])

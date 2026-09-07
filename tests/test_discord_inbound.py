@@ -385,6 +385,53 @@ def test_a_rule_violation_is_captured_on_the_row_not_swallowed(test_session, mon
     assert ing.status == "failed" and ing.error
 
 
+def test_a_party_written_as_a_mention_resolves_by_id_not_by_name(
+        test_session, monkeypatch):
+    """A mention carries the Discord user id, which is `resolve_manager`'s exact tier
+    and the whole reason `managers.discord_user_id` exists. It used to be discarded —
+    worse, mangled: "<@900004> Kevin S" became the name "900004> Kevin S", which
+    matches nobody."""
+    lg, _m = _seed(test_session)
+    _player(test_session, lg, "Bruno", 500)
+    msg = ("\U0001f6a8 TRADE ALERT \U0001f6a8\nJohn trades:\n2028 1st\n"
+           "To <@900004> Kevin S for:\nBruno")
+    _poll(test_session, lg, monkeypatch, [_raw(1, msg)])
+
+    ing = test_session.query(DiscordIngest).one()
+    assert ing.resolution["b"]["method"] == "discord_id"
+    assert ing.resolution["b"]["display"] == "Kevin S"
+    assert ing.payload["b_fpl"] == "4"
+
+
+def test_a_mention_for_someone_we_dont_hold_falls_back_to_the_name(
+        test_session, monkeypatch):
+    """The id tier only returns on a HIT, so an unknown id can only ever leave the
+    name match as good as it was — never worse."""
+    lg, _m = _seed(test_session)
+    _player(test_session, lg, "Bruno", 500)
+    msg = ("\U0001f6a8 TRADE ALERT \U0001f6a8\nJohn trades:\n2028 1st\n"
+           "To <@404404404> Kevin S for:\nBruno")
+    _poll(test_session, lg, monkeypatch, [_raw(1, msg)])
+
+    ing = test_session.query(DiscordIngest).one()
+    assert ing.resolution["b"]["method"] == "exact"
+    assert ing.payload["b_fpl"] == "4"
+
+
+def test_an_inline_trade_post_stages_both_managers(test_session, monkeypatch):
+    """Form C, end to end: three real messages put the assets on the manager's own line
+    and used to stage nothing at all."""
+    lg, _m = _seed(test_session)
+    msg = ("TRADE ALERT\n\nKevin T trades 2027 1st round discovery\n\n"
+           "Michael trades 2028 1st round discovery")
+    _poll(test_session, lg, monkeypatch, [_raw(1, msg)])
+
+    ing = test_session.query(DiscordIngest).one()
+    assert ing.kind == "trade" and ing.status == "pending"
+    assert ing.resolution["a"]["display"] == "Kevin T"
+    assert ing.resolution["b"]["display"] == "Michael"
+
+
 def test_a_trade_read_from_discord_is_not_announced_back_to_discord(
         test_session, monkeypatch):
     """The echo. `announced_at IS NULL` is the announce queue, so a trade confirmed from

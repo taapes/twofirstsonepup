@@ -175,6 +175,54 @@ goalie-team commits, so treat every line as *verify*, not *assume*.
 
 ## Bugs
 
+### Discord audit 2026-09-07: what the first full-channel sweep found
+
+The first real sweep (100 messages per channel) is also the first audit of Discord
+against the site. The parser gaps it exposed were **fixed the same day** (four message
+forms, mention capture, `ROUND N PICK M`, the `Discover` typo — see `CLAUDE.md`). These
+are the DATA gaps it exposed, none of which the parser can fix.
+
+**Status:** `open` — each item is commissioner data entry, not code.
+
+1. **Player legs of the 25/26-era trades were never recorded.** Bruno Fernandes,
+   Ødegaard, Chris Wood, Nico Jackson, Grealish, Kluivert, Wissa and Brobbey were all
+   announced in `#trades`; the PICKS went into `future_picks`, the players did not.
+   Worth checking rather than assuming harm: a trade transfers the keeper clock and the
+   acquisition label from the SENDER, so where the receiver still holds the player (John
+   has Bruno) the clock is currently derived from the "on the GW1 roster" proxy instead.
+   That may or may not give a different answer — verify per player before backfilling.
+2. **No conditional trade has ever been recorded.** Zero rows with a condition clause,
+   zero `trade_condition_terms`, zero free-text `conditions`, and all 50 `future_picks`
+   notes empty — so the Item 17 machinery has never been used on a real deal. At least
+   three announced conditionals are captured nowhere: Grealish (2026 10th → **2028 1st**
+   at 200+ points, plus a 2028 2nd discovery for doing it twice), Wissa (**2027 7th** if
+   177+ points and fewer than 7 yellows), Brobbey (2026 5th → **2026 3rd** at 120+).
+3. **Three announced picks are absent from the ledger entirely** — confirmed by query:
+   the Wissa 2027 R7, Scott's 2028 discovery 2nd from the Alisson deal, and Kevin's
+   R4 P10 to Gaby (the one Form D message).
+
+The 2027 draft board is the deadline for 1 and 3; a conditional resolves only once its
+season is `sync_locked`, so 2 has slack — but it is the one most likely to be forgotten,
+since the wording lives only in a Discord message.
+
+### Discord parser: decoration is staged as fake player assets
+
+**Priority:** `P3` — cosmetic; every proposal is reviewed before it is applied.
+**Status:** `open`
+
+`🚨🚨IT'S TRADE SZN BOYZ🚨🚨`, `CONDITIONAL` and `Guaranteed` each parse to
+`{"kind": "player", ...}` because they are the leftover lines of a real post and
+`_NOISE` only matches lines with no word characters at all. Harmless — the commissioner
+sees them in the queue and ignores them — but noisy.
+
+Deliberately left out of the 2026-09-07 parser pass: separating a meaningful word from
+decoration needs a keyword list (`CONDITIONAL` and `Guaranteed` are words, not emoji),
+which is a different kind of change from teaching the parser a message shape. Two
+trades in one message is the related known limitation — a real post carries an inline
+pair above a Form A body and only the Form A half is extracted
+(`test_form_a_wins_when_a_message_carries_an_inline_pair_as_well` pins it).
+
+
 ### Review IL-driven keeper restoration end to end — one signal, three separate carve-outs so far
 
 **Priority:** `P1` — re-triaged 2026-08-18: the 26/27 season is starting and IL

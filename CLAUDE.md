@@ -882,14 +882,38 @@ all, and it is the only way to resolve a handle like "Sir Hefty Boy". UNIQUE is
 silently empties at the next rollover.
 `discord_parse.py` is **PURE and deterministic — no LLM.** The fuzzy half is deciding
 which human "Cunha" is, and `_score_match` already does that; once split, finding the
-fields is a regex. `🚨 TRADE ALERT` is on every trade post and nothing else, so
-classification is exact. Manager resolution is `discord_id` → exact `display` →
+fields is a regex. Manager resolution is `discord_id` → exact `display` →
 **unambiguous initials** ("KT" = "Kevin T"; the league has two K-managers, so that check
 is load-bearing) with **no fuzzy tier** — ten candidates means asking is cheap and
 guessing is not. **`Pick N` is the overall position and a bare ordinal is the round**
 (confirmed, not assumed); `2026 4th 1st` and `6-9 Discoveries` are staged **unresolved**
 rather than guessed, because either reading reassigns a different manager's slot. The
 assumed pick owner (the giver) is shown as an assumption.
+**FOUR message forms, and the try order is a safety property** (A→B→C→D, corrected
+2026-09-07 after the first full-channel sweep; the original two-form list was drawn from
+a five-message sample and asserted C and D did not exist). A = `X trades: … to Y for: …`;
+B = two `Who Trades:` blocks; C = **assets on the manager's own line** (`KEVIN T TRADES
+ROUND 3 PICK 10`), needing ≥2 such lines, since a lone one is as likely to be narration
+as an announcement; D = `X gets Y … for …`, which names the **receiver first** and buries
+the giver at the head of the asset text, so that giver is returned `a_assumed=True` and
+shown as an assumption. A real post carries two trades — an inline pair above an A body —
+so C running before A would report the wrong managers; a test pins the order.
+**`TRADE ALERT` is on every trade post but NOT absent from everything else** — a real
+message complaining *about* the "Trade Alerts channel" matches it. It is harmless only
+because no form matches, so the FORM matchers are the actual filter and must stay strict;
+the old "and nothing else, so classification is exact" claim was wrong.
+**`ROUND 3 PICK 10` is the 10th pick OF ROUND 3, not overall pick 10**, and it used to
+return the latter — a confident wrong answer naming a different manager's slot. Now
+`unresolved`: the owner needs the draft order, which a pure parser hasn't got and
+`_resolve_assets` has no path to. The guard keys on a round named by DIGIT, so `1st round
+discovery` and `5th round pick` are untouched.
+**A mention (`<@1362…>`) is captured, not just stripped** — it is `resolve_manager`'s
+exact tier and the whole point of `managers.discord_user_id`, so `parse_trade` returns
+`a_discord_id`/`b_discord_id` and `ingest_message` passes them. Stripping alone left
+`'1362557356201738515> Kevin S'` (the punctuation strip only touches the ends), a name
+matching nobody. A role mention (`<@&…>`) is stripped but never read as a person.
+`_DISCOVERY` matches a bare `Discover` too: a real post typos "2027 Discover 2nd", which
+otherwise reads as a MAIN-draft pick — the same silent-wrong-pick class as the above.
 Raw messages are stored BEFORE parsing (`discord_messages`), so a parser bug is fixed by
 re-running over rows rather than re-fetching, and an uninterpretable message is still
 *visible*. The poll cursor is `MAX(discord_message_id)` ordered **numerically** — they

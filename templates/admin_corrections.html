@@ -199,6 +199,7 @@
             <span class="sub">
               {{ d.resolution.a.display or d.resolution.a.typed }}
               {% if d.resolution.a.method %}<span class="tag">{{ d.resolution.a.method }}</span>{% endif %}
+              {% if d.resolution.a.assumed %}<span class="pill warn">assumed giver</span>{% endif %}
               ⇄
               {{ d.resolution.b.display or d.resolution.b.typed }}
               {% if d.resolution.b.method %}<span class="tag">{{ d.resolution.b.method }}</span>{% endif %}
