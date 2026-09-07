@@ -430,6 +430,19 @@ Write tests for these. They are custom and non-obvious:
   is the bonus 6th slot and is what `validate_keeper_selection` keys the cap exemption
   on. A discovery-acquired player kept in an ordinary slot is labelled `"discovery"`
   and raises no cap. Don't conflate them.
+  **The discovery board applies pick trades** (fixed 2026-09-07). `get_discovery_board`
+  built its slots from the snake alone and never called `pick_ownership`, so a traded
+  discovery pick was recorded, shown in the future-picks grid and in `manager_assets`,
+  and then ignored by the one board that runs the draft — four real 2026 slots would
+  have called a manager who no longer owned the pick, and `approve_queued_pick` resolves
+  the on-the-clock manager from that same board, so the autodraft would have picked from
+  his queue. `get_draft_board`, `get_future_picks`, `manager_assets` and
+  `draft_preparation` all folded ownership; this was the only reader that didn't.
+  **Both boards now share a shape as well as a source** — same `(round,
+  original_owner_person)` key, same `traded`/`reassigned` flags, same "a completed pick
+  keeps the manager who actually made it" rule (`pick_number` is positional), and
+  condition metadata attached only to a conditional slot. Divergence between two readers
+  of one truth was the bug, so keep them mirrored.
   **Linking a pick to a real player is `services.link_discovery_pick`, admin-only and
   never automatic.** A pick is recorded as free text (`record_discovery_pick`) because
   the player has no `players` row yet; linking is what lets the derivation see it at

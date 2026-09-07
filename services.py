@@ -8354,12 +8354,30 @@ DISCOVERY_PICKS_PER_MANAGER = 2
 def get_discovery_board(db: Session, league: League, season_year: int) -> list[dict]:
     """The discovery-draft board: a 2-round SNAKE over reverse-standings order (worst
     team picks first; round 2 reverses). All managers pick; no keepers/free picks.
-    Overlays recorded discovery picks (DraftPick, draft_type='discovery')."""
+    Overlays recorded discovery picks (DraftPick, draft_type='discovery').
+
+    **Applies pick trades**, which it did not until 2026-09-07 — it built its slots from
+    the snake alone and never called `pick_ownership`, so a traded discovery pick was
+    recorded, visible in the future-picks grid and in `manager_assets`, and then ignored
+    by the one board that actually runs the draft. Four of the 2026 slots were owed to
+    someone other than the manager it would have called. `get_draft_board`,
+    `get_future_picks`, `manager_assets` and `draft_preparation` all folded ownership;
+    this was the only reader that didn't, which is precisely the shape of bug that
+    divergence produces.
+
+    Deliberately mirrors `get_draft_board`'s tail rather than inventing its own: same
+    `(round, original_owner_person)` key, same "a completed pick keeps the manager who
+    actually made it" rule, same `traded`/`reassigned` flags, same condition metadata
+    attached only to a conditional slot. The two boards disagreeing is the thing being
+    fixed, so they now share a shape as well as a source.
+    """
     order = _reverse_standings_managers(db, league)
     if not order:
         order = db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
-    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
-    fpl_by_id = {m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)}
+    managers = db.query(Manager).filter_by(league_id=league.id).all()
+    names = {m.id: m.display for m in managers}
+    id_by_person = {m.display: m.id for m in managers}
+    fpl_by_id = {m.id: m.fpl_manager_id for m in managers}
 
     slots = []
     for rnd in range(1, DISCOVERY_PICKS_PER_MANAGER + 1):
@@ -8367,6 +8385,8 @@ def get_discovery_board(db: Session, league: League, season_year: int) -> list[d
         for m in seq:
             slots.append((rnd, m.id))
 
+    own = pick_ownership(db, league, season_year, "discovery")
+    conds = pick_conditions(db, league, season_year, "discovery")
     picks = {
         dp.pick_number: dp
         for dp in db.query(DraftPick).filter_by(
@@ -8375,16 +8395,35 @@ def get_discovery_board(db: Session, league: League, season_year: int) -> list[d
     }
     pnames = {p.id: p.name for p in db.query(Player)}
     out = []
-    for i, (rnd, mid) in enumerate(slots, start=1):
+    for i, (rnd, orig_id) in enumerate(slots, start=1):
+        orig_person = names.get(orig_id)
+        computed_owner_id = id_by_person.get(
+            own.get((rnd, orig_person), orig_person), orig_id
+        )
         dp = picks.get(i)
+        # `pick_number` is positional, so a completed slot keeps the manager who
+        # actually picked it: a later trade (or a standings adjustment moving the
+        # snake) must not re-attribute a selection already made. Same rule, and the
+        # same reason, as the main board.
+        recorded_owner_id = dp.manager_id if dp and dp.manager_id else None
+        owner_id = recorded_owner_id or computed_owner_id
         player = None
         if dp:
             player = dp.player_label or (pnames.get(dp.player_id) if dp.player_id else None)
-        out.append({
+        row = {
             "pick": i, "round": rnd,
-            "owner": names.get(mid), "owner_fpl": fpl_by_id.get(mid),
+            "owner": names.get(owner_id), "owner_fpl": fpl_by_id.get(owner_id),
+            "original_owner": orig_person,
+            "traded": owner_id != orig_id,
+            # the order moved under a pick already made — surface it, don't paper over it
+            "reassigned": bool(recorded_owner_id
+                               and recorded_owner_id != computed_owner_id),
             "player": player,
-        })
+        }
+        cond = conds.get((rnd, orig_person))
+        if cond:
+            row.update(cond)
+        out.append(row)
     return out
 
 
