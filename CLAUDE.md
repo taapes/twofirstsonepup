@@ -374,6 +374,36 @@ Write tests for these. They are custom and non-obvious:
   `get_standings` (adjusted + alphabetical tie-break), never `Standing.rank`. Cup
   winners resolve through `services._resolve_cup_winner_name` — live bracket, then the
   `season_history` fallback — which is the helper to extend for a fifth metric.
+  **A conditional pick trade is enterable for EITHER draft type** (fixed 2026-09-07).
+  This is why the whole feature sat unused for a year: `templates/draft.html`'s
+  trade-a-pick form sent no `draft_type`, so the route's `Form("main")` default always
+  won, and every clause the league actually writes moves a DISCOVERY pick. The JSON API
+  had the mirror-image hole (`draft_type` but no condition fields), which is exactly why
+  the six guaranteed Cunha picks are unconditional. The form now posts `draft_type`, the
+  discovery page carries the same form (reusing `_condition_form.html`), and
+  `_board_response` swaps the discovery partial back for a discovery post. The JSON API
+  stays condition-free on purpose — one entry surface for conditions is enough, and it is
+  the one with the shared macro. A test asserts the rendered HTML carries the field,
+  because a route test posts it by hand and so cannot catch its absence.
+  **`GET /conditions`** lists every clause with its live status, built by filtering
+  `services.conditional_picks` over `get_trades` rather than a new query layer — that
+  function is already cross-season and already resolves each clause. Read-only and public
+  (a condition moves somebody's pick); rulings stay on `/admin/corrections`.
+  **The review deadline is DERIVED, never stored.** `services.condition_rulings_due`
+  reports a clause only when it is still `pending` AND has an unruled `manual` term whose
+  season's league row is `sync_locked` (or which names no season) — the same fact
+  `_resolve_term` uses to decide when it stops saying `pending`, so a prompt and its
+  resolution can never disagree, and no column was needed. It reaches the homepage,
+  `/admin/health` and the private Discord sweep for free via the new `flagged_actions`
+  category, and the `discord_alerts` fingerprint dedupe then repeats it about once a
+  gameweek until ruled. Reporting only ANSWERABLE terms is the point: a prompt nobody can
+  act on becomes the permanently-red item the narrowed keeper-clock check already taught
+  us to avoid.
+  **A manual term KEEPS its `season_year`** — reversing the original decision to null it
+  alongside the structured subject. It is a different kind of field: nothing reads a
+  manual term (`_resolve_term` returns `manual_state` first, so keeping it cannot affect
+  resolution), and it is the only thing recording when the question becomes answerable.
+  Nulled, every manual term looked due the moment it was entered.
   Entry is **commissioner-only** (route + template gate). The entry and correction forms
   share `templates/_condition_form.html` (the metric/comparison lists had already
   drifted between two copies) and post **parallel arrays**, one entry per term, zipped

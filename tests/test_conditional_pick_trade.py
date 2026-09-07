@@ -128,7 +128,7 @@ _FLAT_TO_TERM = {
 
 
 def _pick_trade(session, lg, frm, to, orig, *, round=2, created_at=T1,
-                terms=None, logic=None, effect=None, **cond):
+                terms=None, logic=None, effect=None, draft_type="main", **cond):
     """A pick trade, optionally conditional.
 
     Pass `terms=[...]` for a real multi-term clause, or the flat `condition_*` kwargs
@@ -145,7 +145,7 @@ def _pick_trade(session, lg, frm, to, orig, *, round=2, created_at=T1,
 
     t = Trade(league_id=lg.id, from_manager=frm.id, to_manager=to.id,
               pick_original_manager=orig.id, pick_round=round,
-              pick_season_year=PICK_YEAR, pick_draft_type="main",
+              pick_season_year=PICK_YEAR, pick_draft_type=draft_type,
               created_at=created_at,
               condition_logic=logic, condition_effect=effect,
               pick_round_if_met=round_if_met)
@@ -201,6 +201,182 @@ def _flat_condition(**flat):
 
 def _only_term(session):
     return session.query(TradeConditionTerm).one()
+
+
+# ---- conditions on a DISCOVERY pick ----------------------------------------
+# The whole Item 17 feature went a year unused because no path could enter one of
+# these, and every clause the league actually writes moves a discovery pick.
+def test_a_conditional_discovery_pick_is_read_on_the_discovery_side(test_session):
+    lg, m, _cl, _cm = _seed(test_session)
+    _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2,
+                draft_type="discovery", **_finish_condition())
+
+    assert services.pick_conditions(test_session, lg, PICK_YEAR, "discovery") != {}
+    # ...and NOT on the main draft: ownership is draft_type-scoped.
+    assert services.pick_conditions(test_session, lg, PICK_YEAR) == {}
+    assert services.pick_ownership(test_session, lg, PICK_YEAR) == {}
+
+
+def test_a_met_discovery_condition_reaches_the_discovery_board(test_session):
+    """The board is what runs the draft, so the clause has to land there — the lesson
+    from the board that ignored pick trades entirely."""
+    lg, m, _cl, cm = _seed(test_session)
+    _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2,
+                draft_type="discovery", effect="transfer_if_met",
+                **{k: v for k, v in _finish_condition().items()
+                   if k != "pick_round_if_met"})
+
+    slot = next(b for b in services.get_discovery_board(test_session, lg, PICK_YEAR)
+                if b["round"] == 2 and b["original_owner"] == "A")
+    assert slot["owner"] == "B", "A finished 1st, so the transfer condition is met"
+    assert slot["conditional"] is True
+    assert slot["condition_status"] == CONDITION_MET
+
+
+# ---- the four-way OR the Cunha deal needs ----------------------------------
+def test_an_or_resolves_off_a_known_branch_with_a_manual_one_unruled(test_session):
+    """The property term-level manual terms exist for. One branch of the real deal is
+    "pick 12 scoring 225", which no metric can ever evaluate — the clause still has to
+    be decidable on the branches that can be."""
+    lg, m, _cl, _cm = _seed(test_session)
+    _pick_trade(
+        test_session, lg, m["A"], m["B"], m["A"], round=2, draft_type="discovery",
+        logic="any", effect="transfer_if_met",
+        terms=[
+            {"metric": "league_finish", "manager_name": "A",
+             "season_year": COND_YEAR, "comparison": "<=", "threshold": 3},
+            {"metric": "manual", "note": "pick 12 scoring 225"},
+        ],
+    )
+    own = services.pick_ownership(test_session, lg, PICK_YEAR, "discovery")
+    assert own == {(2, "A"): "B"}, "one met branch decides it; the manual one is moot"
+
+
+def test_an_all_clause_is_not_met_on_one_failure_however_unruled_the_rest(test_session):
+    lg, m, _cl, _cm = _seed(test_session)
+    _pick_trade(
+        test_session, lg, m["A"], m["B"], m["A"], round=2, draft_type="discovery",
+        logic="all", effect="transfer_if_met",
+        terms=[
+            {"metric": "league_finish", "manager_name": "A",
+             "season_year": COND_YEAR, "comparison": ">", "threshold": 3},
+            {"metric": "manual", "note": "cunha less than 3 red cards"},
+        ],
+    )
+    assert services.pick_ownership(test_session, lg, PICK_YEAR, "discovery") == {}
+
+
+# ---- the nag: only what can actually be answered ---------------------------
+def test_a_manual_term_whose_season_is_still_running_is_not_reported(test_session):
+    """A prompt nobody can act on becomes a permanently-red item the reader learns to
+    skip — the lesson the keeper-clock health check taught when it was narrowed."""
+    lg, m, _cl, _cm = _seed(test_session, cond_frozen=False)
+    _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2,
+                logic="all", effect="transfer_if_met",
+                terms=[{"metric": "manual", "note": "cunha under 3 reds",
+                        "season_year": COND_YEAR}])
+
+    assert services.condition_rulings_due(test_session) == []
+    assert not [f for f in services.flagged_actions(test_session, lg)
+                if f["category"] == "Condition needs a ruling"]
+
+
+def test_a_manual_term_becomes_reportable_once_its_season_is_frozen(test_session):
+    lg, m, _cl, _cm = _seed(test_session, cond_frozen=True)
+    _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2,
+                logic="all", effect="transfer_if_met",
+                terms=[{"metric": "manual", "note": "cunha under 3 reds",
+                        "season_year": COND_YEAR}])
+
+    due = services.condition_rulings_due(test_session)
+    assert len(due) == 1 and due[0]["terms"][0]["note"] == "cunha under 3 reds"
+    flags = [f for f in services.flagged_actions(test_session, lg)
+             if f["category"] == "Condition needs a ruling"]
+    assert len(flags) == 1
+    assert "cunha under 3 reds" in flags[0]["detail"]
+    assert flags[0]["manager"] is None, "nobody is at fault; both names go in detail"
+
+
+def test_a_manual_term_keeps_the_season_it_is_about(test_session):
+    """It is the only structured field a manual term keeps, and it is not there to be
+    read — nothing reads a manual term. It says when the question can be ANSWERED, and
+    without it every manual term looks due the moment it is entered."""
+    lg, m, _cl, _cm = _seed(test_session)
+    services.trade_pick(
+        test_session, lg, from_fpl=m["A"].fpl_manager_id,
+        to_fpl=m["B"].fpl_manager_id, original_fpl=m["A"].fpl_manager_id,
+        round=2, season_year=PICK_YEAR, condition_logic="all",
+        condition_effect="transfer_if_met",
+        condition_terms=[{"metric": "manual", "season_year": COND_YEAR,
+                          "note": "cunha under 3 reds"}])
+    term = _only_term(test_session)
+    assert term.season_year == COND_YEAR
+    # ...and the structured subject is still cleared, which was never in question.
+    assert term.player_id is None and term.manager_name is None
+    assert term.comparison is None and term.threshold is None
+
+
+def test_keeping_the_season_does_not_change_how_a_manual_term_resolves(test_session):
+    """`_resolve_term` returns `manual_state` before it looks at a season, so this is
+    the safety argument for keeping the field at all."""
+    lg, m, _cl, _cm = _seed(test_session)
+    _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2,
+                logic="all", effect="transfer_if_met",
+                terms=[{"metric": "manual", "note": "n", "season_year": COND_YEAR,
+                        "manual_state": CONDITION_MET}])
+    assert services.pick_ownership(test_session, lg, PICK_YEAR) == {(2, "A"): "B"}
+
+
+def test_a_term_naming_no_season_is_answerable_immediately(test_session):
+    """There is nothing to wait for."""
+    lg, m, _cl, _cm = _seed(test_session, cond_frozen=False)
+    _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2,
+                logic="all", effect="transfer_if_met",
+                terms=[{"metric": "manual", "note": "whatever they agreed"}])
+    assert len(services.condition_rulings_due(test_session)) == 1
+
+
+def test_ruling_on_a_term_clears_the_nag(test_session):
+    lg, m, _cl, _cm = _seed(test_session)
+    t = _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2,
+                    logic="all", effect="transfer_if_met",
+                    terms=[{"metric": "manual", "note": "cunha under 3 reds",
+                            "season_year": COND_YEAR}])
+    assert services.condition_rulings_due(test_session)
+
+    services.set_condition_term_state(
+        test_session, lg, term_id=str(_only_term(test_session).id), state=CONDITION_MET)
+    assert services.condition_rulings_due(test_session) == []
+
+
+def test_an_evaluable_only_clause_never_asks_for_a_ruling(test_session):
+    """Nothing to rule on: the data answers it."""
+    lg, m, _cl, _cm = _seed(test_session, cond_frozen=False)
+    _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2, **_finish_condition())
+    assert services.condition_rulings_due(test_session) == []
+
+
+# ---- the /conditions listing ------------------------------------------------
+def test_conditional_picks_lists_only_conditional_rows(test_session):
+    lg, m, _cl, _cm = _seed(test_session)
+    _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2)           # ordinary
+    _pick_trade(test_session, lg, m["B"], m["C"], m["B"], round=3, created_at=T2,
+                **_finish_condition(pick_round_if_met=1))
+
+    seasons = services.conditional_picks(test_session)
+    # Grouped by the season the TRADE happened in (get_trades' display rule — a
+    # January trade belongs to the season that started the previous calendar year),
+    # not by the season of the pick it moves. One group, one conditional row.
+    assert len(seasons) == 1
+    rows = seasons[0]["trades"]
+    assert len(rows) == 1 and rows[0]["condition_status"] == CONDITION_MET
+    assert "R3" in rows[0]["what"], "the conditional row, not the ordinary one"
+
+
+def test_conditional_picks_is_empty_without_any(test_session):
+    lg, m, _cl, _cm = _seed(test_session)
+    _pick_trade(test_session, lg, m["A"], m["B"], m["A"], round=2)
+    assert services.conditional_picks(test_session) == []
 
 
 # ---- the regression that matters most --------------------------------------
@@ -726,6 +902,67 @@ def _cond_form(m):
         "condition_comparison": "<=", "condition_threshold": "3",
         "condition_season_year": str(COND_YEAR), "pick_round_if_met": "1",
     }
+
+
+def test_the_route_records_a_conditional_DISCOVERY_pick(client, test_session, monkeypatch):
+    """The hole that kept this whole feature unused: the form sent no `draft_type`, so
+    the route's Form("main") default won and every attempt landed on the main draft."""
+    lg, m = _route_seed(test_session)
+    _login_admin(client, monkeypatch)
+
+    r = client.post(f"/draft/{PICK_YEAR}/trade-pick",
+                    data={**_cond_form(m), "draft_type": "discovery",
+                          "condition_effect": "transfer_if_met",
+                          "pick_round_if_met": ""})
+    assert r.status_code == 200, r.text
+    t = test_session.query(Trade).one()
+    assert t.pick_draft_type == "discovery", "recorded against the wrong draft"
+    assert t.condition_logic is not None, "and it kept its condition"
+
+
+def test_the_trade_pick_form_tells_the_route_which_draft_it_means(
+        client, test_session, monkeypatch):
+    """The bug itself was in the TEMPLATE, not the route: the form sent no `draft_type`,
+    so Form("main") won and a discovery pick trade was silently recorded against the
+    main draft. Route tests post the field by hand and so cannot catch its absence —
+    this asserts the rendered HTML carries it."""
+    lg, m = _route_seed(test_session)
+    _login_admin(client, monkeypatch)
+
+    main = client.get(f"/draft/{PICK_YEAR}")
+    assert main.status_code == 200
+    assert 'name="draft_type" value="main"' in main.text
+
+    disc = client.get(f"/discovery/{PICK_YEAR}")
+    assert disc.status_code == 200
+    assert 'name="draft_type" value="discovery"' in disc.text
+
+
+def test_a_discovery_post_swaps_the_discovery_board_back(client, test_session, monkeypatch):
+    """Rendering the main partial here would replace a 2-round discovery board with a
+    15-round main one, and the discovery board's own 7s poll would then fight to put it
+    back."""
+    lg, m = _route_seed(test_session)
+    _login_admin(client, monkeypatch)
+
+    r = client.post(f"/draft/{PICK_YEAR}/trade-pick",
+                    data={"pick": f"{m['A'].fpl_manager_id}:2",
+                          "to_fpl": m["B"].fpl_manager_id,
+                          "draft_type": "discovery"})
+    assert r.status_code == 200, r.text
+    assert 'id="discovery-board"' in r.text
+    assert r.headers.get("HX-Trigger") == "discoveryChanged"
+
+
+def test_a_main_post_still_swaps_the_main_board(client, test_session, monkeypatch):
+    lg, m = _route_seed(test_session)
+    _login_admin(client, monkeypatch)
+
+    r = client.post(f"/draft/{PICK_YEAR}/trade-pick",
+                    data={"pick": f"{m['A'].fpl_manager_id}:2",
+                          "to_fpl": m["B"].fpl_manager_id})
+    assert r.status_code == 200, r.text
+    assert r.headers.get("HX-Trigger") == "draftChanged"
 
 
 def test_a_manager_cannot_make_a_pick_conditional_via_the_route(

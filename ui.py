@@ -42,12 +42,23 @@ def _league_or_404(db: Session):
     return league
 
 
+def _manager_options(db: Session, league) -> list[dict]:
+    """The `{name, fpl}` list every trade form's manager `<select>` renders. Shared by
+    the main and discovery board contexts so the two can't drift — the same reason
+    `_condition_form.html` exists."""
+    return [
+        {"name": m.display, "fpl": m.fpl_manager_id}
+        for m in db.query(Manager).filter_by(league_id=league.id)
+        .order_by(Manager.name).all()
+    ]
+
+
 def _board_ctx(request: Request, db: Session, league, year: int, draft_type: str = "main") -> dict:
     board = services.get_draft_board(db, league, year, draft_type)
     managers = (
         db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
     )
-    mgr_opts = [{"name": m.display, "fpl": m.fpl_manager_id} for m in managers]
+    mgr_opts = _manager_options(db, league)
     fpl_by_person = {m.display: m.fpl_manager_id for m in managers}
 
     # current round-1 order (commissioner-set) for the visual reorder control,
@@ -182,6 +193,15 @@ def _board_response(request, db, league, year, draft_type="main", *, error: str 
     with `error` set, so the manager SEES why nothing changed instead of the board
     silently staying the same — htmx doesn't swap non-2xx responses, so a raised
     RuleViolation must reach the picker through a 200 like this one."""
+    if draft_type == "discovery":
+        # Posted from the discovery page, so swap the discovery board back. Rendering
+        # "_board.html" here would replace a 2-round discovery board with a 15-round
+        # main one — and its own poll would then fight to put it back.
+        ctx = _discovery_ctx(request, db, league, year)
+        ctx["pick_error"] = error
+        resp = templates.TemplateResponse(request, "_discovery_board.html", ctx)
+        resp.headers["HX-Trigger"] = "discoveryChanged"
+        return resp
     ctx = _board_ctx(request, db, league, year, draft_type)
     ctx["pick_error"] = error
     resp = templates.TemplateResponse(request, "_board.html", ctx)
@@ -2421,12 +2441,41 @@ def draft_revert_order(
 def _discovery_ctx(request: Request, db: Session, league, year: int) -> dict:
     board = services.get_discovery_board(db, league, year)
     on_clock = services.next_open_pick(board)
+    # The trade-a-pick form's two lists, mirroring _board_ctx. Building the pick list
+    # from the board is only possible because get_discovery_board exposes
+    # `original_owner` — `pick` is "<original_fpl>:<round>", i.e. the SLOT, not its
+    # current holder, so the form needs the original owner's fpl id.
+    fpl_by_person = {
+        m.display: m.fpl_manager_id
+        for m in db.query(Manager).filter_by(league_id=league.id)
+    }
+    by_round: dict = {}
+    for slot in board:
+        key = (slot["round"], slot["original_owner"])
+        if key in by_round:
+            continue
+        by_round[key] = {
+            "round": slot["round"],
+            "original_owner": slot["original_owner"],
+            "original_fpl": fpl_by_person.get(slot["original_owner"]),
+            "current_owner": slot["owner"],
+        }
+    pick_rounds = [
+        {"round": r,
+         "picks": sorted((v for k, v in by_round.items() if k[0] == r),
+                         key=lambda s: s["original_owner"] or "")}
+        for r in sorted({k[0] for k in by_round})
+    ]
     return {
         "request": request, "league": league, "year": year, "board": board,
         "on_clock": on_clock,
         "can_pick": bool(on_clock) and can_act_as(request, on_clock.get("owner_fpl")),
         "discovery_available": services.phase_context(db, league)["discovery_available"] or is_admin(request),
         "is_admin": is_admin(request),
+        "managers": _manager_options(db, league),
+        "pick_rounds": pick_rounds,
+        # For the conditional-term player datalist, the same list draft.html uses.
+        "players": services.list_players(db, league),
     }
 
 
@@ -2434,6 +2483,23 @@ def _discovery_board_response(request, db, league, year):
     resp = templates.TemplateResponse(request, "_discovery_board.html", _discovery_ctx(request, db, league, year))
     resp.headers["HX-Trigger"] = "discoveryChanged"
     return resp
+
+
+@router.get("/conditions", response_class=HTMLResponse)
+def conditions_page(request: Request, db: Session = Depends(get_db)):
+    """Every conditional pick clause and its live status.
+
+    Read-only and visible to every manager: a condition moves somebody's draft pick, so
+    it is public in the same way the board pills already are. Rulings stay on
+    /admin/corrections, which is the only surface that can give one.
+    """
+    league = _league_or_404(db)
+    return templates.TemplateResponse(request, "conditions.html", {
+        "request": request,
+        "league": league,
+        "seasons": services.conditional_picks(db),
+        "rulings": services.condition_rulings_due(db) if is_admin(request) else [],
+    })
 
 
 @router.get("/discovery/{year}", response_class=HTMLResponse)

@@ -3042,11 +3042,73 @@ def _return_required_entries(db: Session, league: League) -> list[dict]:
     return out
 
 
+def conditional_picks(db: Session) -> list[dict]:
+    """Every conditional pick clause, newest season first — the `/conditions` view.
+
+    A filter over `get_trades`, not a new query layer: that function is already
+    cross-season (a clause routinely names a season whose league row doesn't exist yet)
+    and already resolves each clause and attaches `condition_status`, `condition_note`
+    and `manual_terms`. Re-deriving any of it here would fork the page from `/trades`,
+    which is the divergence the discovery board just taught us to avoid.
+    """
+    out = []
+    for season in get_trades(db):
+        rows = [r for r in season["trades"] if r.get("conditional")]
+        if rows:
+            out.append({"year": season["year"], "trades": rows})
+    return out
+
+
+def condition_rulings_due(db: Session) -> list[dict]:
+    """Clauses waiting on a commissioner ruling, and ANSWERABLE now.
+
+    `{trade_id, what, from, to, year, terms: [{id, note}]}` per clause.
+
+    "Answerable" is the whole point, and it is why this reports less than "everything
+    outstanding": a manual term whose season is still being PLAYED cannot be ruled on
+    yet, and a prompt that cannot be acted on becomes a permanently-red item the reader
+    learns to skip — exactly what the keeper-clock health check did before it was
+    narrowed. So a term counts only once its season's league row is `sync_locked`, or
+    when it names no season at all (nothing to wait for).
+
+    The deadline is DERIVED from that lock rather than stored: `_resolve_term` uses the
+    same fact to decide when it stops saying `pending`, so a prompt and its resolution
+    can never disagree. That is why this needed no new column.
+    """
+    locked_years = {
+        y for (y,) in db.query(League.season_year).filter(League.sync_locked.is_(True))
+    }
+
+    def answerable(term) -> bool:
+        return (term.metric == CONDITION_MANUAL and term.manual_state is None
+                and (term.season_year is None or term.season_year in locked_years))
+
+    due = []
+    for season in conditional_picks(db):
+        for row in season["trades"]:
+            if row.get("condition_status") != CONDITION_PENDING:
+                continue
+            trade = db.query(Trade).filter_by(id=uuid.UUID(row["id"])).one_or_none()
+            if trade is None:
+                continue
+            terms = [
+                {"id": str(term.id), "note": term.note}
+                for term in _condition_terms(db, trade) if answerable(term)
+            ]
+            if terms:
+                due.append({
+                    "trade_id": row["id"], "what": row.get("what"),
+                    "from": row.get("from"), "to": row.get("to"),
+                    "year": season["year"], "terms": terms,
+                })
+    return due
+
+
 def flagged_actions(db: Session, league: League) -> list[dict]:
     """League attention items for the home page: IL/international players that must be
     returned at season end, players on the IL 4+ GWs (eligible to return), players
-    playing again but still parked, and teams flagged or at risk of an anti-tanking
-    violation."""
+    playing again but still parked, teams flagged or at risk of an anti-tanking
+    violation, and conditional picks waiting on a ruling that can now be given."""
     from models import InternationalList
 
     cur = current_gameweek(db, league)
@@ -3128,6 +3190,24 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
             if streak and streak >= ANTI_TANKING_MIN_WEEKS - 1:
                 out.append({"category": "Anti-tanking", "manager": info["manager"].display,
                             "detail": f"at risk — {streak} straight GWs near the threshold"})
+    # Conditional picks whose manual term can now be ruled on. Deliberately only
+    # the ANSWERABLE ones — see condition_rulings_due. Reaches the homepage,
+    # /admin/health and the private Discord alert sweep for free, because
+    # discord_bridge.collect_alerts normalises whatever this returns, and the
+    # discord_alerts fingerprint dedupe then repeats it about once a gameweek
+    # until it's ruled — the cadence a typed deadline would have wanted.
+    for due in condition_rulings_due(db):
+        for term in due["terms"]:
+            out.append({
+                "category": "Condition needs a ruling",
+                # No manager is at fault; both names belong in the detail. Same
+                # shape collect_alerts uses for a failed health check.
+                "manager": None,
+                "detail": (f"{due['from']} → {due['to']} ({due['what']}): "
+                           f"{term['note'] or 'written-out term'} — rule on it "
+                           "in Corrections"),
+            })
+
     return out
 
 
@@ -5789,13 +5869,24 @@ def _condition_spec(
         # manual term has no structured subject at all. Stored as NULL rather than as
         # whatever the form happened to submit, so a later reader can't mistake a
         # leftover ">= 1" for part of the rule.
+        #
+        # `season_year` is the ONE field a manual term keeps, which reverses the
+        # original decision to null it alongside the subject. It is a different kind of
+        # field: it is not where a value is read from — nothing reads a manual term,
+        # `_resolve_term` returns `manual_state` before it looks at anything else, so
+        # keeping it cannot affect resolution — it is when the question becomes
+        # ANSWERABLE. Nulling it threw that away, and `condition_rulings_due` then had
+        # to treat every manual term as due immediately: asking in September for a
+        # ruling on "cunha less than 3 red cards" in a season that ends in May, which is
+        # the permanently-red prompt the reader learns to ignore. NULL still means
+        # "nothing to wait for" and is still the right value when no season is named.
         scoped = metric in CONDITION_THRESHOLD_METRICS
         manual = metric == CONDITION_MANUAL
         out.append({
             "metric": metric,
             "player_id": None if manual else player_id,
             "manager_name": None if manual else name,
-            "season_year": None if manual else raw.get("season_year"),
+            "season_year": raw.get("season_year"),
             "comparison": raw.get("comparison") if scoped else None,
             "threshold": raw.get("threshold") if scoped else None,
             "note": note,

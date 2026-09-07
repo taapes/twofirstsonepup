@@ -41,6 +41,7 @@ ADMIN_SESSION_PAGES = [
     "/my-team",
     "/my-team/upcoming",
     "/picks",
+    "/conditions",
     "/players",
     "/trade",
     "/trades",

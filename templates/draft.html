@@ -124,6 +124,10 @@
         <summary>Trade a pick</summary>
         <form hx-post="/draft/{{ year }}/trade-pick" hx-target="#board" hx-swap="outerHTML"
               onsubmit="return condResolve(this)">
+          {# Without this the route's Form("main") default wins and a discovery pick
+             trade is silently recorded against the MAIN draft. That is why no
+             conditional discovery trade could be entered at all before 2026-09-07. #}
+          <input type="hidden" name="draft_type" value="{{ draft_type }}">
           <label>pick
             <select name="pick" style="max-width:100%">
               {% for rnd in pick_rounds %}

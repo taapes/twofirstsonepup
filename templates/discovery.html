@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_condition_form.html" as cond with context %}
 {% block title %}Discovery Draft {{ year }}{% endblock %}
 {% block content %}
 <h1>Discovery Draft <span class="tag">{{ year }}/{{ (year + 1) % 100 }}</span></h1>
@@ -27,6 +28,72 @@
       <p class="sub">The discovery draft isn't open right now.</p>
       {% endif %}
     </div>
+
+    {% if is_admin %}
+    <h2>Trade a discovery pick</h2>
+    <div class="card" style="padding:12px">
+      <p class="sub">Reassigns a discovery slot. Visit
+        <code>/discovery/{{ year + 1 }}</code> to trade a future year's picks.</p>
+      {# Posts to the MAIN draft route with draft_type=discovery — the route has always
+         supported it; only the form was missing the field. #}
+      <form hx-post="/draft/{{ year }}/trade-pick" hx-target="#discovery-board"
+            hx-swap="outerHTML" onsubmit="return condResolve(this)">
+        <input type="hidden" name="draft_type" value="discovery">
+        <label>pick
+          <select name="pick" style="max-width:100%">
+            {% for rnd in pick_rounds %}
+            <optgroup label="Round {{ rnd.round }}">
+              {% for p in rnd.picks %}
+              <option value="{{ p.original_fpl }}:{{ p.round }}">R{{ p.round }} · {{ p.original_owner }}{% if p.current_owner != p.original_owner %} (now {{ p.current_owner }}){% endif %}</option>
+              {% endfor %}
+            </optgroup>
+            {% endfor %}
+          </select></label>
+        <label>to
+          <select name="to_fpl">{% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}</select></label>
+        <details style="margin:6px 0">
+          <summary class="sub">Make this pick conditional</summary>
+          <div class="cond-wrap">
+            {{ cond.term_row(managers, "condition_player_fpl_id") }}
+            <button type="button" class="mini" onclick="condAddTerm(this)">+ another condition</button>
+          </div>
+          {{ cond.clause_fields(2) }}
+          <label>the deal, as written (optional)
+            <input name="conditions" autocomplete="off" style="width:100%"
+                   placeholder="kept verbatim, so the wording survives"></label>
+          <p class="sub">Each term resolves only once its season is finished and frozen;
+            until then the pick stays where it is. A term written out by hand stays
+            pending until you rule on it in Corrections.</p>
+        </details>
+        <datalist id="condManagers">
+          {% for m in managers %}<option value="{{ m.name }}"></option>{% endfor %}
+        </datalist>
+        <button>Trade pick</button>
+      </form>
+    </div>
+    <datalist id="playerList">
+      {% for p in players %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.label }}"></option>
+      {% if p.alias %}<option data-fpl="{{ p.fpl_id }}" value="{{ p.alias }}"></option>{% endif %}
+      {% endfor %}
+    </datalist>
+    <script>
+      // Same resolver draft.html uses: a conditional player subject is picked from the
+      // datalist so the hidden fpl id is set, and it runs over EVERY term row.
+      function condResolve(form) {
+        var ok = true;
+        form.querySelectorAll('[name=condition_player_label]').forEach(function (box) {
+          var hidden = box.parentNode.querySelector('[name=condition_player_fpl_id]');
+          if (!hidden) { return; }
+          if (!box.value) { hidden.value = ''; return; }
+          var opt = document.querySelector('#playerList option[value="' + box.value.replace(/"/g, '\\"') + '"]');
+          if (!opt) { alert('Pick the condition player from the list: ' + box.value); ok = false; return; }
+          hidden.value = opt.dataset.fpl;
+        });
+        return ok;
+      }
+    </script>
+    {{ cond.condition_js() }}
+    {% endif %}
   </div>
 </div>
 {% endblock %}

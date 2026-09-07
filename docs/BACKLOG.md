@@ -191,12 +191,15 @@ are the DATA gaps it exposed, none of which the parser can fix.
    acquisition label from the SENDER, so where the receiver still holds the player (John
    has Bruno) the clock is currently derived from the "on the GW1 roster" proxy instead.
    That may or may not give a different answer — verify per player before backfilling.
-2. **No conditional trade has ever been recorded.** Zero rows with a condition clause,
-   zero `trade_condition_terms`, zero free-text `conditions`, and all 50 `future_picks`
-   notes empty — so the Item 17 machinery has never been used on a real deal. At least
-   three announced conditionals are captured nowhere: Grealish (2026 10th → **2028 1st**
-   at 200+ points, plus a 2028 2nd discovery for doing it twice), Wissa (**2027 7th** if
-   177+ points and fewer than 7 yellows), Brobbey (2026 5th → **2026 3rd** at 120+).
+2. ~~**No conditional trade has ever been recorded.**~~ **Closed 2026-09-07.** The
+   cause was an entry hole, not the model: the trade-a-pick form sent no `draft_type`,
+   so a *discovery* pick trade — which is what every real clause moves — could not be
+   made conditional at all. Fixed, and the live **Cunha deal's** three conditional
+   add-ons are now recorded (all `pending`; nothing moves until 26/27 is frozen).
+   The three 2025-era clauses (Grealish, Wissa, Brobbey) were deliberately NOT
+   backfilled: the commissioner confirmed they are stale, and all three resolve
+   `not_met` against real data anyway (Grealish 79 pts of 200, Brobbey 92 of 120,
+   Wissa 27 of 177), so no pick would move.
 3. **Three announced picks are absent from the ledger entirely** — confirmed by query:
    the Wissa 2027 R7, Scott's 2028 discovery 2nd from the Alisson deal, and Kevin's
    R4 P10 to Gaby (the one Form D message).
@@ -204,6 +207,29 @@ are the DATA gaps it exposed, none of which the parser can fix.
 The 2027 draft board is the deadline for 1 and 3; a conditional resolves only once its
 season is `sync_locked`, so 2 has slack — but it is the one most likely to be forgotten,
 since the wording lives only in a Discord message.
+
+### A conditional pick whose deadline precedes the season it depends on
+
+**Priority:** `P2` — one live clause; a commissioner decision first, maybe a column later.
+**Status:** `open`
+
+The Cunha deal's third clause — "+1 additional discovery 2026 2nd (cunha 200+ and ks
+wins league)" — **cannot settle in time as written.** Its condition turns on how 26/27
+finishes (Cunha's total, Kevin S's league position), which resolves around May 2027, but
+the 2026 discovery draft runs in the autumn, roughly seven months earlier. `pending`
+means no transfer, so Kevin S will hold and use a pick he may turn out to have owed
+Kevin T.
+
+No code can fix that — it is an ambiguity in the agreement, and the commissioner should
+confirm whether "2026 2nd" meant the following autumn's draft. Recorded as written
+(2026-09-07) with the question in its verbatim `conditions` text, so the promise is
+visible on the board, `/picks` and `/conditions` instead of living in a Discord message.
+
+This is also the one case a **typed** review deadline would serve, and the reason to
+reconsider one later. The derived deadline (`condition_rulings_due`, keyed on
+`sync_locked`) is right for every other clause and needs no column; an agreement whose
+own due date PRECEDES the season it depends on is the exception. One clause is not yet a
+pattern — revisit if a second appears.
 
 ### Discord parser: decoration is staged as fake player assets
 

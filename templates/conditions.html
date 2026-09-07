@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Conditional picks{% endblock %}
+{% block content %}
+<h1>Conditional picks</h1>
+<p class="sub">Picks that move — or change round — only if something happens. Each clause
+  is re-resolved every time this page loads, so the status is always current; nothing is
+  written back. A term resolves once its season is finished and frozen, which is why a
+  live season reads <em>pending</em> even when the number already clears the bar.</p>
+
+{% if rulings %}
+<div class="card" style="padding:12px">
+  <h2 style="margin-top:0">Waiting on you</h2>
+  <p class="sub">These terms can be ruled on now — their season is final, or they name no
+    season. Rule on them in <a href="/admin/corrections">Corrections</a>.</p>
+  <ul>
+    {% for d in rulings %}
+    <li>{{ d.from }} → {{ d.to }} <span class="tag">{{ d.what }}</span>
+      {% for t in d.terms %}<br><span class="sub">“{{ t.note or "written-out term" }}”</span>{% endfor %}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% for season in seasons %}
+<h2>{{ season.year }}</h2>
+<div class="card">
+  <table>
+    <thead><tr><th>Pick</th><th>From</th><th>To</th><th>Status</th><th>Condition</th></tr></thead>
+    <tbody>
+      {% for t in season.trades %}
+      <tr>
+        <td>{{ t.what }}</td>
+        <td>{{ t.from }}</td>
+        <td>{{ t.to }}</td>
+        <td><span class="pill {% if t.condition_status == 'met' %}ok{% elif t.condition_status == 'not_met' %}warn{% endif %}">{{ t.condition_status.replace("_", " ") }}</span></td>
+        <td>{{ t.condition_note }}
+          {% if t.manual_terms %}
+          {% for term in t.manual_terms %}
+          <br><span class="sub">by hand: “{{ term.note }}”
+            — {{ term.manual_state.replace("_", " ") if term.manual_state else "not yet ruled" }}</span>
+          {% endfor %}
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="empty">No conditional picks recorded. The commissioner adds one when trading a
+  pick, on the draft or discovery board.</p>
+{% endfor %}
+{% endblock %}

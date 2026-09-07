@@ -115,6 +115,7 @@
         <a href="/history">History</a>
         <a href="/seasons">Seasons</a>
         <a href="/picks">Picks</a>
+        <a href="/conditions">Conditions</a>
         {% if (phase and phase.keepers_editable) or is_admin %}<a href="/keepers">Keepers</a>{% endif %}
         {% if (phase and phase.draft_available) or is_admin %}<a href="/draft/{{ draft_year }}">Draft {{ draft_year }}</a>{% endif %}
         {% if (phase and phase.discovery_available) or is_admin %}<a href="/discovery/{{ league.season_year }}">Discovery</a>{% endif %}
