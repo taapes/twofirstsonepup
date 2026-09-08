@@ -879,6 +879,57 @@ class KeeperSeed(Base):
     acquisition: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class GoalieClubGrant(Base):
+    """Which manager holds a club's goalkeeper rights, for a season where `goalie_team_mode`
+    stays 'off' — a 2026-only house rule the draft mechanics never recorded.
+
+    From 2026 the league drafts TWO Premier League clubs per manager instead of two
+    individual keepers, but FPL's own roster is untouched (still 15 players, still
+    exactly 2 GKP) and the draft used ordinary individual GKP picks — so nothing about
+    squad shape changed and `goalie_team_mode` correctly stays 'off'. The only place the
+    rule surfaces is when the specific human occupying a club's goal changes (a real
+    transfer): FPL has no concept of "own a club", so keeping a manager's actual roster
+    in sync takes a manual FPL trade, which reads exactly like an ordinary player trade
+    to `sync_trades` unless something else knows the two managers were never exchanging
+    value.
+
+    That "something else" is this table. It plays the role `DraftPick.team_id` /
+    `KeeperSelection.team_id` play for the OLDER single-club `keeper` mode — the base
+    fact `_goalie_team_history` reads — except there is no draft pick to derive it from,
+    so a human enters it. `_goalie_team_history` unions this table in as a third source;
+    everything downstream (`goalie_team_owner`, `_derive_gk_team_keeper_status`) already
+    supports more than one `team_id` per manager per season with no change, because the
+    dict it reads is already keyed on `team_id`, not on "the" club.
+
+    Deliberately NOT gated on `goalie_team_mode` — that flag governs squad SHAPE (14
+    picks + a club slot vs. 15), which this rule does not touch. Conflating the two would
+    misrepresent a rule that changes nothing about the draft.
+    """
+
+    __tablename__ = "goalie_club_grants"
+    __table_args__ = (
+        # A club has exactly one owner per season. Capacity (at most
+        # rules.GOALIE_CLUBS_PER_MANAGER per manager) is validated in services, not
+        # here — a transitional state mid-correction is legitimate and the commissioner
+        # confirmation flow needs to be able to hold it briefly.
+        UniqueConstraint(
+            "league_id", "season_year", "team_id", name="uq_goalie_grant_club_per_season"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    league_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
+    )
+    season_year: Mapped[int] = mapped_column(Integer, index=True)
+    manager_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("managers.id"), index=True
+    )
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("pl_teams.id"), index=True
+    )
+
+
 class KeeperSelection(Base):
     """A manager's chosen keepers for an upcoming season (submitted pre-draft).
     Validated against eligibility + caps before persisting. One row per kept

@@ -935,6 +935,12 @@ def squad_quota_reason(position, counts, *, limits=None) -> str | None:
 GOALIE_TEAM_MODES = ("off", "redraft", "keeper")
 GOALIE_TEAM_SLOTS = 1
 
+# The 2026-only house rule: two clubs per manager, squad shape untouched, tracked in
+# `goalie_club_grants` rather than by a `goalie_team_mode` value — see that model's
+# docstring. Capacity is enforced here, not as a DB constraint, because a transitional
+# state mid-commissioner-correction is legitimate.
+GOALIE_CLUBS_PER_MANAGER = 2
+
 # The outfield half of SQUAD_POSITION_LIMITS. Note it already sums to 13 — FPL's
 # outfield shape is exactly what the new rule asks for, so nothing about outfielders
 # changes; only the goalkeeper pair collapses into one club slot.

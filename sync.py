@@ -952,6 +952,14 @@ async def sync_trades(fpl_league_id: str | None = None):
                 _record(tid, event, player_by_fpl.get(item.get("element_in")), received, offered)
                 _record(tid, event, player_by_fpl.get(item.get("element_out")), offered, received)
 
+        # A 2026-only house rule (services.GoalieClubGrant) means some FPL "trades"
+        # aren't trades at all — a real-world transfer at an owned club forces a manual
+        # FPL move to keep a manager's roster in sync, and it looks identical to a real
+        # trade until this checks who actually owns what. Stamped here so it never
+        # reaches the Discord announce queue at all, rather than needing a manual
+        # back-stamp after the fact.
+        services.classify_goalkeeper_continuity_trades(session, league)
+
         log.ok = True
         log.finished_at = datetime.datetime.now(datetime.timezone.utc)
         session.commit()

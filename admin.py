@@ -48,6 +48,12 @@ class KeeperSeedRequest(BaseModel):
     years_remaining: int
 
 
+class GoalieClubGrantRequest(BaseModel):
+    fpl_manager_id: str
+    team_code: int
+    season_year: int
+
+
 class SubmitKeepersRequest(BaseModel):
     fpl_manager_id: str
     keeper_fpl_ids: list[int]
@@ -158,6 +164,21 @@ def set_keeper_seed(
             fpl_manager_id=body.fpl_manager_id,
             player_fpl_id=body.player_fpl_id,
             years_remaining=body.years_remaining,
+        )
+    except RuleViolation as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/leagues/{league_key}/goalie-club-grants")
+def set_goalie_club_grant(
+    league_key: str, body: GoalieClubGrantRequest, db: Session = Depends(get_db)
+):
+    """Confirm which manager holds a club's goalkeeper rights this season."""
+    league = _league(db, league_key)
+    try:
+        return services.set_goalie_club_grant(
+            db, league, fpl_manager_id=body.fpl_manager_id,
+            team_code=body.team_code, season_year=body.season_year,
         )
     except RuleViolation as e:
         raise HTTPException(status_code=400, detail=str(e))

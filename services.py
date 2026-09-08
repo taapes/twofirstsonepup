@@ -23,6 +23,7 @@ from models import (
     Fixture,
     Gameweek,
     GameweekPoints,
+    GoalieClubGrant,
     InjuryList,
     KeeperSeed,
     KeeperSelection,
@@ -89,6 +90,7 @@ from rules import (
     h2h_standings,
     il_can_return,
     il_same_position,
+    GOALIE_CLUBS_PER_MANAGER,
     GOALIE_TEAM_MODES,
     draft_picks_per_manager,
     generate_draft_slots,
@@ -4790,13 +4792,30 @@ def _derive_keeper_status(
 
 
 def _goalie_team_history(db: Session) -> dict:
-    """{(season_year, team_id): (fpl_manager_id, 'draft'|'keeper')} across every season.
+    """{(season_year, team_id): (fpl_manager_id, 'draft'|'keeper'|'granted')} across every
+    season.
 
     Keyed on the FPL entry id, not managers.id: `managers` has one row per manager PER
     SEASON, so a club held for three years belongs to three different manager rows and
     a UUID-keyed history would read as three different owners.
+
+    THREE sources, weakest first so a more specific fact overrides it: `GoalieClubGrant`
+    (the 2026-only house rule — see its model docstring — where no club draft ever
+    happened, so this is the only record of who holds what), then `DraftPick.team_id`
+    (an actual club draft, under the older single-club `keeper`/`redraft` modes), then
+    `KeeperSelection.team_id` (a club carried forward, which beats a fresh draft pick for
+    the same season since you can't do both). In practice these never collide for the
+    same (season, team) today — a grant exists only where no club draft happened at
+    all — but the order matters if the league ever moves to `keeper` mode and drafts a
+    club the grants table also names for that season.
     """
     out: dict = {}
+    for sy, tid, fpl in (
+        db.query(GoalieClubGrant.season_year, GoalieClubGrant.team_id,
+                 Manager.fpl_manager_id)
+        .join(Manager, Manager.id == GoalieClubGrant.manager_id)
+    ):
+        out[(sy, tid)] = (fpl, "granted")
     for sy, tid, fpl in (
         db.query(DraftPick.season_year, DraftPick.team_id, Manager.fpl_manager_id)
         .join(Manager, Manager.id == DraftPick.manager_id)
@@ -4843,6 +4862,93 @@ def set_goalie_team_mode(db: Session, league: League, mode: str) -> dict:
     return {"mode": mode, "changed": True}
 
 
+def inferred_goalie_club_grants(db: Session, league: League) -> list[dict]:
+    """A best-guess `[{team_id, team_name, manager_id, manager_name}, ...]` for the
+    2026-only house rule — see `GoalieClubGrant`'s docstring — NEVER written from here.
+
+    There is no draft record of who owns which club: the draft used ordinary individual
+    GKP picks, so this table has no base fact to derive from at all. The best available
+    proxy is each manager's CURRENT `GKP`-slot roster clubs, which on the real 26/27 data
+    partitions all 20 Premier League clubs with zero duplicates — a strong prior, not a
+    certainty, and specifically not proof for any manager whose ownership has already
+    changed hands more than once. A commissioner reviews and corrects this before
+    `set_goalie_club_grant` writes anything — the same "stage, never auto-apply" rule
+    `discovery_match_suggestions` and the Discord ingest queue already follow.
+    """
+    managers = db.query(Manager).filter_by(league_id=league.id).all()
+    teams = {t.id: t for t in db.query(PlTeam)}
+    gw = latest_gameweek(db, league)
+    if gw is None:
+        return []
+    rows = (
+        db.query(Roster.manager_id, Player.current_team)
+        .join(Player, Player.id == Roster.player_id)
+        .filter(Roster.gameweek_id == gw.id, Player.position == "GKP")
+        .all()
+    )
+    by_short = {t.short_name: t for t in teams.values()}
+    mgr_by_id = {m.id: m for m in managers}
+    out = []
+    for mid, short in rows:
+        team = by_short.get(short)
+        mgr = mgr_by_id.get(mid)
+        if team and mgr:
+            out.append({"team_id": team.id, "team_name": team.name,
+                       "manager_id": mgr.id, "manager_name": mgr.display})
+    return out
+
+
+def set_goalie_club_grant(
+    db: Session, league: League, *, fpl_manager_id: str, team_code: int, season_year: int
+) -> dict:
+    """Record which manager holds a club's goalkeeper rights this season — the base
+    fact for the 2026 house rule (`GoalieClubGrant`'s docstring) that no draft pick
+    exists to derive. Commissioner-entered, never auto-applied from
+    `inferred_goalie_club_grants`.
+
+    Refuses past `rules.GOALIE_CLUBS_PER_MANAGER` for this manager THIS season, and
+    refuses a club already granted to someone else this season — reassigning it needs
+    an explicit change to the existing row, not a silent second owner. A club can be
+    re-pointed by calling this again for the new manager after clearing the old grant
+    (there is no `delete_goalie_club_grant` yet; use the DB directly for a correction —
+    this is one-time bootstrap data, not a live write path).
+    """
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    team = _resolve_team(db, team_code)
+    existing = (
+        db.query(GoalieClubGrant)
+        .filter_by(league_id=league.id, season_year=season_year, team_id=team.id)
+        .one_or_none()
+    )
+    if existing and existing.manager_id != manager.id:
+        holder = db.get(Manager, existing.manager_id)
+        raise RuleViolation(
+            f"{team.name} is already granted to "
+            f"{holder.display if holder else '?'} for {season_year}"
+        )
+    if not existing:
+        held = (
+            db.query(GoalieClubGrant)
+            .filter_by(league_id=league.id, season_year=season_year,
+                       manager_id=manager.id)
+            .count()
+        )
+        if held >= GOALIE_CLUBS_PER_MANAGER:
+            raise RuleViolation(
+                f"{manager.display} already holds {held} club(s) for {season_year} "
+                f"(max {GOALIE_CLUBS_PER_MANAGER})"
+            )
+        db.add(GoalieClubGrant(league_id=league.id, season_year=season_year,
+                               manager_id=manager.id, team_id=team.id))
+    record_audit(db, league, action="goalie.club_grant",
+                 summary=f"Goalie club grant: {team.name} -> {manager.display} "
+                         f"({season_year})",
+                 manager_ids=[manager.id],
+                 details={"team_code": team_code, "season_year": season_year})
+    db.commit()
+    return {"manager": manager.display, "team": team.name, "season_year": season_year}
+
+
 def goalie_team_owner(
     db: Session, league: League, *, season_year: int | None = None
 ) -> dict:
@@ -4879,6 +4985,87 @@ def goalie_team_owner(
         if owner.get(t.team_id) == fpl_by_mid.get(t.from_manager):
             owner[t.team_id] = fpl_by_mid.get(t.to_manager)
     return owner
+
+
+def classify_goalkeeper_continuity_trades(db: Session, league: League) -> int:
+    """Stamp `announced_at` on an FPL-sourced trade PAIR that is not a trade at all —
+    see `GoalieClubGrant`'s docstring for the house rule this exists for.
+
+    FPL has no concept of "own a club", so the only way to keep a manager's real
+    roster in sync with a real-world transfer at one of his two owned clubs is a
+    manual FPL trade moving the old individual out and the new one in. That reads
+    exactly like an ordinary player trade to `sync_trades` unless something else
+    knows the two managers were never exchanging value — which, now that ownership
+    is an explicit fact (`goalie_team_owner`), it can be checked exactly rather than
+    guessed at.
+
+    The pattern: exactly two `Trade` rows sharing one `fpl_trade_id`, a clean
+    bidirectional swap between the same two managers, both players `GKP`, where EACH
+    receiving manager already holds the grant for the CURRENT club of the player
+    they're receiving. All four conditions have to hold — a real trade of two
+    keepers-as-assets (the 25/26 Jörgensen/Alisson swap is the worked counterexample:
+    no grant exists for that season, so it can never match) looks identical up to
+    "both legs are GKP" and is exactly why the grant check, not the position check
+    alone, is what decides it.
+
+    Deliberately called only on rows with `announced_at IS NULL` — an already-decided
+    row (announced, or previously hand-classified) is never revisited. This is why a
+    historical backlog has to be judged by a human rather than this function: `current_
+    team` is a LIVE field, and re-running this against an old pair uses today's clubs,
+    not the clubs as of the trade — safe for a pair classified promptly (the normal
+    case, since `announce_new_trades` runs every sync and a backlog is itself a health
+    check failure), not safe for reclassifying something from weeks ago.
+
+    Returns how many pairs were classified, for the sync log.
+    """
+    import datetime as _dt
+    from collections import defaultdict
+
+    pending = (
+        db.query(Trade)
+        .filter(Trade.league_id == league.id, Trade.fpl_trade_id.isnot(None),
+                Trade.announced_at.is_(None), Trade.player_id.isnot(None))
+        .all()
+    )
+    if not pending:
+        return 0
+    by_fid = defaultdict(list)
+    for t in pending:
+        by_fid[t.fpl_trade_id].append(t)
+
+    owner = goalie_team_owner(db, league, season_year=league.season_year)
+    fpl_by_mid = {
+        m.id: m.fpl_manager_id for m in db.query(Manager).filter_by(league_id=league.id)
+    }
+    players = {
+        p.id: p for p in db.query(Player).filter(
+            Player.id.in_({t.player_id for t in pending})
+        )
+    }
+    team_by_short = {t.short_name: t.id for t in db.query(PlTeam)}
+
+    def _receives_owned_club(leg) -> bool:
+        p = players.get(leg.player_id)
+        if not p or (p.position or "").upper() != "GKP":
+            return False
+        tid = team_by_short.get(p.current_team)
+        return tid is not None and owner.get(tid) == fpl_by_mid.get(leg.to_manager)
+
+    n = 0
+    for legs in by_fid.values():
+        if len(legs) != 2:
+            continue
+        a, b = legs
+        if {a.from_manager, a.to_manager} != {b.from_manager, b.to_manager}:
+            continue  # not a clean two-manager swap
+        if a.from_manager == a.to_manager:
+            continue  # degenerate, shouldn't happen
+        if _receives_owned_club(a) and _receives_owned_club(b):
+            stamp = _dt.datetime.now(_dt.timezone.utc)
+            a.announced_at = stamp
+            b.announced_at = stamp
+            n += 1
+    return n
 
 
 def _add_club_trade(db: Session, league: League, frm, to, team, owner: dict) -> Trade:

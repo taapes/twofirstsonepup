@@ -223,6 +223,50 @@ Write tests for these. They are custom and non-obvious:
   `draftprep.Shape` carries the squad shape (`FPL_SHAPE` / `GOALIE_TEAM_SHAPE`,
   `shape_for(mode)`) so both eras stay simulable; clubs are RANKED
   (`goalie_team_values`) and never simulated — 20 clubs for 10 managers is no scarcity.
+  **A SEPARATE, 2026-only house rule sits alongside all of the above and must not be
+  confused with it: each manager holds TWO clubs' worth of goalkeeper rights, drafted
+  as two ordinary individual `GKP` picks, with FPL's roster completely untouched (still
+  15 players, still exactly 2 `GKP`).** `goalie_team_mode` correctly stays `off` for
+  this — squad SHAPE is unchanged, so there is no fourth mode value; conflating the two
+  would misrepresent a rule that changes nothing about the draft. Tracked instead in
+  `GoalieClubGrant` (`league_id`, `season_year`, `manager_id`, `team_id`), the base fact
+  `_goalie_team_history` has no `DraftPick.team_id` to derive here — a human enters it
+  (`services.set_goalie_club_grant`, `scripts/seed_goalie_club_grants.py`, dry-run
+  default). `_goalie_team_history` unions grants in as a THIRD source (weakest,
+  overridden by an actual club draft/keeper-selection row for the same `(season,
+  team)`, in case the league later moves to `keeper` mode for a club these grants also
+  name), so `goalie_team_owner` reflects it with no change to its own logic — the dict
+  it returns was always keyed on `team_id`, never assumed to be exactly one per manager.
+  **The concrete problem this closes:** FPL has no concept of "own a club", so the only
+  way to keep a manager's actual roster in sync with a real-world transfer at an owned
+  club is a manual FPL trade moving the old individual out and the new one in — which
+  reads exactly like a genuine trade to `sync_trades` otherwise. Found 2026-09-07: Gaby
+  held Aston Villa, Mark held Chelsea; when Emiliano Martinez transferred Villa→Chelsea,
+  an FPL trade moved Martinez to Mark and Sánchez to Gaby, and it was initially
+  mis-flagged and hand-classified as a real (if unannounced) trade. It wasn't one —
+  nothing was decided between the two managers, the same asset (club rights) just
+  manifested as a different individual each side.
+  `services.classify_goalkeeper_continuity_trades`, called from `sync_trades` on every
+  sync, now does this exactly rather than by hand: an FPL-sourced pair (one `fpl_trade_id`,
+  exactly two legs, a clean two-manager swap, both players `GKP`) where EACH receiving
+  manager already holds the grant for the CURRENT club of the player they're receiving
+  is stamped `announced_at` immediately, so it never reaches the Discord queue. The
+  grant check is what decides it, not the GKP-pair shape alone — a genuine trade of two
+  keepers-as-assets looks identical up to "both legs are GKP" (the 25/26 Jörgensen/
+  Alisson swap, `fpl_trade_id=695349`, is the worked counterexample: confirmed a real
+  trade under the old rules, and it can never match because no grant exists for that
+  season). Only ever touches `announced_at IS NULL` rows — an already-decided one is
+  never revisited, which is also why a HISTORICAL backlog has to be judged by a human:
+  `players.current_team` is live, and re-running this against an old pair uses today's
+  clubs, not the clubs as of the trade.
+  **Deliberately NOT extended to keeper eligibility.** Whether a club-owned keeper is
+  *kept* into next season under this rule — individually, as today, or via some
+  club-based clock like the older `keeper` mode's — is the same open question as
+  whether ownership itself carries into 27/28, and neither is answered here. Both are
+  commissioner decisions, not code ones; `_derive_keeper_status` and
+  `_derive_gk_team_keeper_status` are UNCHANGED, so these players go through the
+  ordinary per-player keeper derivation exactly as before. Revisit before keeper
+  selections open, or before the 27/28 rollover, whichever comes first.
 - **Squad quotas (enforced from 2026-08-30):** `record_pick` refuses a pick that would
   break FPL's shape — `rules.SQUAD_POSITION_LIMITS` (2 GKP / 5 DEF / 5 MID / 3 FWD), or
   `OUTFIELD_POSITION_LIMITS` under goalie-team mode (13 outfielders + a club).

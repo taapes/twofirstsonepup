@@ -177,6 +177,45 @@ goalie-team commits, so treat every line as *verify*, not *assume*.
 
 ## Bugs
 
+### Goalie club grants: entered and enforced, keeper eligibility still open
+
+**Priority:** `P1` — commissioner action needed before this is fully live.
+**Status:** `built 2026-09-07; awaiting confirmation`
+
+The 2026-only house rule (each manager holds 2 clubs' worth of goalkeeper rights, squad
+shape untouched — see `CLAUDE.md`) had NO tracking at all before this: a real-world
+transfer at an owned club (Emiliano Martinez, Villa→Chelsea) produced an FPL trade that
+was initially mis-flagged as a genuine, if quiet, trade between Gaby and Mark. It
+wasn't — nothing was decided between them, the same asset (club rights) just showed up
+as a different individual on each side.
+
+**Built:** `GoalieClubGrant` (migration `a1b2c3d4e5f7`), `services.set_goalie_club_grant`
+/ `inferred_goalie_club_grants`, `services.classify_goalkeeper_continuity_trades`
+(wired into `sync_trades` — stamps `announced_at` on a future Martinez-shaped pair
+automatically, so no more manual back-stamping), `scripts/seed_goalie_club_grants.py`
+(dry-run default).
+
+**Still needed, in order:**
+1. **The commissioner confirms the inferred map.** `python
+   scripts/seed_goalie_club_grants.py` (dry run) printed a clean, unique partition of
+   all 20 Premier League clubs across the 10 managers from current rosters — a strong
+   prior, not a certainty, and specifically not proof for a manager whose ownership has
+   already changed hands more than once. Nothing is written until `--apply` is run
+   against a confirmed map.
+2. **Retroactive check on the Martinez/Sánchez trade** (`fpl_trade_id=134240`) once
+   grants exist: its `announced_at` was already hand-stamped correctly, so no DB change
+   is needed, but this is the worked example to verify the classifier would have caught
+   it going forward.
+3. **A genuinely open commissioner decision, deferred on purpose:** does a club-owned
+   keeper get *kept* into next season under this rule at all — individually as today,
+   or via a club-based clock like the older single-club `keeper` mode's? This is the
+   same question as whether club ownership itself carries into 27/28. Neither is
+   answered by what's built: `_derive_keeper_status` and `_derive_gk_team_keeper_status`
+   are UNCHANGED, so these 20 players go through ordinary per-player keeper derivation
+   exactly as before. Revisit before keeper selections open, or before the 27/28
+   rollover, whichever comes first — guessing at this for real keeper-selection
+   consequences without an answer was the wrong call to make unilaterally.
+
 ### Discord audit 2026-09-07: what the first full-channel sweep found
 
 The first real sweep (100 messages per channel) is also the first audit of Discord
