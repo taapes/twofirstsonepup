@@ -177,10 +177,10 @@ goalie-team commits, so treat every line as *verify*, not *assume*.
 
 ## Bugs
 
-### Goalie club grants: built and enforced, one commissioner step left
+### Goalie club grants: built, confirmed, and applied
 
-**Priority:** `P1` — commissioner action needed before this is fully live.
-**Status:** `built 2026-09-08; awaiting confirmation of the ownership map`
+**Priority:** `P1` — done. Kept as a reference for the 27/28 rollover.
+**Status:** `done 2026-09-08`
 
 The 2026-only house rule (each manager holds 2 clubs' worth of goalkeeper rights, squad
 shape untouched — see `CLAUDE.md`) had NO tracking at all before this: a real-world
@@ -201,20 +201,18 @@ nor the club is kept at all.** Not a club-based clock like the older single-club
 season, with its own reason string, exactly mirroring the older `gk_off_board`
 exclusion's shape. `submit_keepers` refuses one if attempted.
 
-**Still needed:**
-1. **The commissioner confirms the inferred map.** `python
-   scripts/seed_goalie_club_grants.py` (dry run) printed a clean, unique partition of
-   all 20 Premier League clubs across the 10 managers from current rosters — a strong
-   prior, not a certainty, and specifically not proof for a manager whose ownership has
-   already changed hands more than once. Nothing is written until `--apply` is run
-   against a confirmed map.
-2. **Retroactive check on the Martinez/Sánchez trade** (`fpl_trade_id=134240`) once
-   grants exist: its `announced_at` was already hand-stamped correctly, so no DB change
-   is needed, but this is the worked example to verify the classifier would have caught
-   it going forward.
-3. **Still open: does the grant itself carry into 27/28, or does the whole map get
-   redrafted?** `GoalieClubGrant` has no rollover behaviour defined. Revisit before the
-   next rollover — this is now the only open question in this feature.
+**Confirmed 2026-09-08 and applied.** The inferred map (all 20 Premier League clubs,
+uniquely partitioned across the 10 managers from current rosters) was confirmed
+correct and written via `python scripts/seed_goalie_club_grants.py --apply` — 20
+grants, all landing as expected in `goalie_team_owner`.
+
+**Also confirmed the same day: club ownership does NOT carry across a rollover —
+every club is redrafted (off-app) each season.** `GoalieClubGrant` needs no rollover
+logic at all: `advance_season`'s keeper-carry step only walks `KeeperSelection` rows,
+and these players can never have one (ineligible to be kept — see the entry above),
+so nothing could accidentally carry even without an explicit guard. The 26/27 map is
+final for 26/27 only; 27/28 needs its own fresh confirmation via the same script,
+once next year's arrangement is agreed.
 
 ### Discord audit 2026-09-07: what the first full-channel sweep found
 

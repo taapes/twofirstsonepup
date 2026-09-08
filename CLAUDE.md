@@ -268,8 +268,14 @@ Write tests for these. They are custom and non-obvious:
   a second, independent exclusion, since `clubs_on` (`goalie_team_mode`) stays `off`
   and can't be reused for it. Read live, not from a season snapshot: a keeper who
   transfers OUT of a granted club stops being excluded on his new facts, whatever they
-  are. Whether ownership ITSELF (the grant) carries into 27/28 is a separate, still-open
-  question — `GoalieClubGrant` has no rollover behaviour defined; revisit before then.
+  are. **Confirmed 2026-09-08: club ownership itself does NOT carry across a rollover
+  — every club is redrafted (informally, off-app) each season.** `GoalieClubGrant`
+  deliberately has no rollover behaviour at all, which is now known to be correct
+  rather than merely unbuilt: `advance_season`'s keeper-carry step only ever walks
+  `KeeperSelection` rows, and one of these players can never have one (they're
+  ineligible to be kept at all — see just above), so there is no path by which a grant
+  could accidentally survive a rollover. The 26/27 map is entered once, for 26/27 only;
+  27/28 needs its own fresh confirmation via the same script.
 - **Squad quotas (enforced from 2026-08-30):** `record_pick` refuses a pick that would
   break FPL's shape — `rules.SQUAD_POSITION_LIMITS` (2 GKP / 5 DEF / 5 MID / 3 FWD), or
   `OUTFIELD_POSITION_LIMITS` under goalie-team mode (13 outfielders + a club).

@@ -814,6 +814,18 @@ def admin_phase_unpin(request: Request, db: Session = Depends(get_db)):
     return RedirectResponse("/admin/health", status_code=303)
 
 
+@router.post("/admin/phase/open-discovery")
+def admin_phase_open_discovery(request: Request, db: Session = Depends(get_db)):
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.open_discovery(db, league)
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/health", status_code=303)
+
+
 @router.post("/admin/phase/close-discovery")
 def admin_phase_close_discovery(request: Request, db: Session = Depends(get_db)):
     if not is_admin(request):

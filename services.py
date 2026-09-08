@@ -656,6 +656,35 @@ def enter_draft_phase(db: Session, league: League) -> dict:
     return {"phase": league.phase, "keepers_locked": True}
 
 
+def open_discovery(db: Session, league: League) -> dict:
+    """Admin: open the discovery draft window early, ahead of the Oct-1 auto-open.
+
+    `phase_features` only turns this into `discovery_available` under macro phase
+    `in_season` — the sync heartbeat (`advance_phase_if_due`) has never set
+    `discovery_open` before that phase is reached either, so this mirrors the same
+    precondition rather than silently no-opping. Refuses once `discovery_done` (this
+    season's window already ran) — that flag exists specifically so the Oct-1 tick
+    can't re-open a closed window, and an admin re-opening it after close_discovery
+    needs to go through the same gate the calendar does.
+    """
+    if league.phase != PHASE_IN_SEASON:
+        raise RuleViolation(
+            f"the discovery draft opens once the season is in_season (currently "
+            f"{league.phase!r})"
+        )
+    if league.discovery_done:
+        raise RuleViolation(
+            "this season's discovery draft is already closed — nothing to reopen"
+        )
+    if league.discovery_open:
+        return {"discovery_open": True, "changed": False}
+    league.discovery_open = True
+    record_audit(db, league, action="discovery.open",
+                 summary="Opened the discovery draft window early")
+    db.commit()
+    return {"discovery_open": True, "changed": True}
+
+
 def close_discovery(db: Session, league: League) -> None:
     """Admin: confirm the discovery draft is complete — shut the window and mark it
     done so the Oct-1 auto-open won't re-open it."""

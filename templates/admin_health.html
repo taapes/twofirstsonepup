@@ -18,6 +18,12 @@
           onsubmit="return confirm('Start the draft? This locks keeper selection.')">
       <button type="submit">Start draft</button>
     </form>
+    {% if not phase_ctx.discovery_available %}
+    <form method="post" action="/admin/phase/open-discovery"
+          onsubmit="return confirm('Open the discovery draft now, ahead of the Oct 1 auto-open?')">
+      <button type="submit">Open discovery draft early</button>
+    </form>
+    {% endif %}
     <form method="post" action="/admin/phase/close-discovery"
           onsubmit="return confirm('Confirm the discovery draft is complete?')">
       <button type="submit">Close discovery draft</button>
