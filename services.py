@@ -4462,9 +4462,27 @@ def _derive_keeper_status(
     if gw is None:
         return {}
     clubs_on = goalie_teams_on(league.goalie_team_mode)
+    # The 2026-only house rule (GoalieClubGrant) is a SEPARATE reason a goalkeeper is
+    # off the keeper board, independent of clubs_on: squad shape is untouched (still
+    # 15/2 GKP, goalie_team_mode stays 'off'), so this can't reuse that flag. Confirmed
+    # with the commissioner 2026-09-08: under this rule neither the individual keeper
+    # NOR the club/goalie-team asset is keepable at all — not "kept via a club clock"
+    # like the older single-club `keeper` mode, just not a keeper-selection candidate,
+    # full stop.
+    granted_clubs = {
+        short
+        for (short,) in db.query(PlTeam.short_name)
+        .join(GoalieClubGrant, GoalieClubGrant.team_id == PlTeam.id)
+        .filter(GoalieClubGrant.league_id == league.id,
+                GoalieClubGrant.season_year == league.season_year)
+    }
     live_positions = (
         {pid: pos for pid, pos in db.query(Player.id, Player.position)}
-        if clubs_on else {}
+        if clubs_on or granted_clubs else {}
+    )
+    live_teams = (
+        {pid: team for pid, team in db.query(Player.id, Player.current_team)}
+        if granted_clubs else {}
     )
     last_n = gw.number
     # season-scoped identity: `players` is global and always holds the
@@ -4777,13 +4795,30 @@ def _derive_keeper_status(
         # Position comes from the live pool, not the season snapshot, which is last
         # season's and would misclassify anyone FPL has reclassified.
         gk_off_board = clubs_on and (live_positions.get(pid) or "").upper() == "GKP"
+        # The 2026 rule's exclusion is independent of the above and checked separately
+        # rather than folded into gk_off_board: it's a different mode (goalie_team_mode
+        # stays 'off'), a different reason (neither the keeper nor the club is kept,
+        # vs. "the club is kept instead"), and current_team — not current_team's
+        # season-snapshot position — is what says which grant, if any, applies. Also
+        # from the live pool: a GKP who's since been reclassified, or transferred to a
+        # non-granted club, must be judged on today's facts, not last season's.
+        gk_grant_locked = (
+            (live_positions.get(pid) or "").upper() == "GKP"
+            and live_teams.get(pid) in granted_clubs
+        )
         status.setdefault(owner, {})[pid] = {
             "player": p.name if p else str(pid),
             "position": p.position if p else None,
             "acquisition": acq,
             "years_remaining": remaining,
-            "eligible": keeper_eligible(remaining) and not gk_off_board,
-            "reason": "goalkeepers are kept as a club" if gk_off_board else None,
+            "eligible": keeper_eligible(remaining) and not gk_off_board
+                       and not gk_grant_locked,
+            "reason": (
+                "goalkeepers are kept as a club" if gk_off_board
+                else "goalkeepers and goalie teams are not kept under this season's "
+                     "club-rights rule" if gk_grant_locked
+                else None
+            ),
             # keyed on the OWNER: a KeeperSelection belongs to whoever submitted it
             "kept": (owner, pid) in kept,  # submitted keeper for next season
             "kept_discovery": kept.get((owner, pid), False),

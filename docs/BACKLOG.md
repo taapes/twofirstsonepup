@@ -177,10 +177,10 @@ goalie-team commits, so treat every line as *verify*, not *assume*.
 
 ## Bugs
 
-### Goalie club grants: entered and enforced, keeper eligibility still open
+### Goalie club grants: built and enforced, one commissioner step left
 
 **Priority:** `P1` — commissioner action needed before this is fully live.
-**Status:** `built 2026-09-07; awaiting confirmation`
+**Status:** `built 2026-09-08; awaiting confirmation of the ownership map`
 
 The 2026-only house rule (each manager holds 2 clubs' worth of goalkeeper rights, squad
 shape untouched — see `CLAUDE.md`) had NO tracking at all before this: a real-world
@@ -194,8 +194,14 @@ as a different individual on each side.
 (wired into `sync_trades` — stamps `announced_at` on a future Martinez-shaped pair
 automatically, so no more manual back-stamping), `scripts/seed_goalie_club_grants.py`
 (dry-run default).
+**Resolved 2026-09-08 — confirmed with the commissioner: neither the individual keeper
+nor the club is kept at all.** Not a club-based clock like the older single-club
+`keeper` mode's; these 20 goalkeepers are simply not keeper-selection candidates.
+`_derive_keeper_status` now excludes a `GKP` whose current club has a grant this
+season, with its own reason string, exactly mirroring the older `gk_off_board`
+exclusion's shape. `submit_keepers` refuses one if attempted.
 
-**Still needed, in order:**
+**Still needed:**
 1. **The commissioner confirms the inferred map.** `python
    scripts/seed_goalie_club_grants.py` (dry run) printed a clean, unique partition of
    all 20 Premier League clubs across the 10 managers from current rosters — a strong
@@ -206,15 +212,9 @@ automatically, so no more manual back-stamping), `scripts/seed_goalie_club_grant
    grants exist: its `announced_at` was already hand-stamped correctly, so no DB change
    is needed, but this is the worked example to verify the classifier would have caught
    it going forward.
-3. **A genuinely open commissioner decision, deferred on purpose:** does a club-owned
-   keeper get *kept* into next season under this rule at all — individually as today,
-   or via a club-based clock like the older single-club `keeper` mode's? This is the
-   same question as whether club ownership itself carries into 27/28. Neither is
-   answered by what's built: `_derive_keeper_status` and `_derive_gk_team_keeper_status`
-   are UNCHANGED, so these 20 players go through ordinary per-player keeper derivation
-   exactly as before. Revisit before keeper selections open, or before the 27/28
-   rollover, whichever comes first — guessing at this for real keeper-selection
-   consequences without an answer was the wrong call to make unilaterally.
+3. **Still open: does the grant itself carry into 27/28, or does the whole map get
+   redrafted?** `GoalieClubGrant` has no rollover behaviour defined. Revisit before the
+   next rollover — this is now the only open question in this feature.
 
 ### Discord audit 2026-09-07: what the first full-channel sweep found
 

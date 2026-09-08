@@ -259,14 +259,17 @@ Write tests for these. They are custom and non-obvious:
   never revisited, which is also why a HISTORICAL backlog has to be judged by a human:
   `players.current_team` is live, and re-running this against an old pair uses today's
   clubs, not the clubs as of the trade.
-  **Deliberately NOT extended to keeper eligibility.** Whether a club-owned keeper is
-  *kept* into next season under this rule — individually, as today, or via some
-  club-based clock like the older `keeper` mode's — is the same open question as
-  whether ownership itself carries into 27/28, and neither is answered here. Both are
-  commissioner decisions, not code ones; `_derive_keeper_status` and
-  `_derive_gk_team_keeper_status` are UNCHANGED, so these players go through the
-  ordinary per-player keeper derivation exactly as before. Revisit before keeper
-  selections open, or before the 27/28 rollover, whichever comes first.
+  **Keeper eligibility, resolved 2026-09-08: neither the keeper nor the club is kept.**
+  Confirmed with the commissioner — unlike the older single-club `keeper` mode, where
+  a club IS one of the ≤5 keepers with its own clock, this rule keeps nothing across a
+  rollover at all. `_derive_keeper_status` excludes a `GKP` whose CURRENT club has a
+  grant this season (`eligible: False`, its own reason string, grouped separately from
+  the 4-year-limit case exactly like the older `gk_off_board` exclusion already does) —
+  a second, independent exclusion, since `clubs_on` (`goalie_team_mode`) stays `off`
+  and can't be reused for it. Read live, not from a season snapshot: a keeper who
+  transfers OUT of a granted club stops being excluded on his new facts, whatever they
+  are. Whether ownership ITSELF (the grant) carries into 27/28 is a separate, still-open
+  question — `GoalieClubGrant` has no rollover behaviour defined; revisit before then.
 - **Squad quotas (enforced from 2026-08-30):** `record_pick` refuses a pick that would
   break FPL's shape — `rules.SQUAD_POSITION_LIMITS` (2 GKP / 5 DEF / 5 MID / 3 FWD), or
   `OUTFIELD_POSITION_LIMITS` under goalie-team mode (13 outfielders + a club).

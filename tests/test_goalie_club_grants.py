@@ -331,3 +331,82 @@ def test_the_inference_never_writes(test_session):
 
     services.inferred_goalie_club_grants(test_session, lg)
     assert test_session.query(GoalieClubGrant).count() == 0
+
+
+# ---- confirmed 2026-09-08: neither the keeper nor the club is kept ------------
+def test_a_club_owned_keeper_is_ineligible_to_be_kept(test_session):
+    """Confirmed with the commissioner: under this rule NEITHER the individual
+    keeper NOR the club/goalie-team asset is keepable — not "kept via a club
+    clock" like the older single-club `keeper` mode, just not a candidate at all."""
+    lg, m, gw = _seed(test_session)
+    che = _club(test_session, "CHE", 8)
+    _grant(test_session, lg, m["Mark"], che)
+    martinez = _keeper(test_session, lg, "Martinez", "CHE",
+                       roster_of=m["Mark"], gw=gw)
+
+    status = services._derive_keeper_status(test_session, lg)
+    row = status[m["Mark"].id][martinez.id]
+    assert row["eligible"] is False
+    assert "not kept" in row["reason"]
+
+
+def test_an_ordinary_goalkeeper_with_no_grant_is_unaffected(test_session):
+    """Only a GKP at a GRANTED club is excluded — an ordinary keeper (no house rule
+    in play for his club) keeps working exactly as before."""
+    lg, m, gw = _seed(test_session)
+    _club(test_session, "CHE", 8)  # exists, but never granted
+    keeper = _keeper(test_session, lg, "Ordinary", "CHE", roster_of=m["Scott"], gw=gw)
+
+    status = services._derive_keeper_status(test_session, lg)
+    row = status[m["Scott"].id][keeper.id]
+    assert row["eligible"] is True
+
+
+def test_submitting_a_club_owned_keeper_is_refused(test_session):
+    lg, m, gw = _seed(test_session)
+    che = _club(test_session, "CHE", 8)
+    _grant(test_session, lg, m["Mark"], che)
+    martinez = _keeper(test_session, lg, "Martinez", "CHE",
+                       roster_of=m["Mark"], gw=gw)
+
+    with pytest.raises(RuleViolation, match="not kept"):
+        services.submit_keepers(
+            test_session, lg, fpl_manager_id=m["Mark"].fpl_manager_id,
+            keeper_fpl_ids=[martinez.fpl_id], season_year=SEASON + 1,
+        )
+
+
+def test_a_keeper_who_transfers_away_from_a_granted_club_stops_being_locked(test_session):
+    """The exclusion reads TODAY's current_team, not a season snapshot — a keeper who
+    transfers out of a granted club is no longer club-locked (whatever his new
+    situation is, it's judged on its own facts, not this rule)."""
+    lg, m, gw = _seed(test_session)
+    che = _club(test_session, "CHE", 8)
+    _grant(test_session, lg, m["Mark"], che)
+    keeper = _keeper(test_session, lg, "Departed", "CHE", roster_of=m["Mark"], gw=gw)
+    keeper.current_team = "WHU"  # transferred out of the granted club
+    test_session.commit()
+
+    status = services._derive_keeper_status(test_session, lg)
+    row = status[m["Mark"].id][keeper.id]
+    assert "club-rights rule" not in (row["reason"] or "")
+
+
+def test_an_outfielder_at_a_granted_club_is_unaffected(test_session):
+    """The grant is about GOALKEEPER rights specifically — a striker at a club whose
+    keeper rights are granted has nothing to do with this rule."""
+    lg, m, gw = _seed(test_session)
+    che = _club(test_session, "CHE", 8)
+    _grant(test_session, lg, m["Mark"], che)
+    _FPL[0] += 1
+    striker = Player(name="Striker", code=_FPL[0] * 7, fpl_id=_FPL[0], position="FWD",
+                     current_team="CHE")
+    test_session.add(striker)
+    test_session.flush()
+    test_session.add(Roster(manager_id=m["Mark"].id, gameweek_id=gw.id,
+                            player_id=striker.id))
+    test_session.commit()
+
+    status = services._derive_keeper_status(test_session, lg)
+    row = status[m["Mark"].id][striker.id]
+    assert row["eligible"] is True
