@@ -8737,8 +8737,20 @@ def get_discovery_board(db: Session, league: League, season_year: int) -> list[d
     actually made it" rule, same `traded`/`reassigned` flags, same condition metadata
     attached only to a conditional slot. The two boards disagreeing is the thing being
     fixed, so they now share a shape as well as a source.
+
+    **The order source was also wrong until 2026-09-08.** Unlike `get_draft_board`,
+    which reads `_prior_season_league` — the season that actually FINISHED — this read
+    `_reverse_standings_managers(db, league)` with no override, i.e. THIS season's own,
+    still-in-progress standings. The discovery draft runs in September, a few
+    gameweeks into the season it's for, so that produced a real order — Kevin T last
+    on a 0-3 start — but not the one anyone meant: confirmed with the commissioner
+    that discovery should use the same "reverse of the season that just finished" rule
+    the main draft's rounds 2+ already use, not a few weeks of in-season noise. No
+    prior discovery draft ever ran (2025 recorded zero picks) to have caught this
+    sooner.
     """
-    order = _reverse_standings_managers(db, league)
+    standings_src = _prior_season_league(db, league, season_year)
+    order = _reverse_standings_managers(db, league, standings_src)
     if not order:
         order = db.query(Manager).filter_by(league_id=league.id).order_by(Manager.name).all()
     managers = db.query(Manager).filter_by(league_id=league.id).all()

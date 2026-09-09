@@ -168,3 +168,85 @@ def test_the_autodraft_uses_the_new_owners_queue(test_session):
     out = services.approve_queued_pick(test_session, lg, season_year=SEASON,
                                        draft_type="discovery")
     assert "Sesko" in str(out), f"autodrafted from the wrong manager's queue: {out}"
+
+
+# ---- the order source: last season's finish, not this season's in-progress one ----
+def _two_season_seed(session):
+    """A finished PRIOR season (2025, standings the discovery order should read) and
+    the current one (2026, where the discovery draft actually runs) — same three
+    people, deliberately with the OPPOSITE finishing order, so a test using the wrong
+    season's standings is caught rather than passing by coincidence."""
+    prior = League(fpl_league_id="0", name="S2025", season_year=SEASON - 1,
+                   is_current=False, sync_locked=True, phase="offseason")
+    session.add(prior)
+    session.flush()
+    cur = League(fpl_league_id="1", name="S2026", season_year=SEASON,
+                is_current=True, sync_locked=False, phase="in_season")
+    session.add(cur)
+    session.flush()
+    session.add(Gameweek(number=1, league_id=cur.id))
+    session.flush()
+
+    prior_mgrs, cur_mgrs = {}, {}
+    for i, name in enumerate(["A", "B", "C"], start=1):
+        pm = Manager(league_id=prior.id, fpl_manager_id=str(i), name=f"Team{name}",
+                    display_name=name)
+        session.add(pm)
+        session.flush()
+        # A finished last, C first — the OPPOSITE of the in-progress order below.
+        session.add(Standing(league_id=prior.id, manager_id=pm.id,
+                             total=10 + i, points_for=100 + i))
+        prior_mgrs[name] = pm
+
+        cm = Manager(league_id=cur.id, fpl_manager_id=str(i), name=f"Team{name}",
+                    display_name=name)
+        session.add(cm)
+        session.flush()
+        # This season so far: C last, A first.
+        session.add(Standing(league_id=cur.id, manager_id=cm.id,
+                             total=40 - i, points_for=400 - i))
+        cur_mgrs[name] = cm
+    session.commit()
+    return prior, cur, prior_mgrs, cur_mgrs
+
+
+def test_the_order_reads_last_seasons_finish_not_this_seasons_in_progress_one(
+        test_session):
+    """Found 2026-09-08: the discovery draft runs a few gameweeks into the season it's
+    for, and this read THAT in-progress table — Kevin T last on a 0-3 start — rather
+    than the season that actually finished, which is what the main draft's rounds 2+
+    already use. Confirmed with the commissioner: discovery should match that rule.
+    """
+    _prior, cur, prior_mgrs, cur_mgrs = _two_season_seed(test_session)
+
+    board = services.get_discovery_board(test_session, cur, SEASON)
+    first_pick = next(b for b in board if b["pick"] == 1)
+    # Last season A finished bottom (highest `total`, since these fixtures ascend A/B/C
+    # -> worse), so A should be on the clock — NOT C, who is last in this season's
+    # in-progress table.
+    assert first_pick["owner"] == "A"
+
+
+def test_a_first_ever_season_falls_back_to_its_own_in_progress_standings(
+        test_session):
+    """No prior league row exists yet (this IS season 1) — _prior_season_league
+    already falls back to `league` itself for exactly this case, so a first-season
+    discovery draft still gets an order rather than an empty one."""
+    lg = League(fpl_league_id="1", name="S", season_year=SEASON, is_current=True,
+                sync_locked=False, phase="in_season")
+    test_session.add(lg)
+    test_session.flush()
+    test_session.add(Gameweek(number=1, league_id=lg.id))
+    test_session.flush()
+    for i, name in enumerate(["A", "B", "C"], start=1):
+        m = Manager(league_id=lg.id, fpl_manager_id=str(i), name=f"Team{name}",
+                    display_name=name)
+        test_session.add(m)
+        test_session.flush()
+        test_session.add(Standing(league_id=lg.id, manager_id=m.id,
+                                  total=40 - i, points_for=400 - i))
+    test_session.commit()
+
+    board = services.get_discovery_board(test_session, lg, SEASON)
+    first_pick = next(b for b in board if b["pick"] == 1)
+    assert first_pick["owner"] == "C", "worst of THIS season, the only table there is"

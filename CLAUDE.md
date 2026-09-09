@@ -526,6 +526,14 @@ Write tests for these. They are custom and non-obvious:
   keeps the manager who actually made it" rule (`pick_number` is positional), and
   condition metadata attached only to a conditional slot. Divergence between two readers
   of one truth was the bug, so keep them mirrored.
+  **The snake order reads `_prior_season_league`, not `league` itself (fixed
+  2026-09-08).** The discovery draft runs in September, a few gameweeks into the season
+  it's for, and the board used to order by THAT in-progress table — confirmed with the
+  commissioner as the wrong read: discovery should reverse the season that already
+  FINISHED, the identical rule `get_draft_board`'s rounds 2+ already use, not a few
+  weeks of noise. No prior discovery draft had ever run (2025 recorded zero picks) to
+  surface this sooner. `_prior_season_league` already falls back to `league` itself when
+  there is no prior row (a true first season), so this needed no new fallback logic.
   **Linking a pick to a real player is `services.link_discovery_pick`, admin-only and
   never automatic.** A pick is recorded as free text (`record_discovery_pick`) because
   the player has no `players` row yet; linking is what lets the derivation see it at
