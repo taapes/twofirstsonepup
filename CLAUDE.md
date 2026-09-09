@@ -943,12 +943,24 @@ without it confirming a proposal read out of `#trades` posts it straight back to
 2026-09-03 while mapping which channel each webhook points at; the commissioner reads
 `#trades` and would have pointed the public webhook at the same channel.
 **Three outbound webhooks, three audiences**: `DISCORD_WEBHOOK_URL` (public, trades),
-`DISCORD_ALERT_WEBHOOK_URL` (private commissioner — `flagged_actions` + failed
-`data_health`, i.e. named managers and their infractions, which is why it is separate and
-why leaving it unset is fully supported: `/admin/health` shows the same content), and
-`DISCORD_REVIEW_WEBHOOK_URL` (the AI review's own channel). The review had originally
-pointed at the ALERT webhook, which would have shown the league's weekly write-up to
-nobody but the commissioner.
+`DISCORD_ALERT_WEBHOOK_URL` (private commissioner), and `DISCORD_REVIEW_WEBHOOK_URL`
+(the AI review's own channel). The review had originally pointed at the ALERT webhook,
+which would have shown the league's weekly write-up to nobody but the commissioner.
+**The alert channel carries only `fine_risk` entries** (narrowed 2026-09-08, at the
+commissioner's request, from "everything `flagged_actions` returns plus every failed
+`data_health` check"). `discord_bridge.collect_alerts` filters on
+`flagged_actions`' `fine_risk` flag — every entry now carries one — rather than
+re-deciding per category, which would drift the moment a new category is added and
+this file is forgotten. `True`: an anti-tanking flag, an ineligible player rostered,
+a player playing again but still parked past when he should have returned (all named
+"a violation" in this doc, with a possible manual-fine consequence). `False`: an
+ordinary IL/international return nag, a conditional pick awaiting a ruling, and (no
+longer collected for Discord at all) a failed health check — nobody did anything
+wrong, and posting them here trained the channel to be noise. Missing the key at all
+also reads as `False` — fails closed, not open. The homepage and `/admin/health` are
+UNCHANGED and still show every entry regardless; only the private channel narrowed.
+Leaving the webhook unset is still fully supported: `/admin/health` shows the same
+content, `fine_risk`-filtered or not.
 
 **Inbound Discord (`discord_bridge.py` + `discord_parse.py`).** Reads `#trades` and the
 IL channel and stages what it finds for review. **NOTHING is ever applied

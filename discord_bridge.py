@@ -193,19 +193,22 @@ def alert_fingerprint(entry: dict) -> str:
 
 
 def collect_alerts(db, league) -> list[dict]:
-    """Everything worth waking the commissioner for: `flagged_actions` plus any FAILED
-    `data_health` check, normalized to the same {category, manager, detail} shape."""
+    """Potential fines and infractions, for the private Discord channel ONLY.
+
+    Deliberately narrower than the homepage / `/admin/health`, which show every
+    `flagged_actions` entry and every failed `data_health` check regardless. At the
+    commissioner's request (2026-09-08) this channel carries only what's actually a
+    rule violation with a possible fine attached — `flagged_actions`' `fine_risk` flag
+    is exactly that line, so this filters on it rather than re-deciding per category
+    (which would drift the moment a new category is added and someone forgets this
+    file exists). Health checks and administrative nags (an ordinary IL/international
+    return reminder, a conditional pick waiting on a ruling) stay on-page only — they
+    are not "the league did something wrong", and posting them here trained the
+    channel to be noise rather than the thing worth a notification.
+    """
     import services
 
-    out = list(services.flagged_actions(db, league))
-    for check in services.data_health(db, league):
-        if not check.get("ok"):
-            out.append({
-                "category": "Health check",
-                "manager": None,
-                "detail": f"{check['check']}: {check.get('detail') or 'failed'}",
-            })
-    return out
+    return [e for e in services.flagged_actions(db, league) if e.get("fine_risk")]
 
 
 def announce_alerts(db, league, send=None) -> dict:

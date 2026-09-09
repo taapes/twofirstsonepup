@@ -3139,7 +3139,18 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
     """League attention items for the home page: IL/international players that must be
     returned at season end, players on the IL 4+ GWs (eligible to return), players
     playing again but still parked, teams flagged or at risk of an anti-tanking
-    violation, and conditional picks waiting on a ruling that can now be given."""
+    violation, and conditional picks waiting on a ruling that can now be given.
+
+    Every entry carries `fine_risk` (bool): whether it represents an actual rule
+    violation with a potential manual-fine consequence (anti-tanking, an ineligible
+    player rostered, a player playing again but still parked past when he should have
+    returned) versus an administrative nag nobody is at fault for (an ordinary IL/
+    international return prompt, a conditional pick waiting on a ruling). Nothing here
+    reads it — it exists for `discord_bridge.collect_alerts`, which the commissioner
+    asked to stop posting anything BUT potential fines and infractions to Discord. The
+    homepage and `/admin/health` show every entry regardless; this only narrows what
+    reaches the private channel.
+    """
     from models import InternationalList
 
     cur = current_gameweek(db, league)
@@ -3152,7 +3163,12 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
         gws = f" ({e['overdue_gws']} GW{'s' if e['overdue_gws'] != 1 else ''} overdue)"             if e["overdue_gws"] else ""
         out.append({"category": e["kind"], "manager": e["manager"],
                     "detail": f"{e['player']} is playing again (GW{e['last_played_gw']}) "
-                              f"but still parked{gws} — return them"})
+                              f"but still parked{gws} — return them",
+                    # A genuine rule violation with a manual-fine consequence (see the
+                    # must-return alert's own docstring) — unlike the two informational
+                    # IL/International entries below, which share this category label
+                    # but aren't infractions.
+                    "fine_risk": True})
 
     # IL: season-end return-or-release, and 4+ GW eligible-to-return
     for il, m, p in (
@@ -3165,10 +3181,12 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
         gws_on = (cur - il.start_gw + 1) if (cur and il.start_gw) else None
         if season_over:
             out.append({"category": "Injury list", "manager": m.display,
-                        "detail": f"Season over — return or release {p.name}"})
+                        "detail": f"Season over — return or release {p.name}",
+                        "fine_risk": False})
         elif gws_on is not None and gws_on >= MIN_IL_STAY_GWS:
             out.append({"category": "Injury list", "manager": m.display,
-                        "detail": f"{p.name} on the IL {gws_on} GWs — eligible to return"})
+                        "detail": f"{p.name} on the IL {gws_on} GWs — eligible to return",
+                        "fine_risk": False})
 
     # International: season-end return
     for il, m, p in (
@@ -3180,7 +3198,8 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
     ):
         if season_over:
             out.append({"category": "International", "manager": m.display,
-                        "detail": f"Season over — return {p.name} from international duty"})
+                        "detail": f"Season over — return {p.name} from international duty",
+                        "fine_risk": False})
 
     # Rostering a player who was added to FPL after the draft. Add/drops happen in the
     # FPL app, so nothing here can BLOCK the pickup — the rule's only teeth are a
@@ -3205,7 +3224,8 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
                 continue
             out.append({"category": "Ineligible player", "manager": m.display,
                         "detail": f"{pname} was added to FPL after the draft — "
-                                  "cannot be kept this season"})
+                                  "cannot be kept this season",
+                        "fine_risk": True})
 
     # Anti-tanking: flagged (in violation) or at risk (one GW short of the threshold).
     # Dismissed windows drop out, so this table can't contradict the flag list below it.
@@ -3215,12 +3235,14 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
         counts = info["counts"]
         if mid in open_windows:
             out.append({"category": "Anti-tanking", "manager": info["manager"].display,
-                        "detail": "flagged for an anti-tanking violation"})
+                        "detail": "flagged for an anti-tanking violation",
+                        "fine_risk": True})
         else:
             streak = current_tanking_streak(counts)
             if streak and streak >= ANTI_TANKING_MIN_WEEKS - 1:
                 out.append({"category": "Anti-tanking", "manager": info["manager"].display,
-                            "detail": f"at risk — {streak} straight GWs near the threshold"})
+                            "detail": f"at risk — {streak} straight GWs near the threshold",
+                            "fine_risk": True})
     # Conditional picks whose manual term can now be ruled on. Deliberately only
     # the ANSWERABLE ones — see condition_rulings_due. Reaches the homepage,
     # /admin/health and the private Discord alert sweep for free, because
@@ -3237,6 +3259,9 @@ def flagged_actions(db: Session, league: League) -> list[dict]:
                 "detail": (f"{due['from']} → {due['to']} ({due['what']}): "
                            f"{term['note'] or 'written-out term'} — rule on it "
                            "in Corrections"),
+                # An admin task, not a fine/infraction — nobody has done anything
+                # wrong, a clause is just waiting on a decision.
+                "fine_risk": False,
             })
 
     return out

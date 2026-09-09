@@ -66,9 +66,21 @@ def _player_trade(session, lg, a, b, *, name="Saka", fpl_id=101, created_at=T1,
 
 
 def _fake_sources(monkeypatch, *, flagged=(), health=()):
-    """Point the alert collector at fixed data. monkeypatch restores it for us."""
+    """Point the alert collector at fixed data. monkeypatch restores it for us.
+
+    `flagged` entries default to `fine_risk=True` when not specified — most of these
+    tests are about dedupe/batching/transport, not the filter itself, so they'd
+    otherwise all need updating for something unrelated to what they check. Tests of
+    the filter ITSELF pass `fine_risk` explicitly.
+
+    `health` is accepted for callers that haven't been updated yet, but
+    collect_alerts no longer reads services.data_health at all (2026-09-08: health
+    checks stopped reaching Discord, per the commissioner) — kept only so a stray old
+    call site doesn't hard-fail; nothing here does anything with it any more.
+    """
     import services
 
+    flagged = [dict({"fine_risk": True}, **e) for e in flagged]
     monkeypatch.setattr(services, "flagged_actions", lambda db, league: list(flagged))
     monkeypatch.setattr(services, "data_health", lambda db, league: list(health))
 
@@ -200,7 +212,8 @@ def test_alerts_post_once_and_are_deduped_by_content(test_session, monkeypatch):
     import services
 
     lg, _a, _b = _seed(test_session)
-    entries = [{"category": "Injury list", "manager": "Ann", "detail": "return Saka"}]
+    entries = [{"category": "Injury list", "manager": "Ann", "detail": "return Saka",
+               "fine_risk": True}]
     monkeypatch.setattr(services, "flagged_actions", lambda db, league: entries)
     monkeypatch.setattr(services, "data_health", lambda db, league: [])
 
@@ -248,17 +261,52 @@ def test_a_duplicate_line_within_one_batch_is_collapsed(test_session, monkeypatc
     assert test_session.query(DiscordAlert).count() == 1
 
 
-def test_a_failed_health_check_becomes_an_alert(test_session, monkeypatch):
+def test_a_failed_health_check_never_reaches_discord(test_session, monkeypatch):
+    """Reversed 2026-09-08 at the commissioner's request: this channel is for
+    potential fines and infractions only. A failed health check — a data/sync
+    problem, not something a manager did — stays on /admin/health, never here."""
     lg, _a, _b = _seed(test_session)
     _fake_sources(monkeypatch, health=[
         {"check": "roster sizes", "ok": False, "detail": "Ann has 16"},
-        {"check": "standings coverage", "ok": True, "detail": ""},
+    ])
+
+    assert discord_bridge.announce_alerts(
+        test_session, lg, send=FakeSender()) == {"sent": 0}
+
+
+def test_only_fine_risk_entries_reach_the_alert_channel(test_session, monkeypatch):
+    """The actual filter this whole change is about: flagged_actions' fine_risk flag,
+    not the category label, is what decides it — an administrative nag (no fine
+    attached) stays off Discord even though it's a real, homepage-visible entry."""
+    lg, _a, _b = _seed(test_session)
+    _fake_sources(monkeypatch, flagged=[
+        {"category": "Anti-tanking", "manager": "Ben", "detail": "flagged",
+         "fine_risk": True},
+        {"category": "Injury list", "manager": "Ann", "detail": "eligible to return",
+         "fine_risk": False},
+        {"category": "Condition needs a ruling", "manager": None, "detail": "rule on it",
+         "fine_risk": False},
     ])
 
     send = FakeSender()
-    assert discord_bridge.announce_alerts(test_session, lg, send=send)["sent"] == 1
-    assert "roster sizes" in send.messages[0]
-    assert "standings coverage" not in send.messages[0], "passing checks stay quiet"
+    out = discord_bridge.announce_alerts(test_session, lg, send=send)
+    assert out["sent"] == 1
+    assert "Ben" in send.messages[0]
+    assert "Ann" not in send.messages[0] and "ruling" not in send.messages[0]
+
+
+def test_an_entry_with_no_fine_risk_key_at_all_is_treated_as_not_a_fine(test_session,
+                                                                       monkeypatch):
+    """Fails closed: an entry that predates this flag, or a bug that forgets to set
+    it, must stay OFF Discord rather than leak by default."""
+    lg, _a, _b = _seed(test_session)
+    monkeypatch.setattr(services, "flagged_actions",
+                        lambda db, league: [{"category": "Mystery", "manager": None,
+                                            "detail": "no fine_risk key at all"}])
+    monkeypatch.setattr(services, "data_health", lambda db, league: [])
+
+    assert discord_bridge.announce_alerts(
+        test_session, lg, send=FakeSender()) == {"sent": 0}
 
 
 def test_a_long_alert_batch_is_split_not_truncated(test_session, monkeypatch):
@@ -370,7 +418,8 @@ def test_run_outbound_runs_both_sweeps_through_the_real_wiring(
     lg, a, b = _seed(test_session)
     t = _player_trade(test_session, lg, a, b)
     _fake_sources(monkeypatch, flagged=[
-        {"category": "Injury list", "manager": "Ann", "detail": "return Saka"}])
+        {"category": "Injury list", "manager": "Ann", "detail": "return Saka",
+         "fine_risk": True}])
 
     out = discord_bridge.run_outbound(test_session, lg)
     assert out["trades"]["sent"] == 1 and out["alerts"]["sent"] == 1

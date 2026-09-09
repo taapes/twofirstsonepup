@@ -653,9 +653,13 @@ def test_the_alert_appears_on_the_homepage_nag(test_session):
                                      eligible)
     _start_gw(test_session, gws, eligible)
 
-    detail = next(x["detail"] for x in services.flagged_actions(test_session, lg)
-                  if x["category"] == "Injury list")
-    assert "Out" in detail and "playing again" in detail
+    row = next(x for x in services.flagged_actions(test_session, lg)
+              if x["category"] == "Injury list")
+    assert "Out" in row["detail"] and "playing again" in row["detail"]
+    # A genuine rule violation with a possible manual fine (see the must-return
+    # alert's own docstring) — unlike an ordinary IL nag sharing this same category
+    # label, which discord_bridge.collect_alerts must NOT forward (2026-09-08).
+    assert row["fine_risk"] is True
 
 
 def test_the_alert_appears_on_the_health_check(test_session):

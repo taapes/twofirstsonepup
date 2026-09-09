@@ -228,6 +228,14 @@ def test_clearing_a_flag_clears_it_from_every_surface(test_session):
     before = services._manager_status(test_session, lg, mgr)["tanking"]["state"]
     assert before == "flagged"
 
+    # An anti-tanking flag is a real rule violation with a possible manual fine, so
+    # discord_bridge.collect_alerts (the private commissioner channel) has to keep
+    # carrying it — unlike an ordinary IL nag or a health check, which it dropped
+    # 2026-09-08.
+    tanking_now = [a for a in services.flagged_actions(test_session, lg)
+                  if a["category"] == "Anti-tanking"]
+    assert tanking_now and all(a["fine_risk"] is True for a in tanking_now)
+
     services.clear_flag(test_session, lg, mgr.fpl_manager_id, window)
 
     after = services._manager_status(test_session, lg, mgr)["tanking"]["state"]
