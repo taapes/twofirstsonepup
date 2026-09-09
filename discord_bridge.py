@@ -51,6 +51,12 @@ ALERT_WEBHOOK_ENV = "DISCORD_ALERT_WEBHOOK_URL"
 # channel is private to the commissioner — a review written for the league to read is
 # useless there. OFF when unset, like every other webhook.
 REVIEW_WEBHOOK_ENV = "DISCORD_REVIEW_WEBHOOK_URL"
+# The discovery draft's own channel: a pick being made, the clock moving to a new
+# manager, and a deadline warning before it expires (rules.discovery_clock). Its own
+# channel for the same reason the review has one — this is public-facing chatter about
+# a live draft, not a fine/infraction (the alert webhook) and not trade news (the trade
+# webhook). OFF when unset, like every other webhook.
+DISCOVERY_WEBHOOK_ENV = "DISCORD_DISCOVERY_WEBHOOK_URL"
 
 # Deliberately short. The sync it hangs off has real work to do, and a slow webhook is
 # indistinguishable from a dead one for our purposes: either way we skip and retry.
@@ -328,6 +334,137 @@ def announce_gameweek_summary(db, league, send=None) -> dict:
     return {"sent": 1, "gameweek": gw}
 
 
+def announce_discovery_picks(db, league, send=None) -> dict:
+    """Announce every discovery-draft pick with `discovery_announced_at IS NULL`,
+    then stamp it. Mirrors `announce_new_trades` exactly — a real one-time completion
+    event on a real row, so a per-row marker is the right shape (unlike the clock
+    itself, which has no row and dedupes through `DiscordAlert` instead — see
+    `announce_discovery_clock`).
+
+    Stamps PER SUCCESS, not in a batch, for the same reason the trade sweep does: a
+    partial failure must leave the rest queued for the next sweep, not silently lost.
+    An `overwrite` correction of an already-announced pick is never re-announced —
+    `discovery_announced_at` is set once and `record_discovery_pick` never clears it.
+    """
+    from models import DraftPick
+
+    url = webhook_url(DISCOVERY_WEBHOOK_ENV)
+    if send is None:
+        if not url:
+            return {"sent": 0, "skipped": "not configured"}
+        send = _webhook_sender(url)
+
+    pending = (
+        db.query(DraftPick)
+        .filter(DraftPick.league_id == league.id, DraftPick.draft_type == "discovery",
+                DraftPick.discovery_announced_at.is_(None),
+                DraftPick.player_label.isnot(None))
+        .order_by(DraftPick.pick_number)
+        .all()
+    )
+    if not pending:
+        return {"sent": 0}
+
+    import services
+    from models import Manager
+
+    names = {m.id: m.display for m in db.query(Manager).filter_by(league_id=league.id)}
+    sent = 0
+    for dp in pending:
+        who = names.get(dp.manager_id, "?")
+        if not send(f"📝 **Discovery pick** — {who} selected {dp.player_label} "
+                    f"(pick {dp.pick_number}, R{dp.round})"):
+            # Stop on the first failure, same reasoning as the trade sweep: the rest
+            # are likely to fail the same way, and hammering a dead endpoint is how
+            # an IP earns a Cloudflare ban.
+            break
+        dp.discovery_announced_at = datetime.datetime.now(datetime.timezone.utc)
+        db.commit()
+        sent += 1
+    return {"sent": sent, "pending": len(pending) - sent}
+
+
+def announce_discovery_clock(db, league, season_year, *, warn_within_hours=3,
+                             send=None) -> dict:
+    """Post when the discovery draft's clock moves to a new manager, or when the
+    CURRENT holder's deadline is close — both derived facts (`discovery_clock_status`),
+    not rows, so both dedupe through the existing `discord_alerts` fingerprint table
+    rather than a new mechanism: identical text never re-posts, and text that moves
+    (a new manager's name, an approaching deadline) is new information and does.
+
+    Two SEPARATE fingerprints per check (clock-moved, deadline-warning), not one,
+    so a manager who's been on the clock a while can still get exactly one warning as
+    their deadline nears without it being swallowed by "the clock-moved message
+    already fired for this pick". `warn_within_hours` is chosen against the sync
+    heartbeat's ~30-minute cadence in its 11:00–23:00 UTC window — generous enough
+    that at least one heartbeat tick is very likely to land inside the window before
+    it lapses; not a load-bearing number, worth tuning once one actually fires.
+    """
+    import services
+    from models import DiscordAlert
+
+    url = webhook_url(DISCOVERY_WEBHOOK_ENV)
+    if send is None:
+        if not url:
+            return {"sent": 0, "skipped": "not configured"}
+        send = _webhook_sender(url)
+
+    status = services.discovery_clock_status(db, league, season_year)
+    if status["pick"] is None:
+        return {"sent": 0, "skipped": "no active clock"}
+
+    board = services.get_discovery_board(db, league, season_year)
+    slot = next((b for b in board if b["pick"] == status["pick"]), None)
+    if slot is None:
+        return {"sent": 0}
+
+    sent = 0
+
+    def _post_once(fp_key: str, text: str) -> bool:
+        """`fp_key` is the DEDUP identity (stable for as long as this fact is true);
+        `text` is what's actually sent and may read differently between checks (e.g.
+        "about 2h left" ticking down) without causing a re-post — only a change to
+        `fp_key` does that."""
+        nonlocal sent
+        fp = hashlib.sha256(
+            f"discovery-clock|{league.id}|{fp_key}".encode("utf-8")
+        ).hexdigest()
+        if db.query(DiscordAlert).filter_by(league_id=league.id, fingerprint=fp).first():
+            return True
+        if not send(text):
+            return False
+        db.add(DiscordAlert(league_id=league.id, fingerprint=fp, summary=text[:500]))
+        db.commit()
+        sent += 1
+        return True
+
+    # Stable per (pick, deadline) — both fixed the instant this pick became current,
+    # so this fires exactly once when the clock moves here, however many times the
+    # heartbeat re-checks while it's still current.
+    if not _post_once(
+        f"on-clock|{status['pick']}|{status['deadline'].isoformat()}",
+        f"⏰ **On the clock** — {slot['owner']}, pick {status['pick']} "
+        f"(R{slot['round']}) — deadline "
+        f"{status['deadline'].strftime('%a %-I:%M%p UTC')}",
+    ):
+        return {"sent": sent, "failed": True}
+
+    remaining = status["deadline"] - datetime.datetime.now(datetime.timezone.utc)
+    if remaining <= datetime.timedelta(hours=warn_within_hours):
+        # Stable per pick ALONE — deliberately not including the hours-remaining
+        # figure in the dedup key (only in the displayed text), or this would refire
+        # at every rounded-hour boundary as the deadline approaches instead of once.
+        if not _post_once(
+            f"deadline-warning|{status['pick']}",
+            f"⚠️ **{slot['owner']}** has about "
+            f"{max(0, int(remaining.total_seconds() // 3600))}h left to pick "
+            f"(deadline {status['deadline'].strftime('%a %-I:%M%p UTC')})",
+        ):
+            return {"sent": sent, "failed": True}
+
+    return {"sent": sent}
+
+
 def run_outbound(db, league) -> dict:
     """Both sweeps, guarded. Called from the post-sync hook; never raises.
 
@@ -338,8 +475,14 @@ def run_outbound(db, league) -> dict:
     if league is None or getattr(league, "sync_locked", False):
         return {"skipped": "frozen" if league is not None else "no league"}
     out: dict = {}
-    for name, fn in (("trades", announce_new_trades), ("alerts", announce_alerts),
-                     ("gw_summary", announce_gameweek_summary)):
+    for name, fn in (
+        ("trades", announce_new_trades),
+        ("alerts", announce_alerts),
+        ("gw_summary", announce_gameweek_summary),
+        ("discovery_picks", announce_discovery_picks),
+        ("discovery_clock", lambda d, lg: announce_discovery_clock(
+            d, lg, lg.season_year)),
+    ):
         try:
             out[name] = fn(db, league)
         except Exception as exc:  # noqa: BLE001

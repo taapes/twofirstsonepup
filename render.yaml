@@ -63,6 +63,11 @@ services:
       # read is useless.
       - key: DISCORD_REVIEW_WEBHOOK_URL
         sync: false
+      # The discovery draft's own channel: a pick made, the clock moving to a new
+      # manager, a deadline warning. Its own channel for the same reason the review has
+      # one — public draft chatter, not a fine and not trade news.
+      - key: DISCORD_DISCOVERY_WEBHOOK_URL
+        sync: false
 
   # --- Demo sandbox: same code, separate Neon branch DB, passwordless login. ---
   # Point DATABASE_URL at a Neon BRANCH of prod (instant copy); prod is untouched.

@@ -28,6 +28,14 @@
           onsubmit="return confirm('Confirm the discovery draft is complete?')">
       <button type="submit">Close discovery draft</button>
     </form>
+    {% if phase_ctx.discovery_available %}
+    <form method="post" action="/admin/phase/reset-discovery-clock" style="display:flex;gap:4px;align-items:center"
+          onsubmit="return confirm('Restart the discovery clock at this pick, starting now?')">
+      <label class="sub">restart clock at pick
+        <input type="number" name="pick_number" value="1" min="1" style="width:70px"></label>
+      <button type="submit">Restart</button>
+    </form>
+    {% endif %}
     {% if phase_manual %}
     <form method="post" action="/admin/phase/unpin"><button type="submit">Unpin (resume auto)</button></form>
     {% endif %}

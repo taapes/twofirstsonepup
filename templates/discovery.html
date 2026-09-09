@@ -13,9 +13,27 @@
     <div class="card" style="padding:12px">
       {% if discovery_available %}
         {% if can_pick %}
+        {% if my_open_slots|length > 1 %}
+        <p class="sub">You have {{ my_open_slots|length }} open picks — the draft moved
+          on past one of your slots, but it's still yours to fill whenever you're ready.</p>
+        {% elif my_open_slots[0].pick == (on_clock.pick if on_clock else None) %}
         <p class="sub">You're on the clock — enter the player you want to discover.</p>
+        {% else %}
+        <p class="sub">You missed pick {{ my_open_slots[0].pick }}, but it's still open — the
+          draft moved on without you, and you can fill it any time before the last pick.</p>
+        {% endif %}
         <form hx-post="/discovery/{{ year }}/pick" hx-target="#discovery-board" hx-swap="outerHTML"
               hx-on::after-request="this.reset()">
+          {% if my_open_slots|length > 1 %}
+          <label>which pick
+            <select name="pick_number" style="width:100%">
+              {% for s in my_open_slots %}
+              <option value="{{ s.pick }}">pick {{ s.pick }} (R{{ s.round }}){% if s.pick != (on_clock.pick if on_clock else None) %} — missed, still open{% endif %}</option>
+              {% endfor %}
+            </select></label>
+          {% else %}
+          <input type="hidden" name="pick_number" value="{{ my_open_slots[0].pick }}">
+          {% endif %}
           <input name="player_name" placeholder="Player name (any player)" autocomplete="off"
                  required style="width:100%">
           <button type="submit" style="margin-top:8px">Submit pick</button>

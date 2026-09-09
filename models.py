@@ -86,6 +86,19 @@ class League(Base):
     discovery_done: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )
+    # The discovery draft's per-pick clock (rules.discovery_clock): the pick number
+    # the chain restarts from, and the moment it restarted. Ordinarily (1, whenever
+    # the window opened) — but it's a general "restart the clock here" lever, not
+    # just an open-timestamp, which is exactly what a mid-draft feature rollout
+    # needs: set to (2, deploy time) once for the 2026 draft, so pick 1 (made before
+    # the clock existed) is simply outside its scope and pick 2's clock starts fresh
+    # rather than being backdated to whenever pick 1 actually happened.
+    discovery_clock_anchor_pick: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    discovery_clock_anchor_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # The active season's league row (one True per franchise). Rollover flips it so
     # no env redeploy is needed; resolve_league falls back to the env when unset.
     is_current: Mapped[bool] = mapped_column(
@@ -1044,6 +1057,21 @@ class DraftPick(Base):
         UUID(as_uuid=True), ForeignKey("leagues.id"), index=True
     )
     source: Mapped[str | None] = mapped_column(String, nullable=True)  # draft/keeper/discovery
+    # WHEN the pick was actually made — added 2026-09-09 for the discovery draft's
+    # per-pick clock (rules.discovery_clock): a slot's completion time is what the
+    # NEXT slot's clock chains off. NULL for every pick made before this existed,
+    # which is correct — nothing before the clock feature needs a clock reading.
+    picked_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # WHEN this pick was announced to the discovery Discord channel, mirroring
+    # Trade.announced_at exactly — a true one-time completion event, not a derived
+    # fact, so a real per-row marker is the right shape (unlike the clock-moved /
+    # deadline-warning announcements, which have no row to mark and dedupe through
+    # DiscordAlert's fingerprint instead). Only meaningful for draft_type='discovery'.
+    discovery_announced_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class DiscoveryMatchSuggestion(Base):

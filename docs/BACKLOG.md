@@ -177,6 +177,32 @@ goalie-team commits, so treat every line as *verify*, not *assume*.
 
 ## Bugs
 
+### Discovery draft per-pick clock: built and applied, tune the warning threshold after the first real one
+
+**Priority:** `P2` — done; one number worth revisiting once it's been exercised live.
+**Status:** `done 2026-09-09`
+
+A real house rule the discovery draft had none of before: opens Sept 2, 10am Pacific
+local time every year; each manager gets 24h once on the clock; the next manager's
+clock starts at the earlier of the previous one picking or their 24h expiring; a
+manager can't lose a pick but the draft moves on without them; a missed slot stays
+fillable until the very last pick of the draft.
+
+Derived entirely on read (`rules.discovery_clock`), no background job — see
+`CLAUDE.md` for the full design. Shipped alongside a new Discord channel
+(`DISCORD_DISCOVERY_WEBHOOK_URL`) posting picks, clock moves, and a deadline warning.
+
+**Applied to the live 2026 draft the moment this shipped**: pick 1 (Kevin S, Julian
+Alvarez) predates the clock rule, so `services.reset_discovery_clock(db, league, 2026,
+2)` was called once to start Kevin T's (pick 2) clock fresh rather than backdating it
+to whenever pick 1 happened to land.
+
+**Worth revisiting, not blocking:** the deadline-warning threshold
+(`warn_within_hours=3` in `discord_bridge.announce_discovery_clock`) was chosen
+against the sync heartbeat's ~30-minute cadence in its 11:00–23:00 UTC window, a
+reasoned guess rather than a tested one. Watch the first real warning land and adjust
+if it fires too early or too close to the deadline to be useful.
+
 ### Goalie club grants: built, confirmed, and applied
 
 **Priority:** `P1` — done. Kept as a reference for the 27/28 rollover.

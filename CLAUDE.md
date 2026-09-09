@@ -534,6 +534,44 @@ Write tests for these. They are custom and non-obvious:
   weeks of noise. No prior discovery draft had ever run (2025 recorded zero picks) to
   surface this sooner. `_prior_season_league` already falls back to `league` itself when
   there is no prior row (a true first season), so this needed no new fallback logic.
+  **A real per-pick 24h clock (built 2026-09-09, a house rule):** opens Sept 2, 10am
+  PACIFIC LOCAL TIME every year (`rules.DISCOVERY_OPEN_TZ` = `America/Los_Angeles` via
+  stdlib `zoneinfo` — no new dependency; DST-correct automatically, which a fixed UTC
+  offset would not be). Once on the clock a manager has 24h
+  (`rules.DISCOVERY_PICK_CLOCK_HOURS`); the next manager's clock starts at the EARLIER
+  of the previous one actually picking or their 24h expiring — "the draft moves on
+  without them" needs no autodraft and no forfeiture, just the next slot's clock
+  starting on schedule. A missed slot stays fillable until the very last pick of the
+  whole draft — `discovery_pick`'s route now takes an explicit `pick_number` rather
+  than always resolving to "the" next slot, since a manager's current and a missed
+  slot can be simultaneously open (and routinely are: a snake's last pick of one round
+  and first pick of the next both belong to the same manager).
+  **Derived entirely on read, no background job** (`rules.discovery_clock`) — same
+  discipline as `pick_ownership`/`goalie_team_owner`. Given an anchor `(anchor_pick,
+  anchor_at)` and each filled slot's own `DraftPick.picked_at`, `clock_start(n)` for
+  `n > anchor_pick` is slot `n-1`'s own completion time if picked before ITS deadline,
+  else that deadline itself — fixed the instant it passes, whether or not `n-1` is
+  ever filled. A LATE catch-up fill therefore can never perturb an already-computed
+  later deadline; recomputing this later, even much later, gives the identical answer.
+  **`next_open_pick` (shared with the MAIN draft) is untouched** — none of this rule
+  applies there. `services.discovery_clock_status` is the one new place `_discovery_ctx`
+  and the pick route ask "who's on the clock and until when," for discovery only.
+  **The anchor is a general "restart the clock here" lever, not just an
+  open-timestamp** (`leagues.discovery_clock_anchor_pick/_at`,
+  `services.reset_discovery_clock`) — which is exactly what let the 2026 rollout ship
+  mid-draft: pick 1 (Kevin S) was already made before this rule existed, so
+  `anchor_pick` was set to 2 once, making pick 1 simply invisible to the clock forever
+  rather than backdating pick 2's start to whenever pick 1 happened to land.
+  **A new Discord channel** (`DISCORD_DISCOVERY_WEBHOOK_URL`) posts three things: a
+  pick made (`discord_bridge.announce_discovery_picks`, a real per-row marker —
+  `DraftPick.discovery_announced_at` — mirroring `Trade.announced_at` exactly, since
+  it's a true one-time event, unlike the other two); the clock moving to a new
+  manager, and a deadline warning inside ~3h of expiry (both
+  `announce_discovery_clock`, deduped through the EXISTING `discord_alerts`
+  fingerprint table rather than a new mechanism, since both are derived facts with no
+  row of their own — the dedup key for the warning deliberately excludes the
+  rounded hours-remaining figure shown in its text, or it would refire at every hour
+  boundary as the deadline approaches instead of firing once).
   **Linking a pick to a real player is `services.link_discovery_pick`, admin-only and
   never automatic.** A pick is recorded as free text (`record_discovery_pick`) because
   the player has no `players` row yet; linking is what lets the derivation see it at

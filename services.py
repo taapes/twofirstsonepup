@@ -57,8 +57,7 @@ from rules import (
     CUP_SEED_THROUGH_GW,
     CUP_SIZE,
     CUP_START_GW,
-    DISCOVERY_OPEN_DAY,
-    DISCOVERY_OPEN_MONTH,
+    discovery_clock,
     KEEPER_FRESH_DRAFT,
     KEEPER_FRESH_WAIVER,
     MIN_IL_STAY_GWS,
@@ -657,16 +656,19 @@ def enter_draft_phase(db: Session, league: League) -> dict:
 
 
 def open_discovery(db: Session, league: League) -> dict:
-    """Admin: open the discovery draft window early, ahead of the Oct-1 auto-open.
+    """Admin: open the discovery draft window early, ahead of the Sept-2/10am-Pacific
+    auto-open.
 
     `phase_features` only turns this into `discovery_available` under macro phase
     `in_season` — the sync heartbeat (`advance_phase_if_due`) has never set
     `discovery_open` before that phase is reached either, so this mirrors the same
     precondition rather than silently no-opping. Refuses once `discovery_done` (this
-    season's window already ran) — that flag exists specifically so the Oct-1 tick
+    season's window already ran) — that flag exists specifically so the auto-open
     can't re-open a closed window, and an admin re-opening it after close_discovery
     needs to go through the same gate the calendar does.
     """
+    import datetime as _dt
+
     if league.phase != PHASE_IN_SEASON:
         raise RuleViolation(
             f"the discovery draft opens once the season is in_season (currently "
@@ -679,6 +681,10 @@ def open_discovery(db: Session, league: League) -> dict:
     if league.discovery_open:
         return {"discovery_open": True, "changed": False}
     league.discovery_open = True
+    # Anchors the per-pick clock (rules.discovery_clock) at pick 1, starting now —
+    # the same write the auto-open path makes in advance_phase_if_due.
+    league.discovery_clock_anchor_pick = 1
+    league.discovery_clock_anchor_at = _dt.datetime.now(_dt.timezone.utc)
     record_audit(db, league, action="discovery.open",
                  summary="Opened the discovery draft window early")
     db.commit()
@@ -693,6 +699,40 @@ def close_discovery(db: Session, league: League) -> None:
     record_audit(db, league, action="discovery.close",
                  summary="Closed the discovery draft window")
     db.commit()
+
+
+def reset_discovery_clock(
+    db: Session, league: League, *, season_year: int, pick_number: int
+) -> dict:
+    """Admin: restart the discovery draft's per-pick clock (`rules.discovery_clock`)
+    at `pick_number`, starting now.
+
+    Not a one-off script action — a general lever. `discovery_clock_anchor_pick`
+    defaults to 1 (the ordinary case: the clock chain starts at pick 1, whenever the
+    window opened), but this is exactly what a MID-DRAFT feature rollout needs too:
+    pick 1 might already be made under no clock rules at all, in which case
+    backdating pick 2's start to whenever pick 1 happened to land would be unfair —
+    the rule didn't exist then. Setting the anchor to pick 2 here makes pick 1
+    simply invisible to the clock forever, and pick 2 gets a full fresh 24h window
+    starting at this call.
+
+    `season_year` is accepted for symmetry with `record_discovery_pick`/
+    `get_discovery_board` but the anchor itself lives on the league row (one active
+    discovery draft at a time) rather than being season-keyed data of its own — a
+    second discovery draft on the same league row does not exist as a concept.
+    """
+    import datetime as _dt
+
+    if pick_number < 1:
+        raise RuleViolation("pick_number must be >= 1")
+    now = _dt.datetime.now(_dt.timezone.utc)
+    league.discovery_clock_anchor_pick = pick_number
+    league.discovery_clock_anchor_at = now
+    record_audit(db, league, action="discovery.clock_reset",
+                 summary=f"Discovery clock restarted at pick {pick_number}",
+                 details={"season_year": season_year, "pick_number": pick_number})
+    db.commit()
+    return {"anchor_pick": pick_number, "anchor_at": now}
 
 
 def flag_ineligible(db: Session, league: League) -> int:
@@ -1128,21 +1168,21 @@ def snapshot_player_pool(db: Session, league: League) -> int:
 
 def advance_phase_if_due(db: Session, league: League, now=None) -> bool:
     """Auto-advance the time/GW-driven phase transitions during sync (the heartbeat):
-    in_season→offseason at GW38, preseason→in_season at GW1, and the Oct-1 discovery
-    auto-open. Skipped when the admin has pinned the phase (`phase_manual`). Returns
-    True if anything changed. The fact-gathering is here; the decision is pure
+    in_season→offseason at GW38, preseason→in_season at GW1, and the Sept-2/10am-Pacific
+    discovery auto-open. Skipped when the admin has pinned the phase (`phase_manual`).
+    Returns True if anything changed. The fact-gathering is here; the decision is pure
     (`rules.next_phase`)."""
     import datetime as _dt
 
     if league.phase_manual:
         return False
-    today = now or _dt.date.today()
+    now = now or _dt.datetime.now(_dt.timezone.utc)
     new_macro, open_disc = next_phase(
         league.phase,
         gw38_done=gw_finished(db, league, SEASON_LAST_GW),
         gw1_started=(current_gameweek(db, league) or 0) >= 1,
-        today=today,
-        season_year=league.season_year or today.year,
+        now=now,
+        season_year=league.season_year or now.year,
         discovery_open=bool(league.discovery_open),
         discovery_done=bool(league.discovery_done),
     )
@@ -1152,6 +1192,11 @@ def advance_phase_if_due(db: Session, league: League, now=None) -> bool:
         changed = True
     if open_disc and not league.discovery_open:
         league.discovery_open = True
+        # The discovery clock (rules.discovery_clock) needs a start instant the
+        # moment the window actually opens — same as the manual early-open path
+        # (services.open_discovery) sets it, for the same reason.
+        league.discovery_clock_anchor_pick = 1
+        league.discovery_clock_anchor_at = now
         changed = True
     # The season is over: freeze the row against the FPL feed. FPL reuses league
     # ids, so once 38 GWs are done this id can start resolving to someone else's
@@ -8806,13 +8851,52 @@ def get_discovery_board(db: Session, league: League, season_year: int) -> list[d
     return out
 
 
+def discovery_clock_status(db: Session, league: League, season_year: int) -> dict:
+    """Who's on the discovery draft's clock right now, until when, and which earlier
+    slots were missed and are still open — `rules.discovery_clock` matched to real
+    data.
+
+    Deliberately separate from `next_open_pick`, which is shared with the MAIN draft
+    (`get_draft_board`, `approve_queued_pick`) and none of this house rule applies
+    there — the plain "first unfilled slot" stays exactly what it was for main.
+
+    Returns `rules.discovery_clock`'s shape, `{"pick", "deadline", "missed"}`, with
+    `pick` == None (and the other two empty/None) when the clock has never started at
+    all (`discovery_clock_anchor_at` unset — the window has never opened).
+    """
+    if league.discovery_clock_anchor_at is None:
+        return {"pick": None, "deadline": None, "missed": []}
+    board = get_discovery_board(db, league, season_year)
+    picks = {
+        dp.pick_number: dp.picked_at
+        for dp in db.query(DraftPick).filter_by(
+            league_id=league.id, season_year=season_year, draft_type="discovery"
+        )
+        if dp.picked_at is not None
+    }
+    return discovery_clock(
+        league.discovery_clock_anchor_pick, league.discovery_clock_anchor_at, picks,
+        total_picks=len(board),
+    )
+
+
 def record_discovery_pick(
     db: Session, league: League, *, season_year: int, pick_number: int,
     owner_fpl: str, player_name: str, round: int = 0, overwrite: bool = False,
 ) -> dict:
     """Record a discovery-draft selection as a FREE-TEXT name (the player isn't in the
     league pool — they're a possible future PL arrival). Same slot/race guard as
-    record_pick."""
+    record_pick.
+
+    Stamps `picked_at` — the moment this specific fill happened, whether on time or a
+    late catch-up (rule 5) — which is what `rules.discovery_clock` chains the NEXT
+    slot's start off. An `overwrite` (an admin correction of an already-made pick)
+    does NOT re-stamp it: the clock already advanced off whenever the ORIGINAL pick
+    landed, and a later correction of *what* was picked must not retroactively move
+    *when* the baton passed to the next manager.
+    """
+    import datetime as _dt
+
     owner = _resolve_manager(db, league, owner_fpl)
     name = (player_name or "").strip()
     if not name:
@@ -8826,11 +8910,14 @@ def record_discovery_pick(
         if (existing.player_label or existing.player_id) is not None and not overwrite:
             raise RuleViolation(f"pick {pick_number} has already been made")
         existing.manager_id, existing.player_id, existing.player_label = owner.id, None, name
+        if existing.picked_at is None:
+            existing.picked_at = _dt.datetime.now(_dt.timezone.utc)
     else:
         db.add(DraftPick(
             league_id=league.id, season_year=season_year, draft_type="discovery",
             pick_number=pick_number, round=round, manager_id=owner.id,
             player_id=None, player_label=name, source="discovery",
+            picked_at=_dt.datetime.now(_dt.timezone.utc),
         ))
     record_audit(db, league, action="discovery.pick",
                  summary=(f"{owner.display} made discovery pick #{pick_number}: {name}"

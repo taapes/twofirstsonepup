@@ -18,14 +18,23 @@ Small private league app (≈10 users) on Render + Neon, session-cookie auth.
   channel as the app, so treat it exactly like a password and never commit it. Rotate
   by deleting the webhook in Channel Settings → Integrations and making a new one.
 - `DISCORD_ALERT_WEBHOOK_URL` — optional. Incoming webhook for the PRIVATE commissioner
-  channel. Point it somewhere only the commissioner can read: it carries flagged
-  actions and failed health checks, i.e. named managers and their infractions.
+  channel. Point it somewhere only the commissioner can read: it carries **potential
+  fines and infractions** (an anti-tanking flag, an ineligible player rostered, a
+  player playing again but still parked) — narrowed 2026-09-08 at the commissioner's
+  request; it no longer carries failed health checks or ordinary administrative nags
+  (an IL return reminder, a conditional pick awaiting a ruling), which stay on
+  `/admin/health` only.
 
 - `DISCORD_REVIEW_WEBHOOK_URL` — optional. Incoming webhook for the channel the AI
   gameweek review posts to, and the ONLY thing that writes there. Its own channel on
   purpose: the trade webhook would bury real trades under a weekly essay, and the alert
   webhook is private to the commissioner, where a review written for the league to read
   is useless. Unset means the post button refuses by name rather than posting nowhere.
+- `DISCORD_DISCOVERY_WEBHOOK_URL` — optional. Incoming webhook for the discovery
+  draft's own channel: a pick being made, the clock moving to a new manager, and a
+  deadline warning before it expires. Its own channel for the same reason the review
+  has one — this is public-facing draft chatter, not a fine (the alert webhook) and
+  not trade news (the trade webhook).
 - `DISCORD_BOT_TOKEN` — optional, for INBOUND (reading announcements). A bearer secret
   with no scoping beyond the permissions granted at invite: anyone holding it can act
   as the bot in every guild it has joined. Rotate by regenerating in the Developer

@@ -79,7 +79,13 @@ PHASES = (PHASE_OFFSEASON, PHASE_DRAFT, PHASE_PRESEASON, PHASE_IN_SEASON)
 
 # Calendar anchors for in-season derived sub-states.
 TRADE_DEADLINE_MONTH, TRADE_DEADLINE_DAY = 2, 1   # Feb 1: trades close
-DISCOVERY_OPEN_MONTH, DISCOVERY_OPEN_DAY = 10, 1  # Oct 1: discovery window opens
+# Sept 2, 10am PACIFIC LOCAL TIME (not a fixed UTC offset) — confirmed with the
+# commissioner 2026-09-09. "PST" colloquially means "whatever a Pacific-time clock
+# reads", not literally UTC-8 year-round, and Sept 2 is during US daylight time —
+# zoneinfo gets this right automatically, including in whichever future year DST
+# rules next change.
+DISCOVERY_OPEN_MONTH, DISCOVERY_OPEN_DAY, DISCOVERY_OPEN_HOUR = 9, 2, 10
+DISCOVERY_OPEN_TZ = "America/Los_Angeles"
 CUP_START_GW = 28  # cups become available once GW28 has finished
 
 
@@ -150,17 +156,23 @@ def next_phase(
     *,
     gw38_done: bool,
     gw1_started: bool,
-    today,
+    now,
     season_year: int,
     discovery_open: bool,
     discovery_done: bool,
 ):
     """Pure auto-advance decision (no DB). Returns `(new_macro, open_discovery)` where
-    `open_discovery` is True only when the Oct-1 discovery window should auto-open this
-    tick (else None). Only the time/GW-driven transitions live here; admin-confirmed
-    moves (offseason→draft, draft→preseason, closing discovery) are explicit elsewhere.
+    `open_discovery` is True only when the discovery window should auto-open this tick
+    (else None). Only the time/GW-driven transitions live here; admin-confirmed moves
+    (offseason→draft, draft→preseason, closing discovery) are explicit elsewhere.
+
+    `now` is a timezone-aware instant (any zone; converted internally) — not a bare
+    date. The discovery-open check needs TIME precision (Sept 2, 10am Pacific), which
+    a date-only comparison can't express; `gw38_done`/`gw1_started` are already
+    booleans and never touch `now` at all.
     """
     import datetime as _dt
+    from zoneinfo import ZoneInfo
 
     new_macro = macro
     if macro == PHASE_IN_SEASON and gw38_done:
@@ -169,14 +181,86 @@ def next_phase(
         new_macro = PHASE_IN_SEASON            # GW1 kicked off
 
     open_discovery = None
+    opens_at = _dt.datetime(
+        season_year, DISCOVERY_OPEN_MONTH, DISCOVERY_OPEN_DAY, DISCOVERY_OPEN_HOUR,
+        tzinfo=ZoneInfo(DISCOVERY_OPEN_TZ),
+    )
     if (
         new_macro == PHASE_IN_SEASON
         and not discovery_open
         and not discovery_done
-        and today >= _dt.date(season_year, DISCOVERY_OPEN_MONTH, DISCOVERY_OPEN_DAY)
+        and now >= opens_at
     ):
         open_discovery = True
     return new_macro, open_discovery
+
+
+# ---- Discovery draft clock ----
+# Each manager gets this long, once on the clock, before the draft moves on without
+# them (they can still come back and fill their slot any time before the very last
+# pick — see discovery_clock's docstring for why that needs no special-casing here).
+DISCOVERY_PICK_CLOCK_HOURS = 24
+
+
+def discovery_clock(
+    anchor_pick: int, anchor_at, picks: dict, *, total_picks: int, now=None,
+) -> dict:
+    """Who's on the clock right now, until when, and which earlier slots were missed
+    and are still open — derived entirely from already-persisted facts, no background
+    job.
+
+    `picks` is `{pick_number: picked_at}` for slots already filled (any pick number,
+    not just ones at or after `anchor_pick` — a slot before the anchor is simply never
+    asked about, which is what lets a mid-draft feature rollout set `anchor_pick` to
+    "the next slot" and leave every earlier pick alone). `anchor_at` is a tz-aware
+    instant; `now` defaults to the current instant.
+
+    THE CHAIN: `clock_start(anchor_pick) = anchor_at`. For n > anchor_pick,
+    `clock_start(n)` is slot (n-1)'s OWN completion time if it was picked before its
+    own deadline (`clock_start(n-1) + 24h`) — otherwise it's that deadline itself,
+    whether or not (n-1) is EVER filled. This is why "the draft moves on without them"
+    needs no polling or scheduled sweep: clock_start(n) is a fixed fact the instant
+    (n-1)'s deadline passes, and asking again later — even much later, even after a
+    LATE catch-up fill lands in (n-1) — recomputes to the identical answer. A late
+    fill changes nothing about clock_start(n): it already happened.
+
+    Returns `{"pick": current_pick_number_or_None, "deadline": dt_or_None, "missed":
+    [pick numbers strictly before `current` with no entry in `picks`]}`. `pick` is
+    None once every slot from `anchor_pick` to `total_picks` is filled (draft done);
+    `deadline` is None whenever `pick` is (nothing left to time).
+    """
+    import datetime as _dt
+
+    now = now or _dt.datetime.now(_dt.timezone.utc)
+    start = anchor_at
+    current = anchor_pick
+    while current <= total_picks:
+        deadline = start + _dt.timedelta(hours=DISCOVERY_PICK_CLOCK_HOURS)
+        picked_at = picks.get(current)
+        if picked_at is not None:
+            # Picked, whenever — the baton passed at the pick itself, or at the
+            # deadline if it came in LATE (a catch-up fill after being skipped can't
+            # move this earlier than the deadline already fixed it: `min` is what
+            # makes a late fill not perturb the chain).
+            start = min(picked_at, deadline)
+            current += 1
+            continue
+        if now >= deadline:
+            # Never picked, and the window's closed — the draft moves on.
+            start = deadline
+            current += 1
+            continue
+        break  # still within this slot's live window — this is the answer
+
+    if current > total_picks:
+        return {"pick": None, "deadline": None,
+                "missed": [n for n in range(anchor_pick, total_picks + 1)
+                          if n not in picks]}
+    return {
+        "pick": current,
+        "deadline": start + _dt.timedelta(hours=DISCOVERY_PICK_CLOCK_HOURS),
+        "missed": [n for n in range(anchor_pick, current) if n not in picks],
+    }
 
 
 # How long after a PL kickoff we treat a match as "live" (90' + half-time + stoppage

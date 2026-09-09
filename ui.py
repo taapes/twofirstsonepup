@@ -826,6 +826,26 @@ def admin_phase_open_discovery(request: Request, db: Session = Depends(get_db)):
     return RedirectResponse("/admin/health", status_code=303)
 
 
+@router.post("/admin/phase/reset-discovery-clock")
+def admin_phase_reset_discovery_clock(
+    request: Request, db: Session = Depends(get_db), pick_number: str = Form("1"),
+):
+    """Restart the discovery draft's per-pick clock at a given pick, starting now —
+    see services.reset_discovery_clock. General lever (a manual restart, or the
+    mid-draft feature rollout this shipped with), not a one-off script action."""
+    if not is_admin(request):
+        return RedirectResponse("/admin/login?next=/admin/health", status_code=303)
+    league = _league_or_404(db)
+    try:
+        services.reset_discovery_clock(
+            db, league, season_year=league.season_year,
+            pick_number=_safe_int(pick_number, 1, 10**6, field="pick"),
+        )
+    except RuleViolation as e:
+        return _err(e)
+    return RedirectResponse("/admin/health", status_code=303)
+
+
 @router.post("/admin/phase/close-discovery")
 def admin_phase_close_discovery(request: Request, db: Session = Depends(get_db)):
     if not is_admin(request):
@@ -2452,7 +2472,26 @@ def draft_revert_order(
 # ---- discovery draft (snake, 2 picks/manager; gated by discovery_open) ----
 def _discovery_ctx(request: Request, db: Session, league, year: int) -> dict:
     board = services.get_discovery_board(db, league, year)
-    on_clock = services.next_open_pick(board)
+    # The discovery draft's own per-pick 24h clock (rules.discovery_clock) — NOT
+    # next_open_pick, which is shared with the main draft and stays the plain
+    # "first unfilled slot" for it. `clock["pick"]` names a pick NUMBER; look up
+    # its full board row (owner/owner_fpl/round/player) to keep the same shape
+    # every existing consumer of `on_clock` already expects, then attach the
+    # deadline nothing else provides.
+    board_by_pick = {b["pick"]: b for b in board}
+    clock = services.discovery_clock_status(db, league, year)
+    on_clock = None
+    if clock["pick"] is not None and clock["pick"] in board_by_pick:
+        on_clock = dict(board_by_pick[clock["pick"]])
+        on_clock["deadline"] = clock["deadline"]
+    missed_slots = [board_by_pick[n] for n in clock["missed"] if n in board_by_pick]
+    # Rule 5: a manager can go back and fill a slot the draft has already moved past,
+    # any time before the very last pick — so "may I pick right now" is no longer
+    # just "am I the current clock holder", it's "do I own ANY still-open slot".
+    my_open_slots = [
+        s for s in ([on_clock] if on_clock else []) + missed_slots
+        if can_act_as(request, s.get("owner_fpl"))
+    ]
     # The trade-a-pick form's two lists, mirroring _board_ctx. Building the pick list
     # from the board is only possible because get_discovery_board exposes
     # `original_owner` — `pick` is "<original_fpl>:<round>", i.e. the SLOT, not its
@@ -2481,7 +2520,10 @@ def _discovery_ctx(request: Request, db: Session, league, year: int) -> dict:
     return {
         "request": request, "league": league, "year": year, "board": board,
         "on_clock": on_clock,
-        "can_pick": bool(on_clock) and can_act_as(request, on_clock.get("owner_fpl")),
+        "missed_slots": missed_slots,
+        "missed_picks": {s["pick"] for s in missed_slots},
+        "my_open_slots": my_open_slots,
+        "can_pick": bool(my_open_slots),
         "discovery_available": services.phase_context(db, league)["discovery_available"] or is_admin(request),
         "is_admin": is_admin(request),
         "managers": _manager_options(db, league),
@@ -2530,23 +2572,38 @@ def discovery_board_partial(year: int, request: Request, db: Session = Depends(g
 @router.post("/discovery/{year}/pick", response_class=HTMLResponse)
 def discovery_pick(
     year: int, request: Request, player_name: str = Form(...),
+    pick_number: str = Form(""),
     db: Session = Depends(get_db),
 ):
     """Discovery picks are players NOT in the league (future PL arrivals) — recorded as
-    a free-text name, not a player search."""
+    a free-text name, not a player search.
+
+    `pick_number` is explicit, not derived from the clock — rule 5 (a manager can go
+    back and fill a MISSED slot any time before the draft's last pick) means "the
+    slot I'm filling" and "the slot currently on the clock" are no longer always the
+    same thing. Omitted, it defaults to this manager's earliest open slot (current
+    or missed), which covers the ordinary on-time case with no form change needed.
+    """
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "discovery_available"):
         return _locked_response("The discovery draft")
-    board = services.get_discovery_board(db, league, year)
-    slot = services.next_open_pick(board)
-    if slot and slot.get("owner_fpl"):
-        if not can_act_as(request, slot["owner_fpl"]):
-            return _forbidden(request, "It's not your discovery pick to make.")
-        try:
-            services.record_discovery_pick(
-                db, league, season_year=year, pick_number=slot["pick"],
-                owner_fpl=slot["owner_fpl"], player_name=player_name, round=slot["round"],
+    ctx = _discovery_ctx(request, db, league, year)
+    my_open = ctx["my_open_slots"]
+    if not my_open:
+        return _discovery_board_response(request, db, league, year)
+    slot = my_open[0]
+    if pick_number.strip():
+        wanted = _safe_int(pick_number, 1, 10**6, field="pick")
+        slot = next((s for s in my_open if s["pick"] == wanted), None)
+        if slot is None:
+            return _forbidden(
+                request, "That pick isn't yours to make right now."
             )
-        except RuleViolation as e:
-            return _err(e)
+    try:
+        services.record_discovery_pick(
+            db, league, season_year=year, pick_number=slot["pick"],
+            owner_fpl=slot["owner_fpl"], player_name=player_name, round=slot["round"],
+        )
+    except RuleViolation as e:
+        return _err(e)
     return _discovery_board_response(request, db, league, year)

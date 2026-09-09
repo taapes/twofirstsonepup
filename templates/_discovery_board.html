@@ -1,6 +1,14 @@
 <div id="discovery-board" hx-get="/discovery/{{ year }}/board" hx-trigger="every 7s" hx-swap="outerHTML">
   {% if on_clock %}
-  <div class="card on-clock-banner">On the clock — pick {{ on_clock.pick }} (R{{ on_clock.round }}): <strong>{{ on_clock.owner }}</strong></div>
+  <div class="card on-clock-banner">On the clock — pick {{ on_clock.pick }} (R{{ on_clock.round }}): <strong>{{ on_clock.owner }}</strong>
+    {% if on_clock.deadline %}<span class="sub">— pick by {{ on_clock.deadline.strftime("%a %-I:%M%p %Z") }}</span>{% endif %}</div>
+  {% if missed_slots %}
+  <div class="card empty" style="margin-top:6px">
+    {{ missed_slots|length }} missed pick{{ "s" if missed_slots|length != 1 }} still open —
+    {% for s in missed_slots %}{{ s.owner }} (R{{ s.round }}, pick {{ s.pick }}){% if not loop.last %}, {% endif %}{% endfor %}.
+    The draft moved on; they can still fill it any time before the last pick.
+  </div>
+  {% endif %}
   {% else %}
   <div class="card empty">Discovery draft complete — both rounds filled.</div>
   {% endif %}
@@ -13,7 +21,12 @@
           <td class="rank">{{ b.pick }}</td>
           <td class="num">{{ b.round }}</td>
           <td>{{ b.owner }}{% if b.traded %} <span class="pill">via {{ b.original_owner }}</span>{% endif %}{% if b.conditional %} <span class="pill" title="{{ b.condition_note }}">conditional{% if b.condition_status != "pending" %} · {{ b.condition_status.replace("_", " ") }}{% endif %}</span>{% endif %}</td>
-          <td>{% if b.player %}{{ b.player }}{% elif on_clock and b.pick == on_clock.pick %}<span class="sub">on the clock</span>{% else %}<span class="sub">—</span>{% endif %}</td>
+          <td>
+            {% if b.player %}{{ b.player }}
+            {% elif on_clock and b.pick == on_clock.pick %}<span class="sub">on the clock</span>
+            {% elif b.pick in missed_picks %}<span class="pill warn">missed — still open</span>
+            {% else %}<span class="sub">—</span>{% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>
