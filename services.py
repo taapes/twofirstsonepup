@@ -8508,8 +8508,15 @@ def _trade_season_year(trade: "Trade", leagues_by_id: dict) -> int:
 def get_trades(db: Session) -> list[dict]:
     """All trades across every season — synced player trades and commissioner-
     entered player/pick/club trades — grouped by the season each belongs to (see
-    _trade_season_year), newest season first; within a season, newest first
-    (event_gw desc, then created_at desc; rows with no event_gw sort last).
+    _trade_season_year), newest season first; within a season, newest `created_at`
+    first — the ONLY reliable ordering (see the field's own docstring on the
+    `Trade` model: `date` is NULL on commissioner rows and the PK is a random
+    uuid4). This used to sort by `event_gw` desc first and `created_at` only as a
+    tiebreak, which pinned every FPL-synced trade above EVERY commissioner-entered
+    one (pick trades, club trades — anything with no `event_gw`) regardless of how
+    old the synced trade was or how recently the commissioner one was entered: a
+    lone GW3 FPL trade sat above two dozen September pick trades. `created_at`
+    alone is simply "most recent to oldest", which is what the page promises.
 
     Cross-season by design: trades are a permanent record of who dealt with whom,
     not scoped to whichever league row is current. Names/players must therefore
@@ -8569,11 +8576,7 @@ def get_trades(db: Session) -> list[dict]:
     out = []
     for year in sorted(by_year, reverse=True):
         ordered = sorted(
-            by_year[year],
-            key=lambda pair: (
-                pair[0].event_gw is None, -(pair[0].event_gw or 0),
-                -pair[0].created_at.timestamp(),
-            ),
+            by_year[year], key=lambda pair: pair[0].created_at, reverse=True,
         )
         out.append({"year": year, "trades": [row for _t, row in ordered]})
     return out

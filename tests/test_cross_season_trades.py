@@ -163,6 +163,32 @@ def test_cross_row_manager_names_resolve_for_both_rows(test_session):
     assert row["to"] == "B"
 
 
+def test_a_recently_entered_pick_trade_outranks_an_old_synced_one(test_session):
+    """Found in production 2026-09-10: within a season, ordering used to sort by
+    event_gw desc first and created_at only as a tiebreak, which pinned a stale
+    GW3 FPL-synced trade above two dozen September pick trades entered since —
+    'most recent to oldest' must mean created_at, not event_gw. A commissioner
+    pick trade recorded TODAY has no event_gw at all and must still outrank an
+    old GW3 synced trade."""
+    lg = _league(test_session, season_year=2026, is_current=True)
+    a = _manager(test_session, lg, "1", "A")
+    b = _manager(test_session, lg, "2", "B")
+    p = _player(test_session, "Synced Player")
+    test_session.add(Trade(
+        league_id=lg.id, from_manager=a.id, to_manager=b.id, player_id=p.id,
+        event_gw=3, created_at=dt.datetime(2026, 8, 20, tzinfo=dt.timezone.utc),
+    ))
+    test_session.add(Trade(
+        league_id=lg.id, from_manager=b.id, to_manager=a.id,
+        pick_round=1, draft_pick="R1 pick",
+        created_at=dt.datetime(2026, 9, 10, tzinfo=dt.timezone.utc),
+    ))
+    test_session.commit()
+
+    out = services.get_trades(test_session)
+    assert [t["what"] for t in out[0]["trades"]] == ["R1 pick", "Synced Player"]
+
+
 def test_club_trade_renders_as_a_club_not_a_blank_player(test_session):
     """Pre-existing bug: a goalie-team trade (team_id set, pick_round and
     player_id both NULL) used to render kind='player', what='—'."""
