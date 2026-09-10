@@ -2,15 +2,22 @@
   {% if on_clock %}
   <div class="card on-clock-banner">On the clock — pick {{ on_clock.pick }} (R{{ on_clock.round }}): <strong>{{ on_clock.owner }}</strong>
     {% if on_clock.deadline %}<span class="sub">— pick by {{ on_clock.deadline.strftime("%a %-I:%M%p %Z") }}</span>{% endif %}</div>
+  {% elif not missed_slots %}
+  <div class="card empty">Discovery draft complete — every pick made.</div>
+  {% endif %}
   {% if missed_slots %}
+  {# Deliberately its OWN block, not nested under `on_clock` — every remaining
+     clock can expire without every slot being filled (rule 4: the draft moves on
+     without a manager, it never forfeits their pick), and "no live countdown right
+     now" is not the same fact as "complete". Conflating the two here is exactly
+     the bug this pass fixes: with a lone pick made and every other clock long
+     since expired, `on_clock` reads None while 19 slots are still genuinely open —
+     the OLD template read that None as "both rounds filled". #}
   <div class="card empty" style="margin-top:6px">
     {{ missed_slots|length }} missed pick{{ "s" if missed_slots|length != 1 }} still open —
     {% for s in missed_slots %}{{ s.owner }} (R{{ s.round }}, pick {{ s.pick }}){% if not loop.last %}, {% endif %}{% endfor %}.
     The draft moved on; they can still fill it any time before the last pick.
   </div>
-  {% endif %}
-  {% else %}
-  <div class="card empty">Discovery draft complete — both rounds filled.</div>
   {% endif %}
   <div class="card">
     <table>

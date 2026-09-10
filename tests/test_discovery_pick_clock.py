@@ -213,3 +213,32 @@ def test_an_admin_overwrite_does_not_move_when_the_pick_originally_landed(
     corrected = test_session.query(DraftPick).filter_by(pick_number=1).one()
     assert corrected.player_label == "Corrected Name"
     assert corrected.picked_at == original
+
+
+# ---- the display bug: "no live countdown" is not "complete" -------------------
+def test_the_draft_is_not_complete_just_because_every_clock_expired(
+        test_session, client):
+    """Found in production 2026-09-10: one pick made (Kevin S/pick 1, before the
+    clock rule existed — see the anchor cutover), then Kevin T's (pick 2) clock ran
+    out with nobody picking, and every SUBSEQUENT clock ran out in turn too. Once the
+    LAST slot's clock also expires, discovery_clock_status correctly returns
+    pick=None (there's no live countdown left to show) — but that is NOT the same
+    fact as "every pick has been made", and the page must not say it is."""
+    lg, m = _seed(test_session, anchor_pick=2,
+                 anchor_at=dt.datetime.now(dt.timezone.utc) - 19 * CLOCK
+                                          - dt.timedelta(hours=1))
+    test_session.add(DraftPick(league_id=lg.id, season_year=SEASON,
+                               draft_type="discovery", round=1, pick_number=1,
+                               manager_id=m["C"].id, player_label="Julian Alvarez",
+                               source="discovery"))
+    test_session.commit()
+
+    status = services.discovery_clock_status(test_session, lg, SEASON)
+    assert status["pick"] is None, "no live countdown left to walk to"
+    assert len(status["missed"]) == 5, "5 total slots (3 managers x 2 - 1 made) still open"
+
+    _login_manager(client, test_session, m["A"])
+    r = client.get(f"/discovery/{SEASON}")
+    assert r.status_code == 200
+    assert "draft complete" not in r.text.lower()
+    assert "still open" in r.text

@@ -38,9 +38,16 @@
                  required style="width:100%">
           <button type="submit" style="margin-top:8px">Submit pick</button>
         </form>
-        {% else %}
+        {% elif on_clock %}
         <p class="sub">Waiting for the manager on the clock to pick.
           {% if is_admin %}As admin you can enter a pick for them once it's their turn.{% endif %}</p>
+        {% elif missed_slots %}
+        <p class="sub">Every current clock has run out — {{ missed_slots|length }} pick{{
+          "s" if missed_slots|length != 1 }} still open, waiting for
+          {% for s in missed_slots %}{{ s.owner }}{% if not loop.last %}, {% endif %}{% endfor %}
+          to come back and fill {{ "them" if missed_slots|length != 1 else "it" }}.</p>
+        {% else %}
+        <p class="sub">Discovery draft complete — every pick made.</p>
         {% endif %}
       {% else %}
       <p class="sub">The discovery draft isn't open right now.</p>
