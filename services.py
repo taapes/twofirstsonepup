@@ -8860,13 +8860,22 @@ def discovery_clock_status(db: Session, league: League, season_year: int) -> dic
     (`get_draft_board`, `approve_queued_pick`) and none of this house rule applies
     there — the plain "first unfilled slot" stays exactly what it was for main.
 
-    Returns `rules.discovery_clock`'s shape, `{"pick", "deadline", "missed"}`, with
-    `pick` == None (and the other two empty/None) when the clock has never started at
-    all (`discovery_clock_anchor_at` unset — the window has never opened).
+    Returns `rules.discovery_clock`'s shape, `{"pick", "deadline", "missed"}`.
+    **An unset anchor (`discovery_clock_anchor_at` is None) is NOT "nothing to
+    show".** It means the clock has never been engaged for this league — either
+    this year's window opened before this rule existed (the exact transitional
+    case: `discovery_open` already True, the admin hasn't yet clicked "restart
+    clock"), or a future season's opening write somehow failed. Either way,
+    reporting `missed: []` here made every unfilled slot invisible and the page
+    read as "draft complete" with most of the board still open — found in
+    production 2026-09-10 with only 1 of 20 picks made. So with no anchor, every
+    still-unfilled board slot is reported as open (no deadline, same as the
+    pre-clock world) rather than none of them.
     """
-    if league.discovery_clock_anchor_at is None:
-        return {"pick": None, "deadline": None, "missed": []}
     board = get_discovery_board(db, league, season_year)
+    if league.discovery_clock_anchor_at is None:
+        return {"pick": None, "deadline": None,
+                "missed": [b["pick"] for b in board if not b["player"]]}
     picks = {
         dp.pick_number: dp.picked_at
         for dp in db.query(DraftPick).filter_by(

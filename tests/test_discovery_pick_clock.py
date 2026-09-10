@@ -42,12 +42,49 @@ def _seed(session, *, anchor_at=None, anchor_pick=1):
 
 
 # ---- discovery_clock_status: wired to real data --------------------------------
-def test_the_clock_never_started_reports_nothing_on_the_clock(test_session):
-    """No anchor at all (the window's never opened) is a clean 'nothing to show',
-    not a crash."""
+def test_no_anchor_reports_every_unfilled_slot_as_open_not_nothing(test_session):
+    """Found in production 2026-09-10: with no anchor at all (the transitional case
+    — the window opened before this rule existed and the clock was never engaged),
+    reporting `missed: []` made every one of the 6 unfilled slots invisible and the
+    page read as complete. Every open slot must show up as available instead."""
     lg, _m = _seed(test_session, anchor_at=None)
-    assert services.discovery_clock_status(test_session, lg, SEASON) == {
-        "pick": None, "deadline": None, "missed": []}
+    status = services.discovery_clock_status(test_session, lg, SEASON)
+    assert status == {"pick": None, "deadline": None, "missed": [1, 2, 3, 4, 5, 6]}
+
+
+def test_no_anchor_with_one_pick_already_made_excludes_only_that_slot(test_session):
+    lg, m = _seed(test_session, anchor_at=None)
+    test_session.add(DraftPick(league_id=lg.id, season_year=SEASON,
+                               draft_type="discovery", round=1, pick_number=1,
+                               manager_id=m["C"].id, player_label="Julian Alvarez",
+                               source="discovery"))
+    test_session.commit()
+    status = services.discovery_clock_status(test_session, lg, SEASON)
+    assert status == {"pick": None, "deadline": None, "missed": [2, 3, 4, 5, 6]}
+
+
+def test_the_live_production_scenario_is_not_shown_as_complete(test_session, client):
+    """The exact production state on 2026-09-10: discovery opened before the clock
+    rule shipped (no anchor ever set), one pick made, five slots still open. The
+    page must not read as complete, and the manager on an open slot must still be
+    able to submit a pick."""
+    lg, m = _seed(test_session, anchor_at=None)
+    test_session.add(DraftPick(league_id=lg.id, season_year=SEASON,
+                               draft_type="discovery", round=1, pick_number=1,
+                               manager_id=m["C"].id, player_label="Julian Alvarez",
+                               source="discovery"))
+    test_session.commit()
+
+    _login_manager(client, test_session, m["B"])  # pick 2, per the snake order
+    r = client.get(f"/discovery/{SEASON}")
+    assert r.status_code == 200
+    assert "draft complete" not in r.text.lower()
+
+    r = client.post(f"/discovery/{SEASON}/pick",
+                    data={"player_name": "Some Kid", "pick_number": "2"})
+    assert r.status_code == 200, r.text
+    assert test_session.query(DraftPick).filter_by(pick_number=2).one().player_label \
+        == "Some Kid"
 
 
 def test_pick_one_is_on_the_clock_right_after_the_window_opens(test_session):
