@@ -72,7 +72,7 @@ reflects the commissioner's explicit request to move conditional pick trades and
 |---|---|---|
 | ~~1~~ | ~~**Item 12** — accent-insensitive `<datalist>` matching~~ | **Done 2026-08-25.** |
 | ~~2~~ | ~~**Item 17** — conditional / tiered draft-pick trades~~ | **Done 2026-08-25.** |
-| 3 | **Item 9** — IL backfill form search by name | Self-service IL/international placement (done 2026-08-24) now covers the common case, lowering urgency, but this is still the right fix for the admin-only historical path. |
+| ~~3~~ | ~~**Item 9** — IL backfill form search by name~~ | **Done 2026-09-11**, folding in the self-service dropped-player picker too. |
 | 4 | **Item 16** — historical GK IL backfill refused once goalie teams are on | **Premise settled 2026-08-24: `goalie_team_mode` is `off` for 26/27 and the commissioner confirmed that is deliberate.** So `_refuse_goalkeeper_list_move` cannot fire this season and this is latent, not live — safe to leave here or drop further. |
 | 5 | **Item 11** — preflight "rollover NOT done" detection fix | Matters most right before the *next* draft (2027), not urgently now. |
 | ~~6~~ | ~~**Item 19** — AI enhancements epic, sub-item 1 (GW review/banter)~~ | **Done 2026-09-01.** Sub-items 2-4 remain open. |
@@ -2193,7 +2193,58 @@ mutations bite. Full run: 840 passed, 18 skipped.
 ### IL backfill form must search by player name, not FPL id
 
 **Priority:** `P3` — worth doing before the *next* backfill rather than during one.
-**Status:** `open`
+**Status:** `done 2026-09-11`
+
+**What was built.** Smaller than the original fix sketch below predicted:
+`services.resolve_player_by_label` already existed (built for conditional-trade
+subjects) and already resolves a picker label/alias to a `Player` row with no
+dependency on `fpl_id` at all — exactly what a departed player (nullable, NULL
+once someone has left the PL) needs, and exactly why `_resolve_player`
+(fpl_id-based) can't serve this form. No `players.code` work, no new resolver,
+needed after all.
+
+`place_on_il`/`place_on_intl` each split into a private core
+(`_place_on_il_core`/`_place_on_intl_core`, taking already-resolved `Player`
+rows) plus two public entry points: the existing fpl_id-based function
+(unchanged signature, every existing caller untouched) and a new
+`place_on_il_by_player`/`place_on_intl_by_player` for a caller that resolved by
+label instead. A new `resolve_player_by_fpl_id` (thin public wrapper over
+`_resolve_player`) lets a route resolve one field by id and the other by label
+on the same submission without reaching into a private helper. The audit
+`details` payload gained `injured_player_id`/`replacement_player_id`
+(`str(player.id)`, always present) alongside the fpl_id keys (now possibly
+`None`), so a departed player's placement stays traceable in the audit log.
+
+`templates/admin_keepers.html`'s two numeric inputs became two text inputs
+sharing one datalist, no JS — the same label-only pattern already used on
+`/admin/corrections`' draft-pick "Link to" form. `ui.py`'s `admin_il_backfill`
+resolves both fields via `resolve_player_by_label` and calls
+`place_on_il_by_player`; the `GET /admin/keepers` route now passes `players`
+into the template context (confirmed missing before this).
+
+**The second picker was folded in too**, per the note below:
+`services.dropped_players_for_manager` (`/my-team`'s "he's already been
+dropped") dropped its `if p.fpl_id is None: continue` filter — it was silently
+hiding the exact case a manager most needs it for. Its `<select>`'s wire format
+changed from `p.fpl_id` to `p.label` (both IL and international sections,
+which already share this one candidate list), and `il_place`/`intl_place`
+gained optional `injured_name`/`away_name` fields, resolved via
+`resolve_player_by_label` when present — the ordinary picker's existing
+fpl_id-based field and behavior are completely unchanged, since the two
+sections are separate `<form>`s under different field names.
+
+Tests: `tests/test_il_backfill_by_name.py` (7, new) — both `_by_player`
+functions succeed for a `fpl_id=None` player, `dropped_players_for_manager` now
+includes one, the admin route and the self-service dropped-form route both
+succeed end-to-end for a departed player entered by name, and an unresolvable
+name is refused with a clean 400 rather than a resolver crash.
+`tests/test_il_keeper_visibility.py`'s two existing admin-backfill route tests
+updated to post names. Two guards mutation-tested (the filter removal; the
+by-player path actually staying fpl_id-free). Full suite 1297 passed, 0
+skipped — every existing `place_on_il`/`place_on_intl` caller (self-service
+normal path, the `admin.py` JSON endpoint) untouched and still green.
+
+<details><summary>Original fix sketch (superseded — kept for context)</summary>
 
 **Symptom.** "Backfill a historical injury-list placement"
 (`templates/admin_keepers.html:14-40`) asks for `injured_fpl_id` and
@@ -2235,6 +2286,8 @@ updates alongside.
 player) never hits the NULL-`fpl_id` edge case, and duplicating the code-keyed
 resolution path into `place_on_il`/`place_on_intl` for a scenario that hadn't come up
 would have been scope creep. If this item is ever picked up, fold that picker in too.
+
+</details>
 
 ---
 

@@ -2318,6 +2318,13 @@ def _resolve_player(db: Session, fpl_id: int) -> Player:
     return p
 
 
+def resolve_player_by_fpl_id(db: Session, fpl_id: int) -> Player:
+    """Public twin of _resolve_player, for a route that needs a Player object from
+    an fpl_id without reaching into a private helper — e.g. a form that resolves
+    one field by fpl_id and the other by label on the same submission."""
+    return _resolve_player(db, fpl_id)
+
+
 def _resolve_team(db: Session, team_code: int) -> PlTeam:
     """A goalie team by FPL's permanent team `code` — the twin of _resolve_player.
 
@@ -2562,32 +2569,13 @@ def _validate_absence_eligibility(
     return True
 
 
-def place_on_il(
-    db: Session,
-    league: League,
-    *,
-    fpl_manager_id: str,
-    injured_fpl_id: int,
-    replacement_fpl_id: int,
-    start_gw: int,
-    require_roster: bool = True,
+def _place_on_il_core(
+    db: Session, league: League, *, manager: Manager, injured: Player,
+    replacement: Player, start_gw: int, require_roster: bool = True,
 ) -> dict:
-    """Place a manager's injured player on the IL with a same-position replacement.
-
-    Enforces: one active IL player per manager; replacement same position; the injured
-    player is actually the manager's.
-
-    `require_roster=False` is for the commissioner's HISTORICAL backfill only, and skips
-    _validate_absence_eligibility entirely — no roster-history check either, since a
-    genuinely old season's row may have none. Manager self-service (the default) runs
-    that check, which itself now accepts either the current roster OR this manager's
-    OWN roster history this season (drafted him, he got hurt, dropped him for a
-    replacement before ever recording it here) — the exact gap that used to force a
-    manager to ask the commissioner for something the site could verify itself.
-    """
-    manager = _resolve_manager(db, league, fpl_manager_id)
-    injured = _resolve_player(db, injured_fpl_id)
-    replacement = _resolve_player(db, replacement_fpl_id)
+    """Everything place_on_il does once both players are already resolved — split
+    out so a caller that resolved them some other way (resolve_player_by_label, for
+    a departed player with no fpl_id) can reach it too. See place_on_il_by_player."""
     if injured.id == replacement.id:
         raise RuleViolation("replacement must be a different player")
     self_reported = False
@@ -2624,12 +2612,63 @@ def place_on_il(
                           f"({injured.position}) on IL → {replacement.name} (GW{start_gw})"
                           + (" [self-reported, off-roster]" if self_reported else "")),
                  manager_ids=[manager.id],
-                 details={"injured_fpl_id": injured_fpl_id,
-                          "replacement_fpl_id": replacement_fpl_id, "start_gw": start_gw,
-                          "self_reported": self_reported})
+                 # injured_fpl_id/replacement_fpl_id may be None (a departed player
+                 # entered by name has no season element id); the _player_id keys
+                 # are always present so a backfilled placement stays traceable.
+                 details={"injured_fpl_id": injured.fpl_id,
+                          "replacement_fpl_id": replacement.fpl_id,
+                          "injured_player_id": str(injured.id),
+                          "replacement_player_id": str(replacement.id),
+                          "start_gw": start_gw, "self_reported": self_reported})
     db.commit()
     db.refresh(entry)
     return _il_to_dict(entry, injured, replacement)
+
+
+def place_on_il(
+    db: Session,
+    league: League,
+    *,
+    fpl_manager_id: str,
+    injured_fpl_id: int,
+    replacement_fpl_id: int,
+    start_gw: int,
+    require_roster: bool = True,
+) -> dict:
+    """Place a manager's injured player on the IL with a same-position replacement.
+
+    Enforces: one active IL player per manager; replacement same position; the injured
+    player is actually the manager's.
+
+    `require_roster=False` is for the commissioner's HISTORICAL backfill only, and skips
+    _validate_absence_eligibility entirely — no roster-history check either, since a
+    genuinely old season's row may have none. Manager self-service (the default) runs
+    that check, which itself now accepts either the current roster OR this manager's
+    OWN roster history this season (drafted him, he got hurt, dropped him for a
+    replacement before ever recording it here) — the exact gap that used to force a
+    manager to ask the commissioner for something the site could verify itself.
+    """
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    injured = _resolve_player(db, injured_fpl_id)
+    replacement = _resolve_player(db, replacement_fpl_id)
+    return _place_on_il_core(
+        db, league, manager=manager, injured=injured, replacement=replacement,
+        start_gw=start_gw, require_roster=require_roster,
+    )
+
+
+def place_on_il_by_player(
+    db: Session, league: League, *, fpl_manager_id: str, injured: Player,
+    replacement: Player, start_gw: int, require_roster: bool = True,
+) -> dict:
+    """Same as place_on_il, for a caller that has already resolved BOTH players by
+    something other than fpl_id — resolve_player_by_label, typically — because the
+    injured player may have since left the league and have no fpl_id at all."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    return _place_on_il_core(
+        db, league, manager=manager, injured=injured, replacement=replacement,
+        start_gw=start_gw, require_roster=require_roster,
+    )
 
 
 def il_return_eligible_gw(start_gw: int) -> int:
@@ -2724,24 +2763,15 @@ def return_from_il(
 
 
 # ---- international list (AFCON / Asia Cup temporary leave) ----
-def place_on_intl(
-    db: Session, league: League, *, fpl_manager_id: str, away_fpl_id: int,
-    replacement_fpl_id: int, start_gw: int, tournament: str | None = None,
+def _place_on_intl_core(
+    db: Session, league: League, *, manager: Manager, away: Player,
+    replacement: Player, start_gw: int, tournament: str | None = None,
 ) -> dict:
-    """Replace a player away at a national-team cup with a same-position replacement.
-    One active entry per manager; one replacement for the whole absence. Keeper
-    eligibility is preserved while away (covered in the keeper-drop derivation).
-
-    Same self-reported historical path as place_on_il: if `away` isn't on the manager's
-    current roster, _validate_absence_eligibility falls back to this manager's own
-    roster history this season before refusing — the AFCON/Asia Cup twin of the "drafted
-    him, he got hurt, dropped him before recording it" gap.
-    """
+    """Everything place_on_intl does once both players are already resolved — split
+    out so a caller that resolved them some other way (resolve_player_by_label, for
+    a departed player with no fpl_id) can reach it too. See place_on_intl_by_player."""
     from models import InternationalList
 
-    manager = _resolve_manager(db, league, fpl_manager_id)
-    away = _resolve_player(db, away_fpl_id)
-    replacement = _resolve_player(db, replacement_fpl_id)
     if away.id == replacement.id:
         raise RuleViolation("replacement must be a different player")
     self_reported = _validate_absence_eligibility(
@@ -2776,12 +2806,50 @@ def place_on_intl(
                           + (f", {tournament}" if tournament else "") + ")"
                           + (" [self-reported, off-roster]" if self_reported else "")),
                  manager_ids=[manager.id],
-                 details={"away_fpl_id": away_fpl_id, "replacement_fpl_id": replacement_fpl_id,
+                 details={"away_fpl_id": away.fpl_id, "replacement_fpl_id": replacement.fpl_id,
+                          "away_player_id": str(away.id),
+                          "replacement_player_id": str(replacement.id),
                           "start_gw": start_gw, "tournament": tournament,
                           "self_reported": self_reported})
     db.commit()
     db.refresh(entry)
     return {"player": away.name, "replacement": replacement.name, "start_gw": start_gw}
+
+
+def place_on_intl(
+    db: Session, league: League, *, fpl_manager_id: str, away_fpl_id: int,
+    replacement_fpl_id: int, start_gw: int, tournament: str | None = None,
+) -> dict:
+    """Replace a player away at a national-team cup with a same-position replacement.
+    One active entry per manager; one replacement for the whole absence. Keeper
+    eligibility is preserved while away (covered in the keeper-drop derivation).
+
+    Same self-reported historical path as place_on_il: if `away` isn't on the manager's
+    current roster, _validate_absence_eligibility falls back to this manager's own
+    roster history this season before refusing — the AFCON/Asia Cup twin of the "drafted
+    him, he got hurt, dropped him before recording it" gap.
+    """
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    away = _resolve_player(db, away_fpl_id)
+    replacement = _resolve_player(db, replacement_fpl_id)
+    return _place_on_intl_core(
+        db, league, manager=manager, away=away, replacement=replacement,
+        start_gw=start_gw, tournament=tournament,
+    )
+
+
+def place_on_intl_by_player(
+    db: Session, league: League, *, fpl_manager_id: str, away: Player,
+    replacement: Player, start_gw: int, tournament: str | None = None,
+) -> dict:
+    """Same as place_on_intl, for a caller that has already resolved BOTH players by
+    something other than fpl_id — resolve_player_by_label, typically — because the
+    away player may have since left the league and have no fpl_id at all."""
+    manager = _resolve_manager(db, league, fpl_manager_id)
+    return _place_on_intl_core(
+        db, league, manager=manager, away=away, replacement=replacement,
+        start_gw=start_gw, tournament=tournament,
+    )
 
 
 def return_from_intl(db: Session, league: League, intl_id: str, return_gw: int,
@@ -4303,12 +4371,10 @@ def dropped_players_for_manager(db: Session, league: League, manager: Manager) -
     manager is excluded here too — same rule `_validate_absence_eligibility` enforces
     at write time, so the picker never offers a choice the write path would refuse.
 
-    Returns [{"fpl_id", "name", "label", "suggested_start_gw"}], newest-dropped first,
-    for the self-service form's picker — keyed on `fpl_id` like every other self-service
-    IL/international picker, and so excludes anyone who has since left the league
-    entirely (a rare combination on top of an already-rare gap; see the still-open
-    "IL backfill form must search by player name, not FPL id" backlog item, which
-    should pick this picker up too if that ever needs closing).
+    Returns [{"fpl_id", "name", "label", "suggested_start_gw"}], newest-dropped first.
+    `fpl_id` may be None (a player who has since left the league entirely) — the
+    picker's wire format is `label`, resolved via resolve_player_by_label, precisely
+    so that case isn't silently dropped from the list the way it used to be.
     """
     gw = latest_gameweek(db, league)
     if gw is None:
@@ -4329,8 +4395,6 @@ def dropped_players_for_manager(db: Session, league: League, manager: Manager) -
         return []
     out = []
     for p in db.query(Player).filter(Player.id.in_(candidates)):
-        if p.fpl_id is None:
-            continue
         last_held_gw = candidates[p.id]
         out.append({
             "fpl_id": p.fpl_id,

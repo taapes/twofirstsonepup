@@ -15,8 +15,8 @@
 <h2>Possible unrecorded IL/international absences <span class="pill warn">{{ roster_gaps|length }}</span></h2>
 <p class="sub">Each of these vanished from a manager's roster near the end of the
   season with no IL or international-list record explaining it — could be an
-  ordinary drop, or an absence nobody recorded. If it's the latter, use the
-  fpl_id below to fill in the backfill form.</p>
+  ordinary drop, or an absence nobody recorded. If it's the latter, search for
+  the player's name below to fill in the backfill form.</p>
 <div class="card" style="padding:10px;overflow-x:auto">
   <table class="stats">
     <thead><tr><th>Manager</th><th>Player</th><th class="num">Last active GW</th><th class="num">Final GW</th></tr></thead>
@@ -49,12 +49,19 @@
         {% endfor %}
       </select>
     </label>
-    <label>Injured player's FPL id
-      <input name="injured_fpl_id" required inputmode="numeric" style="width:100%">
+    <label>Injured player
+      <input name="injured_name" list="ilBackfillPlayers" autocomplete="off"
+             placeholder="search by name" required style="width:100%">
     </label>
-    <label>Replacement player's FPL id (same position)
-      <input name="replacement_fpl_id" required inputmode="numeric" style="width:100%">
+    <label>Replacement player (same position)
+      <input name="replacement_name" list="ilBackfillPlayers" autocomplete="off"
+             placeholder="search by name" required style="width:100%">
     </label>
+    <datalist id="ilBackfillPlayers">
+      {% for p in players %}<option value="{{ p.label }}"></option>
+      {% if p.alias %}<option value="{{ p.alias }}"></option>{% endif %}
+      {% endfor %}
+    </datalist>
     <label>Start gameweek
       <input name="start_gw" required inputmode="numeric" style="width:100%">
     </label>

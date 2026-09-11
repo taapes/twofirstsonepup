@@ -107,8 +107,8 @@ def test_il_backfill_route_requires_admin(client, test_session):
     _player(test_session, lg, "Šeško", 439)
 
     r = client.post("/admin/keepers/il-backfill", data={
-        "fpl_manager_id": "1", "injured_fpl_id": "439",
-        "replacement_fpl_id": "27", "start_gw": "37",
+        "fpl_manager_id": "1", "injured_name": "Šeško · MUN",
+        "replacement_name": "27", "start_gw": "37",
     })
     # the login GATE (no session at all) catches this before the route's own
     # is_admin check even runs — /who is the login surface for a bare request
@@ -131,8 +131,8 @@ def test_il_backfill_route_creates_the_row_and_grants_candidacy(
                        ).status_code == 303
 
     r = client.post("/admin/keepers/il-backfill", data={
-        "fpl_manager_id": "1", "injured_fpl_id": "439",
-        "replacement_fpl_id": "27", "start_gw": "37",
+        "fpl_manager_id": "1", "injured_name": "Šeško · MUN",
+        "replacement_name": "G.Jesus · MUN", "start_gw": "37",
     })
     assert r.status_code == 303, r.text
     assert r.headers["location"] == "/admin/keepers"

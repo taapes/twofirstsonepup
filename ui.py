@@ -547,25 +547,42 @@ def _il_entry_or_403(db, league, fpl_manager_id: str, il_id: str):
 @router.post("/il/place")
 def il_place(
     request: Request, db: Session = Depends(get_db),
-    fpl_manager_id: str = Form(...), injured_fpl_id: str = Form(...),
+    fpl_manager_id: str = Form(...), injured_fpl_id: str = Form(""),
+    injured_name: str = Form(""),
     replacement_fpl_id: str = Form(...), start_gw: str = Form(""),
 ):
+    """`injured_name` is the "he's already been dropped" form's field — that picker
+    must be able to name a player who has since left the league entirely (no
+    fpl_id), so it posts a label instead, resolved via resolve_player_by_label. The
+    ordinary picker (still on the current roster) keeps posting injured_fpl_id
+    unchanged."""
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "gw_logic_active"):
         return _locked_response("The injury list")
     if not can_act_as(request, fpl_manager_id):
         return _forbidden(request, "You can only manage your own team's injury list.")
     cur = services.current_gameweek(db, league) or 1
+    # Only the "he's already been dropped" case supplies start_gw -- when he's
+    # already on the roster, placement always starts now. Bounded at `cur`: an
+    # injury can't be claimed before it happens.
+    resolved_start_gw = _safe_int(start_gw, 1, cur, field="start GW") if start_gw.strip() else cur
     try:
-        services.place_on_il(
-            db, league, fpl_manager_id=fpl_manager_id,
-            injured_fpl_id=_safe_int(injured_fpl_id, 1, 10_000_000, field="injured player"),
-            replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
-            # Only the "he's already been dropped" case supplies this -- when he's
-            # already on the roster, placement always starts now. Bounded at `cur`:
-            # an injury can't be claimed before it happens.
-            start_gw=_safe_int(start_gw, 1, cur, field="start GW") if start_gw.strip() else cur,
-        )
+        if injured_name.strip():
+            injured = services.resolve_player_by_label(db, league, injured_name)
+            replacement = services.resolve_player_by_fpl_id(
+                db, _safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement")
+            )
+            services.place_on_il_by_player(
+                db, league, fpl_manager_id=fpl_manager_id, injured=injured,
+                replacement=replacement, start_gw=resolved_start_gw,
+            )
+        else:
+            services.place_on_il(
+                db, league, fpl_manager_id=fpl_manager_id,
+                injured_fpl_id=_safe_int(injured_fpl_id, 1, 10_000_000, field="injured player"),
+                replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
+                start_gw=resolved_start_gw,
+            )
     except RuleViolation as e:
         return _err(e)
     return RedirectResponse("/my-team", status_code=303)
@@ -632,24 +649,40 @@ def _intl_entry_or_403(db, league, fpl_manager_id: str, intl_id: str):
 @router.post("/intl/place")
 def intl_place(
     request: Request, db: Session = Depends(get_db),
-    fpl_manager_id: str = Form(...), away_fpl_id: str = Form(...),
+    fpl_manager_id: str = Form(...), away_fpl_id: str = Form(""),
+    away_name: str = Form(""),
     replacement_fpl_id: str = Form(...), tournament: str = Form(""),
     start_gw: str = Form(""),
 ):
+    """`away_name` is the "he's already been dropped" form's field — see il_place's
+    docstring for why: a player who has since left the league entirely has no
+    fpl_id, so that picker posts a label instead."""
     league = _league_or_404(db)
     if not _feature_allowed(request, db, league, "gw_logic_active"):
         return _locked_response("The international list")
     if not can_act_as(request, fpl_manager_id):
         return _forbidden(request, "You can only manage your own team's international list.")
     cur = services.current_gameweek(db, league) or 1
+    resolved_start_gw = _safe_int(start_gw, 1, cur, field="start GW") if start_gw.strip() else cur
     try:
-        services.place_on_intl(
-            db, league, fpl_manager_id=fpl_manager_id,
-            away_fpl_id=_safe_int(away_fpl_id, 1, 10_000_000, field="away player"),
-            replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
-            start_gw=_safe_int(start_gw, 1, cur, field="start GW") if start_gw.strip() else cur,
-            tournament=tournament or None,
-        )
+        if away_name.strip():
+            away = services.resolve_player_by_label(db, league, away_name)
+            replacement = services.resolve_player_by_fpl_id(
+                db, _safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement")
+            )
+            services.place_on_intl_by_player(
+                db, league, fpl_manager_id=fpl_manager_id, away=away,
+                replacement=replacement, start_gw=resolved_start_gw,
+                tournament=tournament or None,
+            )
+        else:
+            services.place_on_intl(
+                db, league, fpl_manager_id=fpl_manager_id,
+                away_fpl_id=_safe_int(away_fpl_id, 1, 10_000_000, field="away player"),
+                replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
+                start_gw=resolved_start_gw,
+                tournament=tournament or None,
+            )
     except RuleViolation as e:
         return _err(e)
     return RedirectResponse("/my-team", status_code=303)
@@ -1896,6 +1929,7 @@ def admin_keepers(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(request, "admin_keepers.html", {
         "request": request, "league": league, "is_admin": True,
         "roster_gaps": services.unexplained_roster_gaps(db, league),
+        "players": services.list_players(db, league),
         **services.keeper_overrides_context(db, league),
     })
 
@@ -1943,25 +1977,33 @@ def admin_keeper_override_clear(
 @router.post("/admin/keepers/il-backfill")
 def admin_il_backfill(
     request: Request, db: Session = Depends(get_db), fpl_manager_id: str = Form(...),
-    injured_fpl_id: str = Form(...), replacement_fpl_id: str = Form(...),
+    injured_name: str = Form(...), replacement_name: str = Form(...),
     start_gw: str = Form(...),
 ):
     """Commissioner-only: enter a HISTORICAL injury-list placement (e.g. for a
     prior season with no IL records at all, per CLAUDE.md's documented caveat).
     Unlike the manager self-service /il/place, this takes an explicit start_gw
     and isn't gated on the in-season phase — a past season's fact doesn't wait
-    for gw_logic_active. Reuses services.place_on_il; it already accepts an arbitrary
-    start_gw, and `require_roster=False` waives the "is he actually yours" check that
-    manager self-service enforces — a historical placement is precisely the case the
-    roster cannot confirm, because the snapshot shows the replacement in his slot."""
+    for gw_logic_active.
+
+    Fields are searched by NAME, not FPL id — resolve_player_by_label finds a
+    player regardless of fpl_id, which matters here specifically: this form exists
+    to enter placements for seasons old enough that the injured player may have
+    since left the league entirely (fpl_id NULL), which _resolve_player (fpl_id
+    based) cannot find at all. Reuses services.place_on_il_by_player; it already
+    accepts an arbitrary start_gw, and `require_roster=False` waives the "is he
+    actually yours" check that manager self-service enforces — a historical
+    placement is precisely the case the roster cannot confirm, because the
+    snapshot shows the replacement in his slot."""
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/keepers", status_code=303)
     league = _league_or_404(db)
     try:
-        services.place_on_il(
+        injured = services.resolve_player_by_label(db, league, injured_name)
+        replacement = services.resolve_player_by_label(db, league, replacement_name)
+        services.place_on_il_by_player(
             db, league, fpl_manager_id=fpl_manager_id, require_roster=False,
-            injured_fpl_id=_safe_int(injured_fpl_id, 1, 10_000_000, field="injured player"),
-            replacement_fpl_id=_safe_int(replacement_fpl_id, 1, 10_000_000, field="replacement"),
+            injured=injured, replacement=replacement,
             start_gw=_safe_int(start_gw, 1, SEASON_LAST_GW, field="start GW"),
         )
     except RuleViolation as e:

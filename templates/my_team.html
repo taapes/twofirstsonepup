@@ -128,9 +128,9 @@
       <form method="post" action="/il/place" onsubmit="return ilResolve(this)" style="margin-top:8px">
         <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
         <label>Injured player (held earlier this season)<br>
-          <select name="injured_fpl_id" required style="width:100%" onchange="this.closest('form').querySelector('[name=start_gw]').value=this.options[this.selectedIndex].dataset.suggest||''">
+          <select name="injured_name" required style="width:100%" onchange="this.closest('form').querySelector('[name=start_gw]').value=this.options[this.selectedIndex].dataset.suggest||''">
             <option value="">choose…</option>
-            {% for p in dropped_players %}<option value="{{ p.fpl_id }}" data-suggest="{{ p.suggested_start_gw }}">{{ p.label }}</option>{% endfor %}
+            {% for p in dropped_players %}<option value="{{ p.label }}" data-suggest="{{ p.suggested_start_gw }}">{{ p.label }}</option>{% endfor %}
           </select></label>
         <label style="display:block;margin-top:6px">Replacement (same position)<br>
           <input list="ilPlayers" name="replacement_name" placeholder="search by name" autocomplete="off" style="width:100%" required>
@@ -219,9 +219,9 @@
     <form method="post" action="/intl/place" onsubmit="return intlResolve(this)" style="margin-top:8px">
       <input type="hidden" name="fpl_manager_id" value="{{ team.fpl }}">
       <label>Away player (held earlier this season)<br>
-        <select name="away_fpl_id" required style="width:100%" onchange="this.closest('form').querySelector('[name=start_gw]').value=this.options[this.selectedIndex].dataset.suggest||''">
+        <select name="away_name" required style="width:100%" onchange="this.closest('form').querySelector('[name=start_gw]').value=this.options[this.selectedIndex].dataset.suggest||''">
           <option value="">choose…</option>
-          {% for p in dropped_players %}<option value="{{ p.fpl_id }}" data-suggest="{{ p.suggested_start_gw }}">{{ p.label }}</option>{% endfor %}
+          {% for p in dropped_players %}<option value="{{ p.label }}" data-suggest="{{ p.suggested_start_gw }}">{{ p.label }}</option>{% endfor %}
         </select></label>
       <label style="display:block;margin-top:6px">Replacement (same position)<br>
         <input list="intlPlayers" name="replacement_name" placeholder="search by name" autocomplete="off" style="width:100%" required>
