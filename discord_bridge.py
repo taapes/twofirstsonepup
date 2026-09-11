@@ -514,6 +514,7 @@ def run_outbound(db, league) -> dict:
 BOT_TOKEN_ENV = "DISCORD_BOT_TOKEN"
 TRADE_CHANNEL_ENV = "DISCORD_TRADE_CHANNEL_ID"
 IL_CHANNEL_ENV = "DISCORD_IL_CHANNEL_ID"
+DISCOVERY_CHANNEL_ENV = "DISCORD_DISCOVERY_CHANNEL_ID"
 
 API_BASE = "https://discord.com/api/v10"
 # Discord's own cap on this endpoint. Also the loop's "is there more?" signal.
@@ -1014,10 +1015,95 @@ def ingest_message(db, league, msg) -> str:
     return "ignored"
 
 
-def poll_channel(db, league, channel_id: str, token: str | None = None) -> dict:
-    """Fetch, store and stage one channel. Never raises."""
+def ingest_discovery_pick_message(db, league, msg) -> str:
+    """Parse and stage one message from the discovery-draft channel. Returns its
+    new `parse_status`. Never writes league state and never raises past its own
+    bookkeeping — same discipline as ingest_message.
+
+    A SEPARATE function rather than a branch inside ingest_message, because a
+    bare-name parser has far less to anchor on than a trade or IL post and must
+    only ever be tried against the one channel configured for it (see
+    poll_channel's `ingest_fn` parameter).
+
+    Here, as with IL, the author IS the manager: resolved ONLY via
+    discord_user_id, never by name -- guessing identity from a Discord username
+    is exactly what this bridge never does.
+    """
+    import discord_parse
+    import services
+
+    name = discord_parse.parse_discovery_pick(msg.content or "")
+    if name is None:
+        return "ignored"
+
+    author = resolve_manager(db, league, discord_user_id=msg.author_discord_id)
+    manager = author["manager"]
+    if manager is None:
+        # Unmapped author. Still staged, never silently dropped -- same rule as
+        # every other unresolved-identity case in this bridge -- but with no
+        # open-slot signal available at all (that needs a known manager), both
+        # owner_fpl and pick_number are left for the commissioner to supply via
+        # the apply-form override.
+        _stage(
+            db, league, msg, "discovery_pick", "",
+            {"season_year": league.season_year, "player_name": name},
+            {"manager": {"method": None, "display": None}, "typed_text": name,
+             "open_slots": [],
+             "unresolved": [{"text": msg.author_name or "?", "why": author["why"]}]},
+            0.3,
+        )
+        return "staged"
+
+    slots = services.manager_discovery_open_slots(
+        db, league, league.season_year, manager.fpl_manager_id
+    )
+    if not slots:
+        # No open slot for this manager right now -- almost certainly not a pick
+        # announcement (chatter, a reaction, a late reply after already picking).
+        # This is the check that makes a bare-name parser safe to run at all.
+        return "ignored"
+
+    payload = {"season_year": league.season_year, "owner_fpl": manager.fpl_manager_id,
+               "player_name": name}
+    resolution = {
+        "manager": {"method": author["method"], "display": manager.display},
+        "typed_text": name,
+        "open_slots": [{"pick": s["pick"], "round": s["round"]} for s in slots],
+        "unresolved": [],
+    }
+    if len(slots) == 1:
+        payload["pick_number"] = slots[0]["pick"]
+        payload["round"] = slots[0]["round"]
+        confidence = 1.0
+    else:
+        # Rule 5: a manager can hold two open slots at once (the current one plus
+        # an earlier missed one, or -- in a snake -- two adjacent rounds). Which
+        # slot this post fills can't be guessed; the commissioner picks from
+        # resolution.open_slots on the confirm form, same idiom as IL's
+        # replacement_fpl_id override.
+        resolution["unresolved"].append(
+            {"text": "which pick", "why": f"{len(slots)} open slots"}
+        )
+        confidence = 0.5
+    _stage(db, league, msg, "discovery_pick", "", payload, resolution, confidence)
+    return "staged"
+
+
+def poll_channel(db, league, channel_id: str, token: str | None = None,
+                  ingest_fn=None) -> dict:
+    """Fetch, store and stage one channel. Never raises.
+
+    `ingest_fn` defaults to `ingest_message` (the trade/IL router) so every
+    existing caller is unchanged; the discovery channel passes
+    `ingest_discovery_pick_message` instead — a SEPARATE function rather than a
+    branch inside `ingest_message`, so a bare-name parser (which has far less to
+    anchor on than a trade or IL post) is only ever tried against messages from
+    the one channel configured for it.
+    """
     from models import DiscordMessage
 
+    if ingest_fn is None:
+        ingest_fn = ingest_message
     if not channel_id:
         return {"skipped": "no channel"}
     cursor = (
@@ -1040,7 +1126,7 @@ def poll_channel(db, league, channel_id: str, token: str | None = None) -> dict:
     staged = 0
     for msg in fresh:
         try:
-            msg.parse_status = ingest_message(db, league, msg)
+            msg.parse_status = ingest_fn(db, league, msg)
         except Exception as exc:  # noqa: BLE001
             # One unparseable message must not stop the sweep or lose the rest.
             log.warning("discord ingest failed for %s: %s", msg.discord_message_id, exc)
@@ -1057,12 +1143,16 @@ def run_inbound(db, league) -> dict:
     if not bot_token():
         return {"skipped": "not configured"}
     out: dict = {}
-    for label, env in (("trades", TRADE_CHANNEL_ENV), ("il", IL_CHANNEL_ENV)):
+    for label, env, ingest_fn in (
+        ("trades", TRADE_CHANNEL_ENV, ingest_message),
+        ("il", IL_CHANNEL_ENV, ingest_message),
+        ("discovery_picks", DISCOVERY_CHANNEL_ENV, ingest_discovery_pick_message),
+    ):
         channel = (os.getenv(env) or "").strip()
         if not channel:
             continue
         try:
-            out[label] = poll_channel(db, league, channel)
+            out[label] = poll_channel(db, league, channel, ingest_fn=ingest_fn)
         except Exception as exc:  # noqa: BLE001
             log.warning("discord poll failed for %s: %s", label, exc)
             db.rollback()

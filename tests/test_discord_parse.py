@@ -418,3 +418,27 @@ def test_content_alone_cannot_tell_a_gameweek_range_from_a_scoreline():
     """
     assert P.parse_il("Arsenal 1-3") is not None
     assert P.parse_il("Arsenal 3-1") is None
+
+
+# ---- parse_discovery_pick -----------------------------------------------------
+# No keyword or digit pattern to anchor on here -- real posts are just a bare
+# player name. The safety property lives one layer up, in the caller (see
+# discord_bridge.ingest_discovery_pick_message): only ever accepted for a
+# manager who currently has an open discovery-draft slot.
+
+def test_a_bare_name_parses_as_itself():
+    assert P.parse_discovery_pick("Wolfsburg's new signing") == "Wolfsburg's new signing"
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\n\n", None])
+def test_blank_content_does_not_parse(text):
+    assert P.parse_discovery_pick(text) is None
+
+
+def test_a_multiline_message_does_not_parse():
+    """A real announcement is one bare name, never a paragraph."""
+    assert P.parse_discovery_pick("Taking a keeper\nfor the future") is None
+
+
+def test_surrounding_punctuation_is_stripped():
+    assert P.parse_discovery_pick("  Some Kid.  ") == "Some Kid"

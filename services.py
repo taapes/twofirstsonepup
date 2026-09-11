@@ -7261,6 +7261,23 @@ def apply_discord_ingest(db: Session, league: League, ingest_id: str, **override
                 already_announced=True,
             )
             entity_id = None
+        elif row.kind == "discovery_pick":
+            missing = [k for k in ("season_year", "pick_number", "owner_fpl", "player_name")
+                       if payload.get(k) in (None, "")]
+            if missing:
+                # pick_number is the expected gap: a manager with two open slots
+                # posted a bare name naming neither one, and the reviewer picks
+                # from resolution.open_slots. owner_fpl is the other one, for an
+                # unmapped Discord author.
+                raise RuleViolation(f"still needs: {', '.join(missing)}")
+            result = record_discovery_pick(
+                db, league, season_year=int(payload["season_year"]),
+                pick_number=int(payload["pick_number"]),
+                owner_fpl=str(payload["owner_fpl"]),
+                player_name=str(payload["player_name"]),
+                round=int(payload.get("round") or 0),
+            )
+            entity_id = uuid.UUID(result["id"]) if result.get("id") else None
         else:
             raise RuleViolation(f"unknown proposal kind {row.kind!r}")
     except RuleViolation as exc:
@@ -8956,6 +8973,45 @@ def discovery_clock_status(db: Session, league: League, season_year: int) -> dic
     )
 
 
+def discovery_open_slots(db: Session, league: League, season_year: int):
+    """(on_clock, missed_slots) -- the two board-state facts every "who may pick
+    right now" computation is built from: the current on-clock slot (with its
+    deadline attached) and every earlier slot whose clock ran out unfilled
+    (rule 5 -- the draft moves on without a manager, it never forfeits their
+    pick). Shared by ui.py's live pick route, which additionally filters by
+    admin-bypassable can_act_as, and manager_discovery_open_slots below, which
+    filters by an exact owner_fpl match instead -- two different access-control
+    questions over the same underlying facts, so only THIS part is shared.
+    """
+    board = get_discovery_board(db, league, season_year)
+    board_by_pick = {b["pick"]: b for b in board}
+    clock = discovery_clock_status(db, league, season_year)
+    on_clock = None
+    if clock["pick"] is not None and clock["pick"] in board_by_pick:
+        on_clock = dict(board_by_pick[clock["pick"]])
+        on_clock["deadline"] = clock["deadline"]
+    missed_slots = [board_by_pick[n] for n in clock["missed"] if n in board_by_pick]
+    return on_clock, missed_slots
+
+
+def manager_discovery_open_slots(
+    db: Session, league: League, season_year: int, owner_fpl: str,
+) -> list[dict]:
+    """Every discovery-board slot this manager may fill right now: the current
+    on-clock slot if it's theirs, plus any earlier missed-but-still-open slot.
+
+    Used by the inbound Discord bridge to decide whether a bare-name post is
+    plausibly a real pick announcement: a manager with no open slot posting a
+    single word is almost certainly not one, which is most of what makes a
+    parser with no keyword to anchor on safe to run at all.
+    """
+    on_clock, missed_slots = discovery_open_slots(db, league, season_year)
+    return [
+        s for s in ([on_clock] if on_clock else []) + missed_slots
+        if s.get("owner_fpl") == owner_fpl
+    ]
+
+
 def record_discovery_pick(
     db: Session, league: League, *, season_year: int, pick_number: int,
     owner_fpl: str, player_name: str, round: int = 0, overwrite: bool = False,
@@ -8988,13 +9044,15 @@ def record_discovery_pick(
         existing.manager_id, existing.player_id, existing.player_label = owner.id, None, name
         if existing.picked_at is None:
             existing.picked_at = _dt.datetime.now(_dt.timezone.utc)
+        entry = existing
     else:
-        db.add(DraftPick(
+        entry = DraftPick(
             league_id=league.id, season_year=season_year, draft_type="discovery",
             pick_number=pick_number, round=round, manager_id=owner.id,
             player_id=None, player_label=name, source="discovery",
             picked_at=_dt.datetime.now(_dt.timezone.utc),
-        ))
+        )
+        db.add(entry)
     record_audit(db, league, action="discovery.pick",
                  summary=(f"{owner.display} made discovery pick #{pick_number}: {name}"
                           + (" [overwrite]" if overwrite else "")),
@@ -9002,7 +9060,7 @@ def record_discovery_pick(
                  details={"season_year": season_year, "pick_number": pick_number,
                           "player_name": name, "overwrite": overwrite})
     db.commit()
-    return {"pick": pick_number, "owner": owner.display, "player": name}
+    return {"pick": pick_number, "owner": owner.display, "player": name, "id": str(entry.id)}
 
 
 def _discovery_pick_or_404(

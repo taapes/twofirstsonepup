@@ -1081,6 +1081,37 @@ guild-level roles don't reach it. `discord_bridge.probe_channel` distinguishes t
 `data_health` surfaces both. Never retry a 401: 401/403/429 count toward a Cloudflare ban
 at 10,000 per 10 minutes, so a bad token disables the sweep.
 
+**A third inbound channel (built 2026-09-11): managers posting discovery picks in
+Discord instead of using `/discovery/{year}/pick`.** `DISCORD_DISCOVERY_CHANNEL_ID`
+(independent of `DISCORD_DISCOVERY_WEBHOOK_URL`, though in practice the same channel)
+is polled the same way as trades/IL, but through a SEPARATE ingest function
+(`discord_bridge.ingest_discovery_pick_message`, not a branch inside `ingest_message`)
+rather than a shared router. **A real post is just a bare player name — no keyword, no
+digit pattern to anchor on**, unlike a trade post or an IL post (`Saliba IL 1-4`), so
+`discord_parse.parse_discovery_pick` does almost none of the discriminating work
+itself; applied indiscriminately across the whole channel it would misfire on ordinary
+chatter constantly. The actual safety property is one gate: **only ever stage a
+message from an author who currently has an open discovery-draft slot**
+(`services.manager_discovery_open_slots`) — the same "on the clock, or missed and
+still open" fact the live pick route already gates on, extracted from
+`ui.py::_discovery_ctx` into `services.discovery_open_slots` (the on-clock/missed
+board facts) so the live route's admin-bypassable `can_act_as` filter and the
+bridge's exact-`owner_fpl`-match filter can't quietly disagree about the same
+underlying state. A manager with no open slot posting a stray word is simply
+`ignored`, never staged — this one check is most of what makes a keyword-free parser
+safe to run at all. As with IL, the author IS the manager, resolved ONLY via
+`discord_user_id` (never guessed from a Discord username); an unmapped author is
+still staged, at low confidence, with both `owner_fpl` and `pick_number` left for the
+commissioner. **A manager can legitimately hold two open slots at once** (rule 5's
+missed-pick carryover, or a snake's adjacent-round edge case) — which one a bare name
+fills can't be guessed, so `pick_number` is left out of the payload entirely and the
+confirm form gets a `<select>` over `resolution.open_slots` instead, the same idiom
+IL's `replacement_fpl_id` override already uses. `apply_discord_ingest` gained a third
+`discovery_pick` branch calling `record_discovery_pick` (which now also returns `id`,
+so a discovery-pick apply gets the same `applied_entity_id` traceability IL applies
+already have); nothing here writes league state without a commissioner clicking
+Apply, same rule as the other two channels.
+
 **AI gameweek review (`ai_content.py`).** The first PAID outbound call. `claude-opus-5`
 writes a weekly write-up after every finished gameweek; the homepage shows it and
 `/reviews` keeps the history. OFF when `ANTHROPIC_API_KEY` is unset (a logged no-op, the

@@ -52,6 +52,11 @@ services:
         sync: false
       - key: DISCORD_IL_CHANNEL_ID
         sync: false
+      # Where the bot reads managers' discovery picks FROM — independent of
+      # DISCORD_DISCOVERY_WEBHOOK_URL below (where it posts announcements TO), even
+      # though in practice they're usually the same channel.
+      - key: DISCORD_DISCOVERY_CHANNEL_ID
+        sync: false
       # AI gameweek review. Billable — a leaked key spends real money, so sync: false
       # and dashboard-only, same as the rest. OFF when unset. Deliberately absent from
       # the demo service below: the demo must never bill the real account.

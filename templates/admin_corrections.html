@@ -194,6 +194,16 @@
               {% endif %}
               · from GW{{ d.payload.start_gw }}
             </span>
+          {% elif d.kind == "discovery_pick" %}
+            <strong>Discovery pick</strong><br>
+            <span class="sub">
+              {{ d.resolution.manager.display or "unmapped author" }}
+              {% if d.resolution.manager.method %}
+                <span class="tag">{{ d.resolution.manager.method }}</span>
+              {% endif %}
+              · "{{ d.resolution.typed_text }}"
+              {% if d.payload.pick_number %} · pick {{ d.payload.pick_number }}{% endif %}
+            </span>
           {% else %}
             <strong>Trade</strong><br>
             <span class="sub">
@@ -241,6 +251,24 @@
                 <option value="{{ r.fpl_id }}">{{ r.name }} ({{ r.position }})</option>
               {% endfor %}
             </select>
+            {% elif d.kind == "discovery_pick" %}
+              {% if not d.resolution.manager.display %}
+              {# Unmapped Discord author -- the parser has no manager to filter open
+                 slots by at all, so this has to be picked by hand. #}
+              <select name="owner_fpl" style="max-width:12em">
+                <option value="">— manager? —</option>
+                {% for m in managers %}<option value="{{ m.fpl }}">{{ m.name }}</option>{% endfor %}
+              </select>
+              {% elif d.resolution.open_slots|length > 1 %}
+              {# Rule 5: this manager holds more than one open slot at once, and the
+                 post named neither -- pick which one this fills. #}
+              <select name="pick_number" style="max-width:10em">
+                <option value="">— which pick? —</option>
+                {% for s in d.resolution.open_slots %}
+                  <option value="{{ s.pick }}">pick {{ s.pick }} (R{{ s.round }})</option>
+                {% endfor %}
+              </select>
+              {% endif %}
             {% endif %}
             <button class="mini" type="submit">Apply</button>
           </form>

@@ -41,8 +41,12 @@ Small private league app (≈10 users) on Render + Neon, session-cookie auth.
   Portal, which invalidates the old one immediately. Discord also scans public repos
   for leaked tokens and auto-invalidates. Note it is NOT tied to your user account —
   the bot stays if you leave the server.
-- `DISCORD_TRADE_CHANNEL_ID` / `DISCORD_IL_CHANNEL_ID` — optional. Not secret, but kept
-  in env alongside the token so the whole feature is configured in one place.
+- `DISCORD_TRADE_CHANNEL_ID` / `DISCORD_IL_CHANNEL_ID` / `DISCORD_DISCOVERY_CHANNEL_ID` —
+  optional. Not secret, but kept in env alongside the token so the whole feature is
+  configured in one place. The discovery channel ID is independent of
+  `DISCORD_DISCOVERY_WEBHOOK_URL` above — one is where the bot reads managers' picks
+  from, the other is where it posts announcements to — even though in practice they're
+  usually the same channel.
 
 - `ANTHROPIC_API_KEY` — optional, for the AI gameweek review. A **billable** credential:
   anyone holding it spends your money, so it is the one secret here whose leak costs

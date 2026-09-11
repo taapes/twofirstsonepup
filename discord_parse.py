@@ -370,3 +370,25 @@ def parse_il(text: str) -> dict | None:
     if not (1 <= start <= 38 and 1 <= end <= 38 and start <= end):
         return None
     return {"player": player, "start_gw": start, "end_gw": end}
+
+
+def parse_discovery_pick(text: str) -> str | None:
+    """A discovery-pick post -> the player name as typed, or None if this doesn't
+    even look like one.
+
+    Unlike a trade post or an IL post, real samples here are just a bare player
+    name -- no keyword, no digit pattern, nothing to anchor on. So this stays
+    deliberately minimal (blank or multi-line -> None; a real announcement is
+    one line, never a paragraph) and does almost none of the discriminating
+    work itself. The actual safety property -- not misfiring on ordinary
+    channel chatter -- comes from the caller only ever accepting this for a
+    manager who currently has an open discovery-draft slot (see
+    discord_bridge.ingest_discovery_pick_message / services.
+    manager_discovery_open_slots); a bare-name parser with no such gate would
+    stage nearly every message in the channel.
+    """
+    lines = [x for x in (text or "").splitlines() if x.strip()]
+    if len(lines) != 1:
+        return None
+    name = lines[0].strip(" .,:;!\"'")
+    return name or None

@@ -1539,13 +1539,19 @@ def admin_discord_apply(
     fpl_manager_id: str = Form(""),
     injured_fpl_id: str = Form(""),
     start_gw: str = Form(""),
+    pick_number: str = Form(""),
+    owner_fpl: str = Form(""),
+    player_name: str = Form(""),
 ):
     """Confirm a Discord proposal, with the reviewer's corrections layered on top.
 
     The overrides exist because a proposal is deliberately PARTIAL: an IL announcement
     never names the replacement player `place_on_il` requires, so that field is always
     supplied here rather than parsed. The others let a mis-resolved manager or player
-    be fixed without going back to Discord.
+    be fixed without going back to Discord. `pick_number`/`owner_fpl`/`player_name` are
+    the discovery-pick kind's equivalents — pick_number in particular is the expected
+    gap when a manager has more than one open slot at once (rule 5) and the post named
+    neither.
     """
     if not is_admin(request):
         return RedirectResponse("/admin/login?next=/admin/corrections", status_code=303)
@@ -1561,6 +1567,10 @@ def admin_discord_apply(
             "start_gw": _safe_int(start_gw, 1, SEASON_LAST_GW, field="start gameweek")
             if start_gw.strip() else None,
             "fpl_manager_id": fpl_manager_id.strip() or None,
+            "pick_number": _safe_int(pick_number, 1, 10**6, field="pick")
+            if pick_number.strip() else None,
+            "owner_fpl": owner_fpl.strip() or None,
+            "player_name": player_name.strip() or None,
         }
         services.apply_discord_ingest(db, league, ingest_id, **overrides)
     except RuleViolation as e:
@@ -2516,17 +2526,10 @@ def _discovery_ctx(request: Request, db: Session, league, year: int) -> dict:
     board = services.get_discovery_board(db, league, year)
     # The discovery draft's own per-pick 24h clock (rules.discovery_clock) — NOT
     # next_open_pick, which is shared with the main draft and stays the plain
-    # "first unfilled slot" for it. `clock["pick"]` names a pick NUMBER; look up
-    # its full board row (owner/owner_fpl/round/player) to keep the same shape
-    # every existing consumer of `on_clock` already expects, then attach the
-    # deadline nothing else provides.
-    board_by_pick = {b["pick"]: b for b in board}
-    clock = services.discovery_clock_status(db, league, year)
-    on_clock = None
-    if clock["pick"] is not None and clock["pick"] in board_by_pick:
-        on_clock = dict(board_by_pick[clock["pick"]])
-        on_clock["deadline"] = clock["deadline"]
-    missed_slots = [board_by_pick[n] for n in clock["missed"] if n in board_by_pick]
+    # "first unfilled slot" for it. discovery_open_slots gives the board-state
+    # facts (on-clock slot + deadline, missed slots); admin bypass is applied
+    # here via can_act_as, not inside that shared helper.
+    on_clock, missed_slots = services.discovery_open_slots(db, league, year)
     # Rule 5: a manager can go back and fill a slot the draft has already moved past,
     # any time before the very last pick — so "may I pick right now" is no longer
     # just "am I the current clock holder", it's "do I own ANY still-open slot".
